@@ -1,0 +1,29 @@
+[package]
+name = "ariadne-desktop"
+description = "Tauri desktop host for Ariadne"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ariadne_desktop"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "ariadne-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ariadne-core = { path = "../../../crates/ariadne-core" }
+ariadne-provider-openai = { path = "../../../crates/ariadne-provider-openai" }
+serde.workspace = true
+tauri = { version = "2", features = [] }
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true

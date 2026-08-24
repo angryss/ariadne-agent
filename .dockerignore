@@ -1,0 +1,12 @@
+.git
+.github
+.hermes
+target
+node_modules
+**/dist
+coverage
+.env
+.env.*
+!.env.example
+.DS_Store
+apps/desktop/src-tauri/gen

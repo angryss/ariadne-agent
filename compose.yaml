@@ -1,0 +1,22 @@
+services:
+  ariadne:
+    build:
+      context: .
+    image: ariadne:local
+    restart: unless-stopped
+    ports:
+      - "${ARIADNE_HOST_BIND:-127.0.0.1}:3000:3000"
+    environment:
+      ARIADNE_API_BASE: "${ARIADNE_API_BASE:-http://host.docker.internal:11434/v1}"
+      ARIADNE_MODEL: "${ARIADNE_MODEL:-qwen3:8b}"
+      ARIADNE_API_KEY: "${ARIADNE_API_KEY:-}"
+      ARIADNE_SYSTEM_PROMPT: "${ARIADNE_SYSTEM_PROMPT:-You are Ariadne, a careful and capable AI software agent.}"
+      RUST_LOG: "${RUST_LOG:-warn}"
+    extra_hosts:
+      # Linux host Ollama must listen beyond loopback; see README.md.
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true

@@ -1,0 +1,22 @@
+[package]
+name = "ariadne-server"
+description = "HTTP server adapter for Ariadne"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ariadne-core = { path = "../ariadne-core" }
+axum.workspace = true
+serde.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+tokio.workspace = true
+tower.workspace = true

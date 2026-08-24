@@ -1,0 +1,20 @@
+[package]
+name = "ariadne-provider-openai"
+description = "OpenAI-compatible model provider adapter for Ariadne"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ariadne-core = { path = "../ariadne-core" }
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+wiremock = "0.6"

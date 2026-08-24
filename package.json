@@ -1,0 +1,36 @@
+{
+  "name": "ariadne",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "workspaces": [
+    "apps/web",
+    "apps/desktop",
+    "packages/ui"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @ariadne/web",
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "web:dev": "npm run dev --workspace @ariadne/web",
+    "web:build": "npm run build --workspace @ariadne/web",
+    "desktop:dev": "npm run tauri:dev --workspace @ariadne/desktop",
+    "desktop:build": "npm run tauri:build --workspace @ariadne/desktop"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.1.0",
+    "jsdom": "^30.0.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
