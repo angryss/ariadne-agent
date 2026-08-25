@@ -3,10 +3,11 @@ use std::io::{self, Stdout};
 use anyhow::{Context, Result};
 use ariadne_core::{AgentProfiles, Message};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use futures_util::StreamExt;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -15,6 +16,69 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use tokio::sync::mpsc;
+
+const USER_BACKGROUND: Color = Color::Rgb(52, 52, 52);
+const COMMAND_COLUMN_WIDTH: usize = 18;
+const MAX_COMPOSER_CONTENT_HEIGHT: u16 = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SlashCommand {
+    name: &'static str,
+    description: &'static str,
+    action: CommandAction,
+    aliases: &'static [SlashCommandAlias],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SlashCommandAlias {
+    name: &'static str,
+    description: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SlashCommandMatch {
+    name: &'static str,
+    description: &'static str,
+    action: CommandAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandAction {
+    Clear,
+    Help,
+    Quit,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum InputAction {
+    Prompt(String),
+    Command(CommandAction),
+}
+
+const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/clear",
+        description: "Clear the conversation",
+        action: CommandAction::Clear,
+        aliases: &[],
+    },
+    SlashCommand {
+        name: "/help",
+        description: "Show available commands",
+        action: CommandAction::Help,
+        aliases: &[],
+    },
+    SlashCommand {
+        name: "/quit",
+        description: "Exit Ariadne",
+        action: CommandAction::Quit,
+        aliases: &[SlashCommandAlias {
+            name: "/exit",
+            description: "Alias for /quit",
+        }],
+    },
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MessageKind {
@@ -37,6 +101,7 @@ struct ChatUi {
     model: String,
     busy: bool,
     scroll_from_bottom: u16,
+    selected_command: usize,
 }
 
 impl ChatUi {
@@ -49,6 +114,7 @@ impl ChatUi {
             model: model.into(),
             busy: false,
             scroll_from_bottom: 0,
+            selected_command: 0,
         }
     }
 
@@ -65,6 +131,34 @@ impl ChatUi {
         self.scroll_from_bottom = 0;
     }
 
+    fn command_matches(&self) -> Vec<SlashCommandMatch> {
+        if !self.input.starts_with('/') || self.input.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let mut matches = Vec::new();
+        for command in SLASH_COMMANDS {
+            if command.name.starts_with(&self.input) {
+                matches.push(SlashCommandMatch {
+                    name: command.name,
+                    description: command.description,
+                    action: command.action,
+                });
+            }
+            matches.extend(
+                command
+                    .aliases
+                    .iter()
+                    .filter(|alias| alias.name.starts_with(&self.input))
+                    .map(|alias| SlashCommandMatch {
+                        name: alias.name,
+                        description: alias.description,
+                        action: command.action,
+                    }),
+            );
+        }
+        matches
+    }
+
     fn take_submission(&mut self) -> Option<String> {
         let prompt = self.input.trim().to_owned();
         if prompt.is_empty() {
@@ -74,6 +168,75 @@ impl ChatUi {
         self.cursor = 0;
         self.push_message(MessageKind::User, prompt.clone());
         Some(prompt)
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> Option<InputAction> {
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::ALT) {
+            self.input.insert(self.cursor, '\n');
+            self.cursor += 1;
+            self.selected_command = 0;
+            return None;
+        }
+        let commands = self.command_matches();
+        if !commands.is_empty() {
+            match key.code {
+                KeyCode::Up => {
+                    self.selected_command = self
+                        .selected_command
+                        .checked_sub(1)
+                        .unwrap_or(commands.len() - 1);
+                    return None;
+                }
+                KeyCode::Down => {
+                    self.selected_command = (self.selected_command + 1) % commands.len();
+                    return None;
+                }
+                KeyCode::Tab => {
+                    let selected = commands[self.selected_command.min(commands.len() - 1)];
+                    self.input = selected.name.to_owned();
+                    self.cursor = self.input.len();
+                    self.selected_command = 0;
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        if key.code == KeyCode::Enter {
+            if self.busy {
+                return None;
+            }
+            if !commands.is_empty() {
+                let selected = commands[self.selected_command.min(commands.len() - 1)];
+                self.input.clear();
+                self.cursor = 0;
+                self.selected_command = 0;
+                return Some(InputAction::Command(selected.action));
+            }
+            if self.input.starts_with('/') {
+                let command = self.input.split_whitespace().next().unwrap_or_default();
+                self.push_message(MessageKind::Error, format!("Unknown command: {command}"));
+                self.input.clear();
+                self.cursor = 0;
+                return None;
+            }
+            return self.take_submission().map(InputAction::Prompt);
+        }
+        self.handle_edit_key(key);
+        self.selected_command = 0;
+        None
+    }
+
+    fn start_assistant_response(&mut self) {
+        self.push_message(MessageKind::Assistant, String::new());
+    }
+
+    fn append_assistant_delta(&mut self, delta: &str) {
+        if let Some(message) = self.messages.last_mut()
+            && message.kind == MessageKind::Assistant
+        {
+            message.content.push_str(delta);
+            self.scroll_from_bottom = 0;
+        }
     }
 
     fn handle_edit_key(&mut self, key: KeyEvent) {
@@ -126,27 +289,167 @@ impl ChatUi {
 
 struct ChatLayout {
     transcript: Rect,
+    suggestions: Option<Rect>,
     composer: Rect,
     status: Rect,
 }
 
-fn chat_layout(area: Rect) -> ChatLayout {
+fn chat_layout(area: Rect, composer_height: u16) -> ChatLayout {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(4),
+            Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
         .split(area);
     ChatLayout {
         transcript: chunks[0],
+        suggestions: None,
         composer: chunks[1],
         status: chunks[2],
     }
 }
 
-fn transcript_text(ui: &ChatUi) -> Text<'static> {
+fn chat_layout_with_suggestions(
+    area: Rect,
+    suggestion_count: usize,
+    composer_height: u16,
+) -> ChatLayout {
+    if suggestion_count == 0 {
+        return chat_layout(area, composer_height);
+    }
+    let suggestion_height = u16::try_from(suggestion_count).unwrap_or(u16::MAX);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(suggestion_height),
+            Constraint::Length(composer_height),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    ChatLayout {
+        transcript: chunks[0],
+        suggestions: Some(chunks[1]),
+        composer: chunks[2],
+        status: chunks[3],
+    }
+}
+
+fn composer_text(input: &str) -> Text<'_> {
+    let mut input_lines = input.split('\n');
+    let first = input_lines.next().unwrap_or_default();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "› ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(first),
+    ])];
+    lines.extend(input_lines.map(|line| Line::from(vec![Span::raw("  "), Span::raw(line)])));
+    Text::from(lines)
+}
+
+fn composer_line_count(input: &str, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let line_count = u16::try_from(
+        Paragraph::new(composer_text(input))
+            .wrap(Wrap { trim: false })
+            .line_count(width),
+    )
+    .unwrap_or(u16::MAX);
+    line_count.saturating_sub(u16::from(input.ends_with('\n')))
+}
+
+fn composer_height(ui: &ChatUi, width: u16) -> u16 {
+    composer_line_count(&ui.input, width)
+        .clamp(1, MAX_COMPOSER_CONTENT_HEIGHT)
+        .saturating_add(2)
+}
+
+fn composer_cursor(ui: &ChatUi, width: u16) -> (u16, u16) {
+    if width == 0 {
+        return (0, 0);
+    }
+    let before_cursor = &ui.input[..ui.cursor];
+    let row = composer_line_count(before_cursor, width).saturating_sub(1);
+    let current_line = before_cursor
+        .rsplit_once('\n')
+        .map_or(before_cursor, |(_, line)| line);
+    let column =
+        u16::try_from(Line::from(format!("  {current_line}")).width()).unwrap_or(u16::MAX) % width;
+    (row, column)
+}
+
+fn command_suggestions(commands: &[SlashCommandMatch], selected_command: usize) -> Text<'static> {
+    Text::from(
+        commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                let command_style = if index == selected_command {
+                    Style::default()
+                        .fg(Color::LightMagenta)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {:<COMMAND_COLUMN_WIDTH$}", command.name),
+                        command_style,
+                    ),
+                    Span::styled(command.description, Style::default().fg(Color::DarkGray)),
+                ])
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn apply_command(ui: &mut ChatUi, history: &mut Vec<Message>, command: CommandAction) -> bool {
+    match command {
+        CommandAction::Clear => {
+            ui.messages.clear();
+            ui.scroll_from_bottom = 0;
+            history.clear();
+            false
+        }
+        CommandAction::Help => {
+            let mut help = Vec::new();
+            for command in SLASH_COMMANDS {
+                help.push(format!("{} — {}", command.name, command.description));
+                help.extend(
+                    command
+                        .aliases
+                        .iter()
+                        .map(|alias| format!("{} — {}", alias.name, alias.description)),
+                );
+            }
+            let help = help.join("\n");
+            ui.push_message(MessageKind::Assistant, help);
+            false
+        }
+        CommandAction::Quit => true,
+    }
+}
+
+fn highlighted_user_line(mut line: Line<'static>, width: u16) -> Line<'static> {
+    let width = usize::from(width);
+    if width > 0 {
+        let remainder = line.width() % width;
+        if remainder > 0 {
+            line.push_span(Span::raw(" ".repeat(width - remainder)));
+        }
+    }
+    line.style(Style::default().fg(Color::White).bg(USER_BACKGROUND))
+}
+
+fn transcript_text(ui: &ChatUi, width: u16) -> Text<'static> {
     let mut lines = vec![Line::styled(
         "Ariadne",
         Style::default()
@@ -162,38 +465,56 @@ fn transcript_text(ui: &ChatUi) -> Text<'static> {
     }
     for message in &ui.messages {
         lines.push(Line::from(""));
-        let (label, style) = match message.kind {
-            MessageKind::User => (
-                "❯ You",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            MessageKind::Assistant => (
-                "● Ariadne",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            MessageKind::Error => (
-                "! Error",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-        };
-        lines.push(Line::styled(label, style));
-        lines.extend(
-            message
-                .content
-                .lines()
-                .map(|line| Line::from(line.to_owned())),
-        );
+        let mut content = message.content.split('\n');
+        let first = content.next().unwrap_or_default().to_owned();
+        match message.kind {
+            MessageKind::User => {
+                lines.push(highlighted_user_line(
+                    Line::from(vec![
+                        Span::styled("› ", Style::default().fg(Color::Gray)),
+                        Span::raw(first),
+                    ]),
+                    width,
+                ));
+                lines.extend(
+                    content
+                        .map(|line| highlighted_user_line(Line::from(format!("  {line}")), width)),
+                );
+            }
+            MessageKind::Assistant => {
+                lines.push(Line::from(vec![
+                    Span::styled("● ", Style::default().fg(Color::Cyan)),
+                    Span::styled(first, Style::default().fg(Color::White)),
+                ]));
+                lines.extend(content.map(|line| {
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(line.to_owned(), Style::default().fg(Color::White)),
+                    ])
+                }));
+            }
+            MessageKind::Error => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "! ",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(first, Style::default().fg(Color::Red)),
+                ]));
+                lines.extend(content.map(|line| {
+                    Line::styled(format!("  {line}"), Style::default().fg(Color::Red))
+                }));
+            }
+        }
     }
     Text::from(lines)
 }
 
 fn render(frame: &mut Frame<'_>, ui: &ChatUi) {
-    let layout = chat_layout(frame.area());
-    let text = transcript_text(ui);
+    let commands = ui.command_matches();
+    let composer_height = composer_height(ui, frame.area().width);
+    let layout = chat_layout_with_suggestions(frame.area(), commands.len(), composer_height);
+    let text = transcript_text(ui, layout.transcript.width);
     let transcript = Paragraph::new(text)
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(Color::White));
@@ -202,23 +523,33 @@ fn render(frame: &mut Frame<'_>, ui: &ChatUi) {
     let scroll = maximum_scroll.saturating_sub(ui.scroll_from_bottom);
     frame.render_widget(transcript.scroll((scroll, 0)), layout.transcript);
 
-    let composer = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "› ",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(&ui.input),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
+    if let Some(area) = layout.suggestions {
+        let selected_command = ui.selected_command.min(commands.len().saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new(command_suggestions(&commands, selected_command)),
+            area,
+        );
+    }
+
+    let visible_composer_rows = layout.composer.height.saturating_sub(2).max(1);
+    let (cursor_row, cursor_column) = composer_cursor(ui, layout.composer.width);
+    let composer_scroll = cursor_row.saturating_sub(visible_composer_rows.saturating_sub(1));
+    let composer = Paragraph::new(composer_text(&ui.input))
+        .wrap(Wrap { trim: false })
+        .scroll((composer_scroll, 0))
+        .block(
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
     frame.render_widget(composer, layout.composer);
 
     let state = if ui.busy { "Thinking…" } else { "Ready" };
+    let controls = if commands.is_empty() {
+        "  Enter send · Alt-Enter newline · PgUp/PgDn scroll · Ctrl-C exit"
+    } else {
+        "  ↑/↓ select · Tab complete · Enter run · Ctrl-C exit"
+    };
     let status = Line::from(vec![
         Span::styled(
             format!(" {state} "),
@@ -228,23 +559,32 @@ fn render(frame: &mut Frame<'_>, ui: &ChatUi) {
             format!("{} · {}", ui.profile, ui.model),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(
-            "  Enter send · PgUp/PgDn scroll · Ctrl-C exit",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(controls, Style::default().fg(Color::DarkGray)),
     ]);
     frame.render_widget(Paragraph::new(status), layout.status);
 
-    if !ui.busy && layout.composer.width > 4 {
-        let cursor_column = ui.input[..ui.cursor].chars().count() as u16;
+    if layout.composer.width > 4 {
         let x = layout
             .composer
             .x
-            .saturating_add(2)
             .saturating_add(cursor_column)
-            .min(layout.composer.right().saturating_sub(2));
-        frame.set_cursor_position((x, layout.composer.y.saturating_add(1)));
+            .min(layout.composer.right().saturating_sub(1));
+        let y = layout
+            .composer
+            .y
+            .saturating_add(1)
+            .saturating_add(cursor_row.saturating_sub(composer_scroll))
+            .min(layout.composer.bottom().saturating_sub(2));
+        frame.set_cursor_position((x, y));
     }
+}
+
+enum ResponseEvent {
+    Delta(String),
+    Finished {
+        prompt: String,
+        result: Result<Message, String>,
+    },
 }
 
 struct TerminalSession {
@@ -283,54 +623,96 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
     let mut session = TerminalSession::enter()?;
     let mut ui = ChatUi::new(profile, model);
     let mut history = Vec::<Message>::new();
+    let mut events = EventStream::new();
+    let (response_tx, mut response_rx) = mpsc::unbounded_channel::<ResponseEvent>();
 
     loop {
         session
             .terminal
             .draw(|frame| render(frame, &ui))
             .context("failed to draw terminal UI")?;
-        let Event::Key(key) = event::read().context("failed to read terminal input")? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            break;
-        }
-        match key.code {
-            KeyCode::PageUp => ui.scroll_from_bottom = ui.scroll_from_bottom.saturating_add(5),
-            KeyCode::PageDown => ui.scroll_from_bottom = ui.scroll_from_bottom.saturating_sub(5),
-            KeyCode::Enter => {
-                let Some(prompt) = ui.take_submission() else {
+        tokio::select! {
+            maybe_event = events.next() => {
+                let event = maybe_event
+                    .context("terminal event stream ended unexpectedly")?
+                    .context("failed to read terminal input")?;
+                let Event::Key(key) = event else {
                     continue;
                 };
-                if matches!(prompt.as_str(), ":quit" | ":exit") {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
                     break;
                 }
-                ui.busy = true;
-                session
-                    .terminal
-                    .draw(|frame| render(frame, &ui))
-                    .context("failed to draw terminal UI")?;
-                match profiles.respond(Some(profile), &history, &prompt).await {
-                    Ok(message) => {
-                        ui.push_message(
-                            MessageKind::Assistant,
-                            super::sanitize_terminal_text(&message.content),
-                        );
-                        history.push(Message::user(prompt));
-                        history.push(message);
+                match key.code {
+                    KeyCode::PageUp => {
+                        ui.scroll_from_bottom = ui.scroll_from_bottom.saturating_add(5);
                     }
-                    Err(error) => ui.push_message(
-                        MessageKind::Error,
-                        super::sanitize_terminal_text(&error.to_string()),
-                    ),
+                    KeyCode::PageDown => {
+                        ui.scroll_from_bottom = ui.scroll_from_bottom.saturating_sub(5);
+                    }
+                    _ => {
+                        let Some(action) = ui.handle_key(key) else {
+                            continue;
+                        };
+                        let prompt = match action {
+                            InputAction::Command(command) => {
+                                if apply_command(&mut ui, &mut history, command) {
+                                    break;
+                                }
+                                continue;
+                            }
+                            InputAction::Prompt(prompt) => prompt,
+                        };
+
+                        ui.busy = true;
+                        ui.start_assistant_response();
+                        let profiles = profiles.clone();
+                        let profile = profile.to_owned();
+                        let request_history = history.clone();
+                        let sender = response_tx.clone();
+                        tokio::spawn(async move {
+                            let result = {
+                                let delta_sender = sender.clone();
+                                let mut on_delta = move |delta: &str| {
+                                    let delta = super::sanitize_terminal_text(delta);
+                                    let _ = delta_sender.send(ResponseEvent::Delta(delta));
+                                };
+                                profiles
+                                    .respond_stream(
+                                        Some(&profile),
+                                        &request_history,
+                                        &prompt,
+                                        &mut on_delta,
+                                    )
+                                    .await
+                                    .map_err(|error| {
+                                        super::sanitize_terminal_text(&error.to_string())
+                                    })
+                            };
+                            let _ = sender.send(ResponseEvent::Finished { prompt, result });
+                        });
+                    }
                 }
-                ui.busy = false;
             }
-            _ if !ui.busy => ui.handle_edit_key(key),
-            _ => {}
+            Some(response) = response_rx.recv() => {
+                match response {
+                    ResponseEvent::Delta(delta) => ui.append_assistant_delta(&delta),
+                    ResponseEvent::Finished { prompt, result } => {
+                        ui.busy = false;
+                        match result {
+                            Ok(message) => {
+                                history.push(Message::user(prompt));
+                                history.push(message);
+                            }
+                            Err(error) => ui.push_message(MessageKind::Error, error),
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -340,19 +722,102 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
 
-    use super::{ChatUi, MessageKind, chat_layout, render};
+    use super::{
+        ChatUi, CommandAction, InputAction, MAX_COMPOSER_CONTENT_HEIGHT, Message, MessageKind,
+        apply_command, chat_layout, composer_cursor, composer_height, render,
+    };
 
     #[test]
     fn layout_keeps_the_composer_and_status_at_the_bottom() {
         let area = Rect::new(0, 0, 100, 30);
 
-        let layout = chat_layout(area);
+        let layout = chat_layout(area, 3);
 
-        assert_eq!(layout.transcript, Rect::new(0, 0, 100, 25));
-        assert_eq!(layout.composer, Rect::new(0, 25, 100, 4));
+        assert_eq!(layout.transcript, Rect::new(0, 0, 100, 26));
+        assert_eq!(layout.composer, Rect::new(0, 26, 100, 3));
         assert_eq!(layout.status, Rect::new(0, 29, 100, 1));
+    }
+
+    #[test]
+    fn alt_enter_inserts_a_newline_at_the_cursor_without_submitting() {
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.input = "firstsecond".to_owned();
+        ui.cursor = 5;
+
+        let action = ui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+
+        assert_eq!(action, None);
+        assert_eq!(ui.input, "first\nsecond");
+        assert_eq!(ui.cursor, 6);
+        assert!(ui.messages().is_empty());
+    }
+
+    #[test]
+    fn trailing_newline_places_the_cursor_on_the_immediate_next_row() {
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.input = "first\nsecond\n".to_owned();
+        ui.cursor = ui.input.len();
+
+        assert_eq!(composer_cursor(&ui, 40), (2, 2));
+        assert_eq!(composer_height(&ui, 40), 5);
+    }
+
+    #[test]
+    fn composer_grows_with_input_until_its_content_height_limit() {
+        let mut ui = ChatUi::new("local", "test-model");
+        let width = 40;
+
+        ui.input = "one\ntwo\nthree".to_owned();
+        assert_eq!(composer_height(&ui, width), 5);
+
+        ui.input = (0..MAX_COMPOSER_CONTENT_HEIGHT + 3)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(composer_height(&ui, width), MAX_COMPOSER_CONTENT_HEIGHT + 2);
+    }
+
+    #[test]
+    fn composer_scrolls_to_keep_the_cursor_visible_after_reaching_its_limit() {
+        let backend = TestBackend::new(40, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.input = (0..MAX_COMPOSER_CONTENT_HEIGHT + 2)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ui.cursor = ui.input.len();
+
+        terminal.draw(|frame| render(frame, &ui)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(!screen.contains("line 0"), "{screen}");
+        assert!(!screen.contains("line 1"), "{screen}");
+        assert!(
+            screen.contains(&format!("line {}", MAX_COMPOSER_CONTENT_HEIGHT + 1)),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn render_distinguishes_user_and_assistant_rows_with_backgrounds() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.push_message(MessageKind::User, "Question");
+        ui.push_message(MessageKind::Assistant, "Answer");
+
+        terminal.draw(|frame| render(frame, &ui)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "›");
+        assert_eq!(buffer.cell((0, 2)).unwrap().bg, Color::Rgb(52, 52, 52));
+        assert_eq!(buffer.cell((39, 2)).unwrap().bg, Color::Rgb(52, 52, 52));
+        assert_eq!(buffer.cell((0, 4)).unwrap().symbol(), "●");
+        assert_eq!(buffer.cell((0, 4)).unwrap().bg, Color::Reset);
+        assert_eq!(buffer.cell((39, 4)).unwrap().bg, Color::Reset);
     }
 
     #[test]
@@ -373,6 +838,127 @@ mod tests {
         assert!(screen.contains("› next prompt"), "{screen}");
         assert!(screen.contains("local · test-model"), "{screen}");
         assert!(!screen.contains("old response 0"), "{screen}");
+    }
+
+    #[test]
+    fn typing_a_slash_shows_commands_with_descriptions() {
+        let backend = TestBackend::new(72, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.handle_edit_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+
+        terminal.draw(|frame| render(frame, &ui)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("/clear"), "{screen}");
+        assert!(screen.contains("Clear the conversation"), "{screen}");
+        assert!(screen.contains("/help"), "{screen}");
+        assert!(screen.contains("Show available commands"), "{screen}");
+        assert!(screen.contains("/quit"), "{screen}");
+        assert!(screen.contains("Exit Ariadne"), "{screen}");
+        assert!(screen.contains("/exit"), "{screen}");
+        assert!(screen.contains("Alias for /quit"), "{screen}");
+    }
+
+    #[test]
+    fn slash_commands_filter_as_the_user_types() {
+        let backend = TestBackend::new(72, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut ui = ChatUi::new("local", "test-model");
+        for character in "/q".chars() {
+            ui.handle_edit_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        terminal.draw(|frame| render(frame, &ui)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("/quit"), "{screen}");
+        assert!(!screen.contains("/clear"), "{screen}");
+        assert!(!screen.contains("/help"), "{screen}");
+    }
+
+    #[test]
+    fn arrows_select_a_command_and_tab_completes_it() {
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+
+        ui.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        ui.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(ui.input, "/help");
+        assert_eq!(ui.cursor, ui.input.len());
+    }
+
+    #[test]
+    fn enter_runs_the_selected_command_instead_of_sending_a_prompt() {
+        let mut ui = ChatUi::new("local", "test-model");
+        for character in "/h".chars() {
+            ui.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        let action = ui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(action, Some(InputAction::Command(CommandAction::Help)));
+        assert!(ui.input.is_empty());
+        assert!(ui.messages().is_empty());
+    }
+
+    #[test]
+    fn exit_alias_executes_the_quit_command() {
+        let mut ui = ChatUi::new("local", "test-model");
+        for character in "/exit".chars() {
+            ui.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        let action = ui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(action, Some(InputAction::Command(CommandAction::Quit)));
+        assert!(ui.input.is_empty());
+        assert!(ui.messages().is_empty());
+    }
+
+    #[test]
+    fn clear_command_resets_displayed_and_model_history() {
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.push_message(MessageKind::User, "old question");
+        let mut history = vec![Message::user("old question")];
+
+        let should_quit = apply_command(&mut ui, &mut history, CommandAction::Clear);
+
+        assert!(!should_quit);
+        assert!(ui.messages().is_empty());
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn help_command_displays_command_descriptions() {
+        let mut ui = ChatUi::new("local", "test-model");
+        let mut history = Vec::new();
+
+        let should_quit = apply_command(&mut ui, &mut history, CommandAction::Help);
+
+        assert!(!should_quit);
+        let help = &ui.messages().last().unwrap().content;
+        assert!(help.contains("/clear — Clear the conversation"), "{help}");
+        assert!(help.contains("/help — Show available commands"), "{help}");
+        assert!(help.contains("/quit — Exit Ariadne"), "{help}");
+        assert!(help.contains("/exit — Alias for /quit"), "{help}");
+    }
+
+    #[test]
+    fn unknown_slash_command_is_not_submitted_to_the_model() {
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.input = "/missing".to_owned();
+        ui.cursor = ui.input.len();
+
+        let action = ui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(action, None);
+        assert_eq!(ui.messages().last().unwrap().kind, MessageKind::Error);
+        assert_eq!(
+            ui.messages().last().unwrap().content,
+            "Unknown command: /missing"
+        );
     }
 
     #[test]
@@ -402,5 +988,44 @@ mod tests {
         assert_eq!(ui.cursor, 0);
         assert_eq!(ui.messages().last().unwrap().content, "Explain this code");
         assert_eq!(ui.messages().last().unwrap().kind, MessageKind::User);
+    }
+
+    #[test]
+    fn editor_accepts_input_while_a_response_is_in_flight() {
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.busy = true;
+
+        let submission = ui.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert_eq!(submission, None);
+        assert_eq!(ui.input, "n");
+        assert_eq!(ui.cursor, 1);
+    }
+
+    #[test]
+    fn enter_does_not_submit_the_next_prompt_while_busy() {
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.busy = true;
+        ui.input = "queue this next".to_owned();
+        ui.cursor = ui.input.len();
+
+        let submission = ui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(submission, None);
+        assert_eq!(ui.input, "queue this next");
+        assert_eq!(ui.messages().len(), 0);
+    }
+
+    #[test]
+    fn assistant_response_is_rendered_incrementally() {
+        let mut ui = ChatUi::new("local", "test-model");
+
+        ui.start_assistant_response();
+        ui.append_assistant_delta("Hello");
+        ui.append_assistant_delta(" world");
+
+        assert_eq!(ui.messages().len(), 1);
+        assert_eq!(ui.messages()[0].kind, MessageKind::Assistant);
+        assert_eq!(ui.messages()[0].content, "Hello world");
     }
 }

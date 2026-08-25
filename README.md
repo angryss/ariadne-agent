@@ -55,6 +55,8 @@ In another terminal, start an interactive session:
 cargo run -p ariadne-cli -- chat
 ```
 
+In the interactive terminal, type `/` to open command typeahead. Use the arrow keys to select a command, Tab to complete it, and Enter to run it. Available commands are `/clear`, `/help`, and `/quit`; `/exit` is an alias for `/quit`.
+
 Run one unattended request:
 
 ```bash
@@ -114,7 +116,7 @@ The desktop frontend uses narrow Tauri commands instead of opening the HTTP serv
 
 Copy `.env.example` as a reference, but load secrets through your shell, service manager, or secret store. Ariadne does not automatically read `.env` files. CLI flags and the legacy provider environment variables override only the selected default profile, in this order: explicit flag/environment override, selected profile, built-in local Ollama default.
 
-When `ARIADNE_API_KEY` is set, Ariadne requires HTTPS except for loopback development endpoints (`localhost`, `127.0.0.1`, and `::1`). Unsupported URL schemes and provider URLs containing embedded credentials are rejected. Non-streaming provider responses are capped at 1 MiB and read incrementally.
+When `ARIADNE_API_KEY` is set, Ariadne requires HTTPS except for loopback development endpoints (`localhost`, `127.0.0.1`, and `::1`). Unsupported URL schemes and provider URLs containing embedded credentials are rejected. Interactive terminal responses use OpenAI-compatible SSE streaming so output appears incrementally while the composer remains editable. Provider response bodies are capped at 1 MiB.
 
 ### Profile catalog
 

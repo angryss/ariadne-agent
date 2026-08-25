@@ -22,12 +22,12 @@ async fn chat_removes_terminal_control_characters() {
     let mut command = Command::cargo_bin("ariadne").unwrap();
     command
         .arg("chat")
-        .write_stdin("Hello\n:quit\n")
+        .write_stdin("Hello\n/quit\n")
         .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
         .env("ARIADNE_MODEL", "test-model");
 
     command.assert().success().stdout(predicate::eq(
-        "Ariadne interactive mode. Type :quit to exit.\nyou> ariadne> safe[2J]0;owned31m\nyou> ",
+        "Ariadne interactive mode. Type /quit to exit.\nyou> ariadne> safe[2J]0;owned31m\nyou> ",
     ));
 }
 
@@ -74,7 +74,7 @@ async fn chat_keeps_history_until_the_user_quits() {
     let mut command = Command::cargo_bin("ariadne").unwrap();
     command
         .arg("chat")
-        .write_stdin("Hello\nNext\n:quit\n")
+        .write_stdin("Hello\nNext\n/quit\n")
         .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
         .env("ARIADNE_MODEL", "test-model")
         .env("ARIADNE_SYSTEM_PROMPT", "You are Ariadne.");
@@ -84,4 +84,19 @@ async fn chat_keeps_history_until_the_user_quits() {
             .and(predicate::str::contains("Ready."))
             .and(predicate::str::contains("Done.")),
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_alias_quits_without_contacting_the_provider() {
+    let server = MockServer::start().await;
+    let mut command = Command::cargo_bin("ariadne").unwrap();
+    command
+        .arg("chat")
+        .write_stdin("/exit\n")
+        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
+        .env("ARIADNE_MODEL", "test-model");
+
+    command.assert().success().stdout(predicate::eq(
+        "Ariadne interactive mode. Type /quit to exit.\nyou> ",
+    ));
 }

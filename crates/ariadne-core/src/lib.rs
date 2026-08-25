@@ -75,6 +75,16 @@ impl ProviderError {
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError>;
+
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+    ) -> Result<Completion, ProviderError> {
+        let completion = self.complete(request).await?;
+        on_delta(&completion.message.content);
+        Ok(completion)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -104,6 +114,27 @@ impl Agent {
     }
 
     pub async fn respond(&self, history: &[Message], input: &str) -> Result<Message, AgentError> {
+        let mut ignore_delta = |_: &str| {};
+        self.respond_with(history, input, false, &mut ignore_delta)
+            .await
+    }
+
+    pub async fn respond_stream(
+        &self,
+        history: &[Message],
+        input: &str,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+    ) -> Result<Message, AgentError> {
+        self.respond_with(history, input, true, on_delta).await
+    }
+
+    async fn respond_with(
+        &self,
+        history: &[Message],
+        input: &str,
+        stream: bool,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+    ) -> Result<Message, AgentError> {
         if input.trim().is_empty() {
             return Err(AgentError::BlankInput);
         }
@@ -116,10 +147,12 @@ impl Agent {
         messages.extend_from_slice(history);
         messages.push(Message::user(input));
 
-        let completion = self
-            .provider
-            .complete(CompletionRequest { messages })
-            .await?;
+        let request = CompletionRequest { messages };
+        let completion = if stream {
+            self.provider.complete_stream(request, on_delta).await?
+        } else {
+            self.provider.complete(request).await?
+        };
         if completion.message.role != Role::Assistant {
             return Err(AgentError::InvalidProviderResponse);
         }
@@ -211,5 +244,20 @@ impl AgentProfiles {
             .get(profile)
             .ok_or_else(|| ProfileAgentError::UnknownProfile(profile.to_owned()))?;
         Ok(agent.respond(history, input).await?)
+    }
+
+    pub async fn respond_stream(
+        &self,
+        profile: Option<&str>,
+        history: &[Message],
+        input: &str,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+    ) -> Result<Message, ProfileAgentError> {
+        let profile = profile.unwrap_or(self.default_profile.as_ref());
+        let (_, agent) = self
+            .profiles
+            .get(profile)
+            .ok_or_else(|| ProfileAgentError::UnknownProfile(profile.to_owned()))?;
+        Ok(agent.respond_stream(history, input, on_delta).await?)
     }
 }

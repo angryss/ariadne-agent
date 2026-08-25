@@ -101,6 +101,47 @@ async fn complete_calls_the_openai_compatible_chat_endpoint() {
 }
 
 #[tokio::test]
+async fn complete_stream_requests_sse_and_emits_content_deltas() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+                    "data: [DONE]\n\n"
+                )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        OpenAiCompatibleProvider::new(format!("{}/v1", server.uri()), "test-model", None).unwrap();
+    let mut deltas = Vec::new();
+    let mut on_delta = |delta: &str| deltas.push(delta.to_owned());
+
+    let completion = provider
+        .complete_stream(
+            CompletionRequest {
+                messages: vec![Message::user("Hello")],
+            },
+            &mut on_delta,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(deltas, ["Hello", " world"]);
+    assert_eq!(completion.message, Message::assistant("Hello world"));
+}
+
+#[tokio::test]
 async fn oversized_success_response_is_rejected() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

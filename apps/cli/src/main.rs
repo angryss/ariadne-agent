@@ -261,7 +261,7 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
     let mut history = Vec::new();
     let mut line = String::new();
 
-    println!("Ariadne interactive mode. Type :quit to exit.");
+    println!("Ariadne interactive mode. Type /quit to exit.");
     loop {
         print!("you> ");
         io::stdout().flush().context("failed to flush stdout")?;
@@ -271,7 +271,7 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
         }
 
         let prompt = line.trim_end();
-        if prompt == ":quit" || prompt == ":exit" {
+        if matches!(prompt, "/quit" | "/exit") {
             break;
         }
         if prompt.trim().is_empty() {
