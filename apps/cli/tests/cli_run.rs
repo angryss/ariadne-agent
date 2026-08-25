@@ -189,3 +189,136 @@ async fn run_keeps_diagnostics_off_json_stdout() {
         "{\"message\":{\"role\":\"assistant\",\"content\":\"Machine readable.\"}}\n",
     ));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_uses_the_selected_profiles_provider_model_and_system_prompt() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(json!({
+            "model": "work-model",
+            "messages": [
+                {"role": "system", "content": "Work profile policy"},
+                {"role": "user", "content": "Use my profile"}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "Profile selected."}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+version = 1
+default_profile = "local"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[providers.work]
+kind = "openai-compatible"
+api_base = "{server}/v1"
+
+[profiles.local]
+provider = "local"
+model = "local-model"
+
+[profiles.work]
+provider = "work"
+model = "work-model"
+system_prompt = "Work profile policy"
+active_skills = ["rust"]
+mcp_servers = ["filesystem"]
+
+[mcp_servers.filesystem]
+transport = "stdio"
+command = "mcp-filesystem"
+"#,
+            server = server.uri()
+        ),
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("ariadne").unwrap();
+    command.args([
+        "--config",
+        config.to_str().unwrap(),
+        "--profile",
+        "work",
+        "run",
+        "--prompt",
+        "Use my profile",
+    ]);
+
+    command
+        .assert()
+        .success()
+        .stdout(predicate::eq("Profile selected.\n"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_does_not_require_credentials_for_an_inactive_profile() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "Local profile."}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+version = 1
+default_profile = "local"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "{server}/v1"
+
+[providers.remote]
+kind = "openai-compatible"
+api_base = "https://example.com/v1"
+api_key_env = "ARIADNE_TEST_MISSING_REMOTE_KEY"
+
+[profiles.local]
+provider = "local"
+model = "local-model"
+
+[profiles.remote]
+provider = "remote"
+model = "remote-model"
+"#,
+            server = server.uri()
+        ),
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("ariadne").unwrap();
+    command.args([
+        "--config",
+        config.to_str().unwrap(),
+        "run",
+        "--prompt",
+        "Stay local",
+    ]);
+
+    command
+        .assert()
+        .success()
+        .stdout(predicate::eq("Local profile.\n"));
+}

@@ -36,6 +36,9 @@ impl OpenAiCompatibleProvider {
         let completion_url = Url::parse(&endpoint)
             .map_err(|error| ProviderConfigError::InvalidBaseUrl(error.to_string()))?;
         let api_key = api_key.filter(|key| !key.trim().is_empty());
+        if !completion_url.username().is_empty() || completion_url.password().is_some() {
+            return Err(ProviderConfigError::EmbeddedCredentials);
+        }
         if !matches!(completion_url.scheme(), "http" | "https") {
             return Err(ProviderConfigError::UnsupportedScheme);
         }
@@ -63,6 +66,8 @@ impl OpenAiCompatibleProvider {
 pub enum ProviderConfigError {
     #[error("provider base URL is invalid: {0}")]
     InvalidBaseUrl(String),
+    #[error("provider base URL must not contain embedded credentials")]
+    EmbeddedCredentials,
     #[error("provider base URL must use HTTP or HTTPS")]
     UnsupportedScheme,
     #[error("provider credentials require HTTPS except for loopback HTTP endpoints")]

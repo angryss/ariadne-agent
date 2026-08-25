@@ -30,6 +30,20 @@ fn unsupported_url_schemes_are_rejected() {
 }
 
 #[test]
+fn provider_urls_with_embedded_credentials_are_rejected() {
+    let error = OpenAiCompatibleProvider::new(
+        "http://user:password@api.example.com/v1",
+        "test-model",
+        None,
+    )
+    .err()
+    .expect("URL-embedded credentials must be rejected");
+
+    assert!(error.to_string().contains("embedded credentials"));
+    assert!(!error.to_string().contains("password"));
+}
+
+#[test]
 fn loopback_http_endpoints_accept_api_keys() {
     for base_url in [
         "http://localhost:11434/v1",

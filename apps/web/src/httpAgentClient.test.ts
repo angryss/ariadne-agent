@@ -41,4 +41,34 @@ describe('HttpAgentClient', () => {
       'Ariadne API returned 502',
     );
   });
+
+  it('loads profile metadata from the profiles endpoint', async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          default_profile: 'local',
+          profiles: [
+            {
+              name: 'local',
+              provider: 'ollama',
+              model: 'qwen3:8b',
+              active_skills: ['rust'],
+              mcp_servers: [],
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const client = new HttpAgentClient('/v1/respond', fetcher);
+
+    const profiles = await client.listProfiles();
+
+    expect(fetcher).toHaveBeenCalledWith('/v1/profiles', {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+    });
+    expect(profiles.default_profile).toBe('local');
+    expect(profiles.profiles[0]!.active_skills).toEqual(['rust']);
+  });
 });

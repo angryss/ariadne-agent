@@ -10,6 +10,9 @@ fn help_describes_interactive_run_and_server_modes() {
         predicate::str::contains("A local-first AI agent")
             .and(predicate::str::contains("chat"))
             .and(predicate::str::contains("run"))
-            .and(predicate::str::contains("serve")),
+            .and(predicate::str::contains("serve"))
+            .and(predicate::str::contains("profiles"))
+            .and(predicate::str::contains("--profile"))
+            .and(predicate::str::contains("--config")),
     );
 }

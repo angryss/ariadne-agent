@@ -19,6 +19,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+ariadne-config = { path = "../../../crates/ariadne-config" }
 ariadne-core = { path = "../../../crates/ariadne-core" }
 ariadne-provider-openai = { path = "../../../crates/ariadne-provider-openai" }
 serde.workspace = true

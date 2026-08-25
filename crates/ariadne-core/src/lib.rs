@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -123,5 +124,92 @@ impl Agent {
             return Err(AgentError::InvalidProviderResponse);
         }
         Ok(completion.message)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Profile {
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub active_skills: Vec<String>,
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum ProfileError {
+    #[error("profile name must not be blank")]
+    BlankName,
+    #[error("profile `{0}` is defined more than once")]
+    Duplicate(String),
+    #[error("default profile `{0}` is not defined")]
+    UnknownDefault(String),
+}
+
+#[derive(Debug, Error)]
+pub enum ProfileAgentError {
+    #[error("profile `{0}` is not defined")]
+    UnknownProfile(String),
+    #[error(transparent)]
+    Agent(#[from] AgentError),
+}
+
+#[derive(Clone)]
+pub struct AgentProfiles {
+    default_profile: Arc<str>,
+    profiles: Arc<BTreeMap<String, (Profile, Agent)>>,
+}
+
+impl AgentProfiles {
+    pub fn new(
+        default_profile: impl Into<String>,
+        profiles: impl IntoIterator<Item = (Profile, Agent)>,
+    ) -> Result<Self, ProfileError> {
+        let default_profile = default_profile.into();
+        let mut indexed = BTreeMap::new();
+        for (profile, agent) in profiles {
+            if profile.name.trim().is_empty() {
+                return Err(ProfileError::BlankName);
+            }
+            let name = profile.name.clone();
+            if indexed.insert(name.clone(), (profile, agent)).is_some() {
+                return Err(ProfileError::Duplicate(name));
+            }
+        }
+        if !indexed.contains_key(&default_profile) {
+            return Err(ProfileError::UnknownDefault(default_profile));
+        }
+
+        Ok(Self {
+            default_profile: default_profile.into(),
+            profiles: Arc::new(indexed),
+        })
+    }
+
+    pub fn default_profile(&self) -> &str {
+        self.default_profile.as_ref()
+    }
+
+    pub fn profiles(&self) -> Vec<Profile> {
+        self.profiles
+            .values()
+            .map(|(profile, _)| profile.clone())
+            .collect()
+    }
+
+    pub async fn respond(
+        &self,
+        profile: Option<&str>,
+        history: &[Message],
+        input: &str,
+    ) -> Result<Message, ProfileAgentError> {
+        let profile = profile.unwrap_or(self.default_profile.as_ref());
+        let (_, agent) = self
+            .profiles
+            .get(profile)
+            .ok_or_else(|| ProfileAgentError::UnknownProfile(profile.to_owned()))?;
+        Ok(agent.respond(history, input).await?)
     }
 }

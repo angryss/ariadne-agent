@@ -1,0 +1,41 @@
+version = 1
+default_profile = "local"
+
+# Providers are reusable connection definitions. Never put API keys here;
+# reference the name of an environment variable instead.
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[providers.work-openai]
+kind = "openai-compatible"
+api_base = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+# Profiles select a provider and model and scope capability activation.
+[profiles.local]
+provider = "ollama"
+model = "qwen3:8b"
+system_prompt = "You are Ariadne, a careful and capable local AI software agent."
+active_skills = ["rust", "repository-inspection"]
+mcp_servers = ["filesystem"]
+
+[profiles.work]
+provider = "work-openai"
+model = "gpt-5"
+system_prompt = "You are Ariadne, a careful AI software agent working in a professional environment."
+active_skills = ["github", "code-review"]
+mcp_servers = ["filesystem", "github"]
+
+# MCP definitions are retained as structured TOML tables and activated by profile name.
+# MCP tool execution is still a future capability; profile scoping is ready now.
+[mcp_servers.filesystem]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+
+[mcp_servers.github]
+transport = "stdio"
+command = "docker"
+args = ["run", "--rm", "-i", "ghcr.io/github/github-mcp-server"]
+env = ["GITHUB_PERSONAL_ACCESS_TOKEN"]

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ariadne_core::{Agent, AgentError, Message};
+use ariadne_core::{Agent, AgentError, AgentProfiles, Message, Profile, ProfileAgentError};
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
@@ -13,12 +13,29 @@ use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(Clone)]
 struct AppState {
-    agent: Arc<Agent>,
+    profiles: Arc<AgentProfiles>,
 }
 
 pub fn router(agent: Agent) -> Router {
+    let profile = Profile {
+        name: "default".to_owned(),
+        provider: "configured".to_owned(),
+        model: "configured".to_owned(),
+        active_skills: Vec::new(),
+        mcp_servers: Vec::new(),
+    };
+    let profiles = AgentProfiles::new("default", [(profile, agent)])
+        .expect("the built-in server profile must be valid");
+    router_with_profiles(profiles)
+}
+
+pub fn router_with_profiles(profiles: AgentProfiles) -> Router {
     Router::new()
         .route("/healthz", get(health))
+        .route(
+            "/v1/profiles",
+            get(list_profiles).fallback(api_method_not_allowed),
+        )
         .route(
             "/v1/respond",
             post(respond).fallback(api_method_not_allowed),
@@ -26,15 +43,28 @@ pub fn router(agent: Agent) -> Router {
         .route("/v1", any(api_not_found))
         .route("/v1/{*path}", any(api_not_found))
         .with_state(AppState {
-            agent: Arc::new(agent),
+            profiles: Arc::new(profiles),
         })
 }
 
 pub fn router_with_web(agent: Agent, web_dir: impl AsRef<Path>) -> Router {
+    let profile = Profile {
+        name: "default".to_owned(),
+        provider: "configured".to_owned(),
+        model: "configured".to_owned(),
+        active_skills: Vec::new(),
+        mcp_servers: Vec::new(),
+    };
+    let profiles = AgentProfiles::new("default", [(profile, agent)])
+        .expect("the built-in server profile must be valid");
+    router_with_profiles_and_web(profiles, web_dir)
+}
+
+pub fn router_with_profiles_and_web(profiles: AgentProfiles, web_dir: impl AsRef<Path>) -> Router {
     let web_dir = web_dir.as_ref();
     let index = web_dir.join("index.html");
     let assets = ServeDir::new(web_dir).fallback(ServeFile::new(index));
-    router(agent).fallback_service(assets)
+    router_with_profiles(profiles).fallback_service(assets)
 }
 
 #[derive(Serialize)]
@@ -44,6 +74,19 @@ struct HealthResponse {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+#[derive(Serialize)]
+struct ProfilesResponse {
+    default_profile: String,
+    profiles: Vec<Profile>,
+}
+
+async fn list_profiles(State(state): State<AppState>) -> Json<ProfilesResponse> {
+    Json(ProfilesResponse {
+        default_profile: state.profiles.default_profile().to_owned(),
+        profiles: state.profiles.profiles(),
+    })
 }
 
 async fn api_not_found() -> ApiError {
@@ -64,6 +107,8 @@ async fn api_method_not_allowed() -> ApiError {
 
 #[derive(Deserialize)]
 pub struct RespondRequest {
+    #[serde(default)]
+    pub profile: Option<String>,
     pub prompt: String,
     #[serde(default)]
     pub history: Vec<Message>,
@@ -80,8 +125,12 @@ async fn respond(
 ) -> Result<Json<RespondResponse>, ApiError> {
     let Json(request) = request.map_err(ApiError::from)?;
     let message = state
-        .agent
-        .respond(&request.history, &request.prompt)
+        .profiles
+        .respond(
+            request.profile.as_deref(),
+            &request.history,
+            &request.prompt,
+        )
         .await
         .map_err(ApiError::from)?;
     Ok(Json(RespondResponse { message }))
@@ -106,6 +155,19 @@ impl From<AgentError> for ApiError {
                 code: "provider_error",
                 message: "model provider request failed".to_owned(),
             },
+        }
+    }
+}
+
+impl From<ProfileAgentError> for ApiError {
+    fn from(error: ProfileAgentError) -> Self {
+        match error {
+            ProfileAgentError::UnknownProfile(profile) => Self {
+                status: StatusCode::BAD_REQUEST,
+                code: "unknown_profile",
+                message: format!("profile `{profile}` is not defined"),
+            },
+            ProfileAgentError::Agent(error) => Self::from(error),
         }
     }
 }

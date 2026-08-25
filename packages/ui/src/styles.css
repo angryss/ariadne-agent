@@ -10,12 +10,20 @@
 body { margin: 0; min-width: 320px; min-height: 100vh; background: #0b0d12; }
 button, textarea { font: inherit; }
 
-.app-shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+.app-shell { min-height: 100vh; display: grid; grid-template-rows: auto auto 1fr; }
 .app-header { display: flex; align-items: center; justify-content: space-between; gap: 2rem; padding: 1.25rem clamp(1rem, 4vw, 3rem); border-bottom: 1px solid #252a35; background: rgba(11, 13, 18, .9); }
 .app-header h1 { margin: .1rem 0 0; font-size: clamp(1.35rem, 3vw, 1.8rem); letter-spacing: -.04em; }
 .eyebrow, .message-role { margin: 0; color: #8e97a8; font-size: .72rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .status { display: inline-flex; align-items: center; gap: .5rem; color: #aab2c0; font-size: .82rem; }
 .status span { width: .5rem; height: .5rem; border-radius: 50%; background: #54d6a0; box-shadow: 0 0 0 4px rgba(84, 214, 160, .1); }
+.header-actions { display: flex; align-items: center; gap: 1rem; }
+.profile-picker { display: flex; align-items: center; gap: .55rem; color: #8e97a8; font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.profile-picker select { min-width: 8rem; padding: .45rem 1.8rem .45rem .6rem; border: 1px solid #343b49; border-radius: .55rem; color: #edf0f6; background: #151a23; text-transform: none; letter-spacing: normal; }
+.profile-picker select:focus-visible { outline: 2px solid #9d91f5; outline-offset: 2px; }
+.profile-picker select:disabled { opacity: .55; }
+.profile-summary { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .65rem clamp(1rem, 4vw, 3rem); border-bottom: 1px solid #202530; color: #9da6b6; background: #0f1218; font-size: .76rem; }
+.profile-summary strong { color: #d9d4ff; }
+.profile-summary span { padding: .2rem .45rem; border: 1px solid #2c3240; border-radius: 999px; background: #151a23; }
 
 .conversation { width: min(900px, 100%); margin: 0 auto; display: grid; grid-template-rows: 1fr auto; padding: clamp(1rem, 4vw, 2.5rem); }
 .messages { display: flex; flex-direction: column; justify-content: flex-end; gap: 1rem; padding-bottom: 2rem; }
@@ -40,6 +48,9 @@ button, textarea { font: inherit; }
 .composer button:disabled { cursor: not-allowed; opacity: .45; }
 
 @media (max-width: 600px) {
+  .app-header { align-items: flex-start; }
+  .header-actions { align-items: flex-end; flex-direction: column-reverse; }
+  .profile-picker { align-items: flex-end; flex-direction: column; }
   .conversation { padding: 1rem; }
   .message { max-width: 92%; }
   .composer-row { align-items: stretch; flex-direction: column; }
