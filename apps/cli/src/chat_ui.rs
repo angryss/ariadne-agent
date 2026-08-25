@@ -349,7 +349,13 @@ fn composer_text(input: &str) -> Text<'_> {
         ),
         Span::raw(first),
     ])];
-    lines.extend(input_lines.map(|line| Line::from(vec![Span::raw("  "), Span::raw(line)])));
+    lines.extend(input_lines.map(|line| {
+        if line.is_empty() {
+            Line::default()
+        } else {
+            Line::from(vec![Span::raw("  "), Span::raw(line)])
+        }
+    }));
     Text::from(lines)
 }
 
@@ -357,13 +363,12 @@ fn composer_line_count(input: &str, width: u16) -> u16 {
     if width == 0 {
         return 1;
     }
-    let line_count = u16::try_from(
+    u16::try_from(
         Paragraph::new(composer_text(input))
             .wrap(Wrap { trim: false })
             .line_count(width),
     )
-    .unwrap_or(u16::MAX);
-    line_count.saturating_sub(u16::from(input.ends_with('\n')))
+    .unwrap_or(u16::MAX)
 }
 
 fn composer_height(ui: &ChatUi, width: u16) -> u16 {
@@ -762,6 +767,24 @@ mod tests {
 
         assert_eq!(composer_cursor(&ui, 40), (2, 2));
         assert_eq!(composer_height(&ui, 40), 5);
+    }
+
+    #[test]
+    fn an_explicit_blank_line_occupies_exactly_one_visual_row() {
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.input = "line 1\nline 2\n\nline 4".to_owned();
+        ui.cursor = ui.input.len();
+
+        terminal.draw(|frame| render(frame, &ui)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        let rows = screen.lines().collect::<Vec<_>>();
+        let line_2_row = rows.iter().position(|row| row.contains("line 2")).unwrap();
+        let line_4_row = rows.iter().position(|row| row.contains("line 4")).unwrap();
+        assert_eq!(line_4_row - line_2_row, 2, "{screen}");
+        assert_eq!(composer_height(&ui, 40), 6);
     }
 
     #[test]
