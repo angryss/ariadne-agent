@@ -725,7 +725,6 @@ async fn traversal_budget_counts_directories_before_descending() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::create_dir(workspace.path().join("00-dir")).unwrap();
     std::fs::write(workspace.path().join("00-dir/hidden.rs"), "hidden").unwrap();
-    std::fs::write(workspace.path().join("01.rs"), "visible").unwrap();
     let mut config = FileSystemConfig::new(workspace.path());
     config.max_traversal_files = 1;
     let tools = FileSystemToolset::new(config).unwrap().tools();
