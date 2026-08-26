@@ -10,7 +10,9 @@ repository.workspace = true
 [dependencies]
 ariadne-core = { path = "../ariadne-core" }
 axum.workspace = true
+futures-util.workspace = true
 serde.workspace = true
+tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 

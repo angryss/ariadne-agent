@@ -1,0 +1,49 @@
+version = 1
+default_profile = "local"
+
+# Providers are reusable connection definitions. Never put API keys here;
+# reference the name of an environment variable instead.
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[providers.work-openai]
+kind = "openai-compatible"
+api_base = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+
+# Profiles select a provider and model and scope capability activation.
+[profiles.local]
+provider = "ollama"
+model = "qwen3:8b"
+system_prompt = "You are Ariadne, a careful and capable local AI software agent."
+active_skills = ["rust", "repository-inspection"]
+capabilities = ["workspace"]
+
+[profiles.work]
+provider = "work-openai"
+model = "gpt-5"
+system_prompt = "You are Ariadne, a careful AI software agent working in a professional environment."
+active_skills = ["github", "code-review"]
+mcp_servers = ["github"]
+capabilities = ["workspace"]
+
+# Native capabilities execute in-process and are separate from skills and MCP servers.
+# Relative roots are resolved from Ariadne's process working directory.
+[capabilities.workspace]
+kind = "filesystem"
+root = "."
+read_only = false
+allowed_patterns = []
+# Omit denied_patterns and protected_patterns to retain secure built-in defaults.
+max_read_bytes = 1048576
+max_results = 1000
+max_traversal_files = 10000
+max_traversal_depth = 32
+max_search_bytes = 16777216
+
+[mcp_servers.github]
+transport = "stdio"
+command = "docker"
+args = ["run", "--rm", "-i", "ghcr.io/github/github-mcp-server"]
+env = ["GITHUB_PERSONAL_ACCESS_TOKEN"]

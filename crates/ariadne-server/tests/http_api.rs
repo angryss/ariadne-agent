@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
-use ariadne_core::{Completion, CompletionRequest, Message, ModelProvider, ProviderError};
-use ariadne_server::{router, router_with_web};
+use ariadne_core::{
+    Agent, AgentProfiles, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
+    Profile, ProviderError,
+};
+use ariadne_server::{router, router_with_profiles, router_with_web};
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -26,9 +29,61 @@ impl ModelProvider for InvalidRoleProvider {
     }
 }
 
+struct ReplyProvider(&'static str);
+
+#[async_trait]
+impl ModelProvider for ReplyProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        Ok(Completion::new(Message::assistant(self.0)))
+    }
+}
+
+struct ThinkingProvider;
+
+#[async_trait]
+impl ModelProvider for ThinkingProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        Ok(Completion::new(Message::assistant("Answer")))
+    }
+
+    async fn complete_stream(
+        &self,
+        _request: CompletionRequest,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+    ) -> Result<Completion, ProviderError> {
+        on_delta(&CompletionDelta::Thinking("Inspect".to_owned()));
+        on_delta(&CompletionDelta::Content("Answer".to_owned()));
+        Ok(Completion::new(Message::assistant("Answer")))
+    }
+}
+
 fn test_app() -> axum::Router {
     let agent = ariadne_core::Agent::new(Arc::new(FixedProvider), "You are Ariadne.");
     router(agent)
+}
+
+fn profile(name: &str, reply: &'static str) -> (Profile, Agent) {
+    (
+        Profile {
+            name: name.to_owned(),
+            provider: format!("{name}-provider"),
+            model: format!("{name}-model"),
+            active_skills: vec![format!("{name}-skill")],
+            mcp_servers: vec![format!("{name}-mcp")],
+            capabilities: Vec::new(),
+        },
+        Agent::new(Arc::new(ReplyProvider(reply)), "You are Ariadne."),
+    )
+}
+
+fn profiles_app() -> axum::Router {
+    router_with_profiles(
+        AgentProfiles::new(
+            "local",
+            vec![profile("local", "Local."), profile("work", "Work.")],
+        )
+        .unwrap(),
+    )
 }
 
 #[tokio::test]
@@ -69,6 +124,93 @@ async fn respond_endpoint_returns_an_assistant_message() {
         value,
         serde_json::json!({
             "message": {"role": "assistant", "content": "Ready."}
+        })
+    );
+}
+
+#[tokio::test]
+async fn respond_stream_endpoint_emits_reasoning_content_and_completion_events() {
+    let agent = Agent::new(Arc::new(ThinkingProvider), "You are Ariadne.");
+    let response = router(agent)
+        .oneshot(
+            Request::post("/v1/respond/stream")
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .body(Body::from(r#"{"prompt":"Hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        body.contains(r#"data: {"kind":"thinking","content":"Inspect"}"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"data: {"kind":"content","content":"Answer"}"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"data: {"kind":"done","message":{"role":"assistant","content":"Answer"}}"#),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn profiles_endpoint_lists_profiles_and_respond_dispatches_to_the_requested_profile() {
+    let profiles_response = profiles_app()
+        .oneshot(Request::get("/v1/profiles").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(profiles_response.status(), StatusCode::OK);
+    let profiles_body = to_bytes(profiles_response.into_body(), 4096).await.unwrap();
+    let profiles: Value = serde_json::from_slice(&profiles_body).unwrap();
+    assert_eq!(profiles["default_profile"], "local");
+    assert_eq!(profiles["profiles"][1]["name"], "work");
+    assert_eq!(profiles["profiles"][1]["active_skills"][0], "work-skill");
+    assert_eq!(profiles["profiles"][1]["mcp_servers"][0], "work-mcp");
+
+    let response = profiles_app()
+        .oneshot(
+            Request::post("/v1/respond")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"work","prompt":"Hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(value["message"]["content"], "Work.");
+}
+
+#[tokio::test]
+async fn respond_endpoint_rejects_an_unknown_profile() {
+    let response = profiles_app()
+        .oneshot(
+            Request::post("/v1/respond")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"missing","prompt":"Hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "error": {
+                "code": "unknown_profile",
+                "message": "profile `missing` is not defined"
+            }
         })
     );
 }

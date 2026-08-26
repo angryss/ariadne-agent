@@ -6,16 +6,21 @@ Ariadne uses ports and adapters so one application core can serve interactive lo
 React UI package <--- web fetch adapter ---> Axum server ---+
        ^                                                   |
        +-------- Tauri invoke adapter ---> desktop host ---+---> application core ---> model provider port
-                                                          |
+                                                           |             |
+                                                           |             +---> tool port ---> native filesystem adapter
+                                                           |
 CLI interactive / run / serve ----------------------------+
+                 ^
+                 +--- versioned profile catalog ---> provider/model composition
 ```
 
 ## Boundaries
 
-1. **Core** owns messages, requests, provider ports, and agent orchestration. It performs no network, terminal, web, or desktop I/O.
-2. **Adapters** implement model-provider and transport concerns. The initial provider targets OpenAI-compatible APIs, including local Ollama.
-3. **Composition roots** choose concrete adapters for CLI, HTTP server, and Tauri desktop execution.
-4. **UI** depends on a small TypeScript client port. The web app implements it with HTTP; the desktop app implements it with Tauri IPC.
+1. **Core** owns messages, requests, provider ports, profile metadata, profile dispatch, and agent orchestration. It performs no network, terminal, web, desktop, or configuration-file I/O.
+2. **Configuration** parses and validates the versioned TOML provider/profile catalog. It resolves safe profile metadata, provider inputs, and native capability settings but never reads provider credentials itself.
+3. **Adapters** implement model-provider, transport, and tool concerns. The initial provider targets OpenAI-compatible APIs, including local Ollama. The native filesystem adapter implements the core tool port under one canonical workspace root.
+4. **Composition roots** choose concrete adapters for CLI, HTTP server, and Tauri desktop execution. They read the environment variables named by providers and apply legacy CLI/environment overrides to the selected default profile.
+5. **UI** depends on a small TypeScript client port. The web app implements it with HTTP; the desktop app implements it with Tauri IPC. Both fetch safe profile metadata and clear caller-owned history when a user switches profiles.
 
 ## Operating modes
 
@@ -24,12 +29,16 @@ CLI interactive / run / serve ----------------------------+
 - `ariadne serve`: long-lived HTTP and web process suitable for a VPS or local browser.
 - Ariadne Desktop: native shell using the same core through narrow Tauri commands.
 
-The server is stateless in the initial bootstrap. Callers provide conversation history with each request, which keeps horizontal scaling possible and defers persistence policy to a later capability.
+The server is stateless in the initial bootstrap. Callers provide conversation history with each request, which keeps horizontal scaling possible and defers persistence policy to a later capability. Tool calls and tool results exist only inside one response run and are not accepted in caller-owned history.
+
+A server or desktop process composes every catalog profile into an `AgentProfiles` registry. Each request can select one profile; an omitted profile uses the process default. CLI chat and one-shot modes select one default profile through `--profile` or `ARIADNE_PROFILE`.
 
 ## Security posture
 
-The server binds to `127.0.0.1` by default. Operators exposing it publicly must put it behind an authenticated TLS reverse proxy or private network. Provider credentials are accepted through environment variables and are never returned by APIs or stored by the frontend.
+The server binds to `127.0.0.1` by default. Operators exposing it publicly must put it behind an authenticated TLS reverse proxy or private network. Provider credentials are accepted through environment variables and are never returned by APIs or stored by the frontend. The profiles endpoint returns only names, provider aliases, models, and activation names; it omits provider URLs, credential-variable names, system prompts, native capability details, and MCP command definitions.
+
+The filesystem adapter opens each configured root as a capability directory and traverses every tool-path component descriptor-relatively with no-follow semantics; all symlinks in tool paths are rejected. Metadata-only operations use descriptor-relative no-follow metadata. Content opens are nonblocking where supported and the opened handle must be a regular file before I/O, so listings and traversal skip special files and direct content operations reject them. Allow globs apply to final files and visible listing entries, not policy-safe ancestor directories needed to reach them; deny policy remains active during traversal, protected policy remains active for writes, and `create_directory` requires its final path to match the allowlist. The adapter also rejects absolute paths, parent traversal, denied paths, protected writes, stale expected hashes, and configured per-file, result, total-visited-entry, traversal-depth, and actual-search-read-byte overruns. Search/traversal stop immediately when result or byte limits are exhausted. Container mounts, dedicated OS users, and read-only or otherwise restricted host filesystems remain the deployment security boundary for hostile workloads.
 
 ## Extension points
 
-Model providers, tools, memory, session persistence, and approval policies should enter through explicit ports. New surfaces should compose those ports rather than duplicate orchestration.
+Model providers and native tools enter through explicit core ports. The bounded agent loop sends provider-neutral tool definitions, executes at most 64 requested tools across at most seven tool-producing turns, returns structured results to the model, and reserves the eighth turn for a final answer. Streaming buffers each model turn until it is known to be final, so tool-turn content is not exposed as answer text. Skills, MCP tools, memory, session persistence, and approval policies should follow the same boundary discipline. Profile-scoped skill and MCP activation is represented by safe names, but loading and execution remain future capabilities. New surfaces should compose those ports rather than duplicate orchestration.
