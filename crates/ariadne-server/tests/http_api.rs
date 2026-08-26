@@ -29,6 +29,15 @@ impl ModelProvider for InvalidRoleProvider {
     }
 }
 
+struct EmptyProvider;
+
+#[async_trait]
+impl ModelProvider for EmptyProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        Ok(Completion::new(Message::assistant(" \n")))
+    }
+}
+
 struct ReplyProvider(&'static str);
 
 #[async_trait]

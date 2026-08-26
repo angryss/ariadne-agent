@@ -199,6 +199,10 @@ pub enum AgentError {
     InvalidHistory,
     #[error("model provider response must contain an assistant message")]
     InvalidProviderResponse,
+    #[error("model provider returned an empty assistant response")]
+    EmptyProviderResponse,
+    #[error("model provider returned a tool call after tool execution was closed")]
+    UnexpectedToolCallAfterFinalAnswer,
     #[error("tool name must not be blank")]
     BlankToolName,
     #[error("tool `{0}` is defined more than once")]
@@ -228,6 +232,8 @@ const MAX_MODEL_TURNS: usize = 8;
 const MAX_TOOL_CALLS: usize = 64;
 const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TOOL_EXECUTION_SECONDS: u64 = 300;
+const FINAL_ANSWER_RETRY_PROMPT: &str = "Continue the original request. Use the available tools if needed, then provide a concise, non-empty final answer.";
+const FINAL_ANSWER_AFTER_TOOL_RETRY_PROMPT: &str = "Provide a concise, non-empty final answer to the original user request using the tool results above. Do not call another tool.";
 
 impl Agent {
     pub fn new(provider: Arc<dyn ModelProvider>, system_prompt: impl Into<Arc<str>>) -> Self {
@@ -305,12 +311,17 @@ impl Agent {
             .collect::<Vec<_>>();
         let mut tool_calls_used = 0;
         let mut tool_result_bytes = 0_usize;
+        let mut final_answer_only = false;
         let tool_deadline = tokio::time::Instant::now()
             + std::time::Duration::from_secs(MAX_TOOL_EXECUTION_SECONDS);
         for turn in 0..MAX_MODEL_TURNS {
             let request = CompletionRequest {
                 messages: messages.clone(),
-                tools: tools.clone(),
+                tools: if final_answer_only {
+                    Vec::new()
+                } else {
+                    tools.clone()
+                },
             };
             let completion = if tools.is_empty() {
                 if stream {
@@ -346,8 +357,24 @@ impl Agent {
             if completion.message.role != Role::Assistant {
                 return Err(AgentError::InvalidProviderResponse);
             }
+            if final_answer_only && !completion.message.tool_calls.is_empty() {
+                return Err(AgentError::UnexpectedToolCallAfterFinalAnswer);
+            }
             if completion.message.tool_calls.is_empty() {
-                return Ok(completion.message);
+                if !completion.message.content.trim().is_empty() {
+                    return Ok(completion.message);
+                }
+                if turn + 1 == MAX_MODEL_TURNS {
+                    return Err(AgentError::EmptyProviderResponse);
+                }
+                messages.push(completion.message);
+                messages.push(Message::user(if tool_calls_used == 0 {
+                    FINAL_ANSWER_RETRY_PROMPT
+                } else {
+                    final_answer_only = true;
+                    FINAL_ANSWER_AFTER_TOOL_RETRY_PROMPT
+                }));
+                continue;
             }
             if turn + 1 == MAX_MODEL_TURNS {
                 return Err(AgentError::ToolLoopLimit(MAX_MODEL_TURNS));

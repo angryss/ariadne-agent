@@ -78,6 +78,126 @@ impl Tool for ReadFileTool {
     }
 }
 
+struct EmptyFinalThenAnswerProvider {
+    requests: Mutex<Vec<CompletionRequest>>,
+}
+
+#[async_trait]
+impl ModelProvider for EmptyFinalThenAnswerProvider {
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+        let mut requests = self.requests.lock().unwrap();
+        requests.push(request);
+        match requests.len() {
+            1 => Ok(Completion::with_tool_calls(vec![ToolCall::new(
+                "call-1",
+                "read_file",
+                json!({"path": "README.md"}),
+            )])),
+            2 => Ok(Completion::new(Message::assistant(""))),
+            _ => Ok(Completion::new(Message::assistant(
+                "The project is Ariadne.",
+            ))),
+        }
+    }
+}
+
+#[tokio::test]
+async fn respond_recovers_when_a_tool_turn_ends_with_an_empty_answer() {
+    let provider = Arc::new(EmptyFinalThenAnswerProvider {
+        requests: Mutex::new(Vec::new()),
+    });
+    let agent = Agent::with_tools(
+        Arc::clone(&provider) as Arc<dyn ModelProvider>,
+        "You are Ariadne.",
+        vec![Arc::new(ReadFileTool)],
+    )
+    .unwrap();
+    let mut deltas = Vec::new();
+
+    let reply = agent
+        .respond_stream(&[], "What project is this?", &mut |delta| {
+            deltas.push(delta.clone())
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(reply, Message::assistant("The project is Ariadne."));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[2].messages.last().unwrap().content,
+        "Provide a concise, non-empty final answer to the original user request using the tool results above. Do not call another tool."
+    );
+    assert_eq!(
+        deltas.last(),
+        Some(&CompletionDelta::Content(
+            "The project is Ariadne.".to_owned()
+        ))
+    );
+}
+
+struct EmptyThenAnswerProvider {
+    requests: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for EmptyThenAnswerProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(Completion::new(Message::assistant(" \n")))
+        } else {
+            Ok(Completion::new(Message::assistant("A complete answer.")))
+        }
+    }
+}
+
+#[tokio::test]
+async fn respond_recovers_when_the_first_model_turn_is_empty() {
+    let provider = Arc::new(EmptyThenAnswerProvider {
+        requests: AtomicUsize::new(0),
+    });
+    let agent = Agent::new(
+        Arc::clone(&provider) as Arc<dyn ModelProvider>,
+        "You are Ariadne.",
+    );
+
+    let reply = agent.respond(&[], "Answer this").await.unwrap();
+
+    assert_eq!(reply, Message::assistant("A complete answer."));
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+}
+
+struct AlwaysEmptyProvider {
+    requests: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for AlwaysEmptyProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        Ok(Completion::new(Message::assistant("\t")))
+    }
+}
+
+#[tokio::test]
+async fn respond_rejects_empty_answers_after_the_bounded_retry_budget() {
+    let provider = Arc::new(AlwaysEmptyProvider {
+        requests: AtomicUsize::new(0),
+    });
+    let agent = Agent::new(
+        Arc::clone(&provider) as Arc<dyn ModelProvider>,
+        "You are Ariadne.",
+    );
+
+    let error = agent.respond(&[], "Answer this").await.unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "model provider returned an empty assistant response"
+    );
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 8);
+}
+
 #[tokio::test]
 async fn respond_adds_system_history_and_user_messages_in_order() {
     let provider = Arc::new(RecordingProvider::default());
@@ -213,6 +333,44 @@ impl Tool for CountingTool {
         self.executions.fetch_add(1, Ordering::SeqCst);
         Ok(json!({"ok": true}))
     }
+}
+
+struct DuplicateToolAfterEmptyProvider {
+    requests: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for DuplicateToolAfterEmptyProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        match self.requests.fetch_add(1, Ordering::SeqCst) {
+            0 | 2 => Ok(Completion::with_tool_calls(vec![ToolCall::new(
+                "call",
+                "count",
+                json!({}),
+            )])),
+            1 => Ok(Completion::new(Message::assistant(""))),
+            _ => Ok(Completion::new(Message::assistant("done"))),
+        }
+    }
+}
+
+#[tokio::test]
+async fn respond_never_repeats_tool_side_effects_after_an_empty_post_tool_answer() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::with_tools(
+        Arc::new(DuplicateToolAfterEmptyProvider {
+            requests: AtomicUsize::new(0),
+        }),
+        "Trusted policy.",
+        vec![Arc::new(CountingTool {
+            executions: Arc::clone(&executions),
+        })],
+    )
+    .unwrap();
+
+    agent.respond(&[], "Perform one action").await.unwrap_err();
+
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
 }
 
 struct EndlessToolProvider {

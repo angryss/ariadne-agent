@@ -46,6 +46,21 @@ function appendDelta(messages: DisplayMessage[], delta: CompletionDelta): Displa
   return [...collapsed, { role: 'assistant', content: delta.content }];
 }
 
+function finalizeResponse(messages: DisplayMessage[], message: Message): DisplayMessage[] {
+  const collapsed = messages.map((candidate) =>
+    candidate.role === 'thinking' ? { ...candidate, expanded: false } : candidate,
+  );
+  if (!message.content) {
+    return collapsed;
+  }
+
+  const last = collapsed.at(-1);
+  if (last?.role === 'assistant') {
+    return [...collapsed.slice(0, -1), message];
+  }
+  return [...collapsed, message];
+}
+
 export function App({ client }: AppProps) {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState('');
@@ -103,18 +118,14 @@ export function App({ client }: AppProps) {
     setMessages([...displayHistory, { role: 'user', content: prompt }]);
 
     try {
-      let receivedContent = false;
       const response = await client.respond({
         ...(selectedProfile ? { profile: selectedProfile } : {}),
         prompt,
         history,
       }, (delta) => {
-        receivedContent ||= delta.kind === 'content' && delta.content.length > 0;
         setMessages((current) => appendDelta(current, delta));
       });
-      if (!receivedContent) {
-        setMessages((current) => [...current, response.message]);
-      }
+      setMessages((current) => finalizeResponse(current, response.message));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Ariadne could not complete the request');
       setMessages(displayHistory);
