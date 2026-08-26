@@ -9,7 +9,7 @@ COPY apps/web apps/web
 COPY packages/ui packages/ui
 RUN npm run web:build
 
-FROM rust:1.96-bookworm AS rust-builder
+FROM rust:1.98-bookworm AS rust-builder
 WORKDIR /workspace
 COPY . .
 RUN cargo build --locked --release -p ariadne-cli
