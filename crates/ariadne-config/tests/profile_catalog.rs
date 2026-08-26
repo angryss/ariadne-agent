@@ -46,7 +46,9 @@ args = ["/workspace"]
     assert_eq!(profile.profile.active_skills, ["rust", "github"]);
     assert_eq!(profile.profile.mcp_servers, ["filesystem"]);
     assert_eq!(profile.profile.capabilities, ["workspace"]);
-    let ResolvedCapability::FileSystem(filesystem) = &profile.capabilities[0];
+    let ResolvedCapability::FileSystem(filesystem) = &profile.capabilities[0] else {
+        panic!("expected filesystem capability");
+    };
     assert_eq!(filesystem.root.to_string_lossy(), ".");
     assert!(filesystem.read_only);
     assert_eq!(
@@ -65,6 +67,49 @@ args = ["/workspace"]
         catalog.mcp_server("filesystem").unwrap()["command"].as_str(),
         Some("mcp-filesystem")
     );
+}
+
+#[test]
+fn parses_a_bounded_command_capability() {
+    let catalog = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "local"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.local]
+provider = "local"
+model = "test-model"
+capabilities = ["host-commands"]
+
+[capabilities.host-commands]
+kind = "command"
+working_directory = "."
+programs = { uname = "/usr/bin/uname", sw_vers = "/usr/bin/sw_vers" }
+timeout_seconds = 5
+max_output_bytes = 8192
+"#,
+    )
+    .unwrap();
+
+    let profile = catalog.resolve("local").unwrap();
+    let ResolvedCapability::Command(command) = &profile.capabilities[0] else {
+        panic!("expected command capability");
+    };
+    assert_eq!(command.working_directory.to_string_lossy(), ".");
+    assert_eq!(
+        command.programs["uname"].to_string_lossy(),
+        "/usr/bin/uname"
+    );
+    assert_eq!(
+        command.programs["sw_vers"].to_string_lossy(),
+        "/usr/bin/sw_vers"
+    );
+    assert_eq!(command.timeout_seconds, 5);
+    assert_eq!(command.max_output_bytes, 8192);
 }
 
 #[test]
@@ -247,6 +292,118 @@ root = ".."
         error.to_string(),
         "profile `broken` activates multiple filesystem capabilities, whose tool names would conflict"
     );
+}
+
+#[test]
+fn command_capabilities_are_unique_per_profile() {
+    let error = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "broken"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.broken]
+provider = "local"
+model = "model"
+capabilities = ["commands-one", "commands-two"]
+
+[capabilities.commands-one]
+kind = "command"
+working_directory = "."
+programs = { uname = "/usr/bin/uname" }
+timeout_seconds = 5
+max_output_bytes = 8192
+
+[capabilities.commands-two]
+kind = "command"
+working_directory = "."
+programs = { sw_vers = "/usr/bin/sw_vers" }
+timeout_seconds = 5
+max_output_bytes = 8192
+"#,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "profile `broken` activates multiple command capabilities, whose tool names would conflict"
+    );
+}
+
+#[test]
+fn rejects_structurally_invalid_command_capabilities() {
+    let invalid = [
+        (
+            "programs = {}\ntimeout_seconds = 5\nmax_output_bytes = 8192",
+            "at least one program",
+        ),
+        (
+            "programs = { uname = \"uname\" }\ntimeout_seconds = 5\nmax_output_bytes = 8192",
+            "absolute path",
+        ),
+        (
+            "programs = { uname = \"/usr/bin/uname\" }\ntimeout_seconds = 0\nmax_output_bytes = 8192",
+            "greater than zero",
+        ),
+    ];
+
+    for (command_config, expected) in invalid {
+        let error = ProfileCatalog::from_toml(&format!(
+            r#"
+version = 1
+default_profile = "broken"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.broken]
+provider = "local"
+model = "model"
+capabilities = ["commands"]
+
+[capabilities.commands]
+kind = "command"
+working_directory = "."
+{command_config}
+"#
+        ))
+        .unwrap_err();
+
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn rejects_command_limits_above_the_safe_hard_maximum() {
+    let error = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "broken"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.broken]
+provider = "local"
+model = "model"
+capabilities = ["commands"]
+
+[capabilities.commands]
+kind = "command"
+working_directory = "."
+programs = { uname = "/usr/bin/uname" }
+timeout_seconds = 301
+max_output_bytes = 8388609
+"#,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("safe maximum"));
 }
 
 #[test]

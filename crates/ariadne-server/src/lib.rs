@@ -230,7 +230,11 @@ impl From<AgentError> for ApiError {
                 code: "provider_error",
                 message: "model provider request failed".to_owned(),
             },
-            AgentError::ToolLoopLimit(_) | AgentError::ToolCallLimit(_) => Self {
+            AgentError::ToolLoopLimit(_)
+            | AgentError::ToolCallLimit(_)
+            | AgentError::ToolResultByteLimit(_)
+            | AgentError::ToolExecutionDeadline(_)
+            | AgentError::ToolLoopDeadline(_) => Self {
                 status: StatusCode::BAD_GATEWAY,
                 code: "tool_loop_error",
                 message: error.to_string(),

@@ -1,6 +1,6 @@
 [package]
-name = "ariadne-core"
-description = "Transport-independent application core for Ariadne"
+name = "ariadne-tools-command"
+description = "Bounded native command execution tool for Ariadne"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ariadne-core = { path = "../ariadne-core" }
 async-trait.workspace = true
+libc.workspace = true
+process-wrap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

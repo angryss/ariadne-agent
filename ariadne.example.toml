@@ -42,6 +42,17 @@ max_traversal_files = 10000
 max_traversal_depth = 32
 max_search_bytes = 16777216
 
+# Command capabilities are intentionally not active in the example profiles.
+# To let a macOS profile inspect its operating system, add "host-commands" to
+# that profile's capabilities and uncomment this block. Command capabilities
+# currently require a Unix host; use platform-correct absolute paths on Linux.
+# [capabilities.host-commands]
+# kind = "command"
+# working_directory = "."
+# programs = { uname = "/usr/bin/uname", sw_vers = "/usr/bin/sw_vers" }
+# timeout_seconds = 5
+# max_output_bytes = 65536
+
 [mcp_servers.github]
 transport = "stdio"
 command = "docker"
