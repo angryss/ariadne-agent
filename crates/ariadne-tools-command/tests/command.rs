@@ -227,37 +227,15 @@ async fn dropping_execution_terminates_descendants() {
     let directory = tempfile::tempdir().unwrap();
     let marker = directory.path().join("escaped-after-drop");
     let started = directory.path().join("descendant-started");
-    let tool = Arc::new(
-        CommandTool::new(config(
-            &directory,
-            "cancel",
-            std::path::PathBuf::from("/usr/bin/perl"),
-        ))
-        .unwrap(),
+    let program = executable(
+        &directory,
+        "cancel-group",
+        "#!/bin/sh\ntrap '' HUP TERM\n(\n  trap '' HUP TERM\n  : > \"$2\"\n  sleep 2\n  : > \"$1\"\n) &\nsleep 10\n",
     );
+    let tool = Arc::new(CommandTool::new(config(&directory, "cancel", program)).unwrap());
     let execution = {
         let tool = Arc::clone(&tool);
-        let script = r#"
-            my $pid = fork();
-            die "fork failed" unless defined $pid;
-            if ($pid == 0) {
-                $SIG{HUP} = 'IGNORE';
-                $SIG{TERM} = 'IGNORE';
-                open my $started, '>', $ARGV[1] or die $!;
-                close $started;
-                sleep 2;
-                open my $marker, '>', $ARGV[0] or die $!;
-                close $marker;
-                exit 0;
-            }
-            sleep 10;
-        "#;
-        let arguments = [
-            "-e".to_owned(),
-            script.to_owned(),
-            marker.display().to_string(),
-            started.display().to_string(),
-        ];
+        let arguments = [marker.display().to_string(), started.display().to_string()];
         tokio::spawn(async move {
             tool.execute(json!({"program": "cancel", "arguments": arguments}))
                 .await
