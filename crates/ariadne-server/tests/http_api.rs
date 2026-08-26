@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use ariadne_core::{
-    Agent, AgentProfiles, Completion, CompletionRequest, Message, ModelProvider, Profile,
-    ProviderError,
+    Agent, AgentProfiles, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
+    Profile, ProviderError,
 };
 use ariadne_server::{router, router_with_profiles, router_with_web};
 use async_trait::async_trait;
@@ -35,6 +35,25 @@ struct ReplyProvider(&'static str);
 impl ModelProvider for ReplyProvider {
     async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
         Ok(Completion::new(Message::assistant(self.0)))
+    }
+}
+
+struct ThinkingProvider;
+
+#[async_trait]
+impl ModelProvider for ThinkingProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        Ok(Completion::new(Message::assistant("Answer")))
+    }
+
+    async fn complete_stream(
+        &self,
+        _request: CompletionRequest,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+    ) -> Result<Completion, ProviderError> {
+        on_delta(&CompletionDelta::Thinking("Inspect".to_owned()));
+        on_delta(&CompletionDelta::Content("Answer".to_owned()));
+        Ok(Completion::new(Message::assistant("Answer")))
     }
 }
 
@@ -105,6 +124,38 @@ async fn respond_endpoint_returns_an_assistant_message() {
         serde_json::json!({
             "message": {"role": "assistant", "content": "Ready."}
         })
+    );
+}
+
+#[tokio::test]
+async fn respond_stream_endpoint_emits_reasoning_content_and_completion_events() {
+    let agent = Agent::new(Arc::new(ThinkingProvider), "You are Ariadne.");
+    let response = router(agent)
+        .oneshot(
+            Request::post("/v1/respond/stream")
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .body(Body::from(r#"{"prompt":"Hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        body.contains(r#"data: {"kind":"thinking","content":"Inspect"}"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"data: {"kind":"content","content":"Answer"}"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"data: {"kind":"done","message":{"role":"assistant","content":"Answer"}}"#),
+        "{body}"
     );
 }
 

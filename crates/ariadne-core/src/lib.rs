@@ -58,6 +58,12 @@ impl Completion {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompletionDelta {
+    Thinking(String),
+    Content(String),
+}
+
 #[derive(Debug, Error)]
 #[error("model provider failed: {message}")]
 pub struct ProviderError {
@@ -79,10 +85,12 @@ pub trait ModelProvider: Send + Sync {
     async fn complete_stream(
         &self,
         request: CompletionRequest,
-        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
     ) -> Result<Completion, ProviderError> {
         let completion = self.complete(request).await?;
-        on_delta(&completion.message.content);
+        on_delta(&CompletionDelta::Content(
+            completion.message.content.clone(),
+        ));
         Ok(completion)
     }
 }
@@ -114,7 +122,7 @@ impl Agent {
     }
 
     pub async fn respond(&self, history: &[Message], input: &str) -> Result<Message, AgentError> {
-        let mut ignore_delta = |_: &str| {};
+        let mut ignore_delta = |_: &CompletionDelta| {};
         self.respond_with(history, input, false, &mut ignore_delta)
             .await
     }
@@ -123,7 +131,7 @@ impl Agent {
         &self,
         history: &[Message],
         input: &str,
-        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
     ) -> Result<Message, AgentError> {
         self.respond_with(history, input, true, on_delta).await
     }
@@ -133,7 +141,7 @@ impl Agent {
         history: &[Message],
         input: &str,
         stream: bool,
-        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
     ) -> Result<Message, AgentError> {
         if input.trim().is_empty() {
             return Err(AgentError::BlankInput);
@@ -251,7 +259,7 @@ impl AgentProfiles {
         profile: Option<&str>,
         history: &[Message],
         input: &str,
-        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
     ) -> Result<Message, ProfileAgentError> {
         let profile = profile.unwrap_or(self.default_profile.as_ref());
         let (_, agent) = self

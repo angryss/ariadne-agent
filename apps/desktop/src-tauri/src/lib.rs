@@ -2,10 +2,10 @@ use std::env;
 use std::sync::Arc;
 
 use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedProfile};
-use ariadne_core::{Agent, AgentProfiles, Message, ModelProvider, Profile};
+use ariadne_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{State, ipc::Channel};
 
 #[derive(Deserialize)]
 pub struct RespondRequest {
@@ -53,6 +53,43 @@ pub async fn respond_with_profiles(
     Ok(RespondResponse { message })
 }
 
+pub async fn respond_stream_with_profiles(
+    profiles: &AgentProfiles,
+    request: RespondRequest,
+    on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+) -> Result<RespondResponse, String> {
+    let message = profiles
+        .respond_stream(
+            request.profile.as_deref(),
+            &request.history,
+            &request.prompt,
+            on_delta,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(RespondResponse { message })
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CompletionDeltaEvent {
+    Thinking { content: String },
+    Content { content: String },
+}
+
+impl From<&CompletionDelta> for CompletionDeltaEvent {
+    fn from(delta: &CompletionDelta) -> Self {
+        match delta {
+            CompletionDelta::Thinking(content) => Self::Thinking {
+                content: content.clone(),
+            },
+            CompletionDelta::Content(content) => Self::Content {
+                content: content.clone(),
+            },
+        }
+    }
+}
+
 pub fn list_profiles(profiles: &AgentProfiles) -> ProfilesResponse {
     ProfilesResponse {
         default_profile: profiles.default_profile().to_owned(),
@@ -69,6 +106,18 @@ async fn respond(
 }
 
 #[tauri::command]
+async fn respond_stream(
+    profiles: State<'_, AgentProfiles>,
+    request: RespondRequest,
+    on_event: Channel<CompletionDeltaEvent>,
+) -> Result<RespondResponse, String> {
+    let mut on_delta = |delta: &CompletionDelta| {
+        let _ = on_event.send(CompletionDeltaEvent::from(delta));
+    };
+    respond_stream_with_profiles(&profiles, request, &mut on_delta).await
+}
+
+#[tauri::command]
 fn profiles(profiles: State<'_, AgentProfiles>) -> ProfilesResponse {
     list_profiles(&profiles)
 }
@@ -79,7 +128,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(configured)
-        .invoke_handler(tauri::generate_handler![respond, profiles])
+        .invoke_handler(tauri::generate_handler![respond, respond_stream, profiles])
         .run(tauri::generate_context!())
         .expect("failed to run Ariadne desktop application");
 }

@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use ariadne_core::{Completion, CompletionRequest, ModelProvider, ProviderError, Role};
+use ariadne_core::{
+    Completion, CompletionDelta, CompletionRequest, ModelProvider, ProviderError, Role,
+};
 use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -120,6 +122,8 @@ struct StreamChoice {
 #[derive(Deserialize)]
 struct StreamDelta {
     content: Option<String>,
+    reasoning_content: Option<String>,
+    reasoning: Option<String>,
 }
 
 #[async_trait]
@@ -172,7 +176,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
     async fn complete_stream(
         &self,
         request: CompletionRequest,
-        on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
     ) -> Result<Completion, ProviderError> {
         let payload = ChatCompletionRequest {
             model: &self.model,
@@ -231,7 +235,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
 fn process_sse_line(
     line: &[u8],
     content: &mut String,
-    on_delta: &mut (dyn for<'delta> FnMut(&'delta str) + Send),
+    on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
 ) -> Result<(), ProviderError> {
     let Some(data) = line.strip_prefix(b"data:") else {
         return Ok(());
@@ -243,8 +247,16 @@ fn process_sse_line(
     let chunk: ChatCompletionChunk = serde_json::from_slice(data)
         .map_err(|error| ProviderError::new(format!("invalid provider stream: {error}")))?;
     for choice in chunk.choices {
+        if let Some(reasoning) = choice
+            .delta
+            .reasoning_content
+            .or(choice.delta.reasoning)
+            .filter(|reasoning| !reasoning.is_empty())
+        {
+            on_delta(&CompletionDelta::Thinking(reasoning));
+        }
         if let Some(delta) = choice.delta.content {
-            on_delta(&delta);
+            on_delta(&CompletionDelta::Content(delta.clone()));
             content.push_str(&delta);
         }
     }
@@ -288,7 +300,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use ariadne_core::{CompletionRequest, Message, ModelProvider};
+    use ariadne_core::{CompletionDelta, CompletionRequest, Message, ModelProvider};
     use reqwest::Url;
 
     use super::{OpenAiCompatibleProvider, build_http_client};
@@ -333,13 +345,20 @@ mod tests {
                 CompletionRequest {
                     messages: vec![Message::user("Hello")],
                 },
-                &mut |delta| deltas.push(delta.to_owned()),
+                &mut |delta| deltas.push(delta.clone()),
             )
             .await
             .unwrap();
 
         server.join().unwrap();
-        assert_eq!(deltas, ["still", " stream", "ing"]);
+        assert_eq!(
+            deltas,
+            [
+                CompletionDelta::Content("still".to_owned()),
+                CompletionDelta::Content(" stream".to_owned()),
+                CompletionDelta::Content("ing".to_owned()),
+            ]
+        );
         assert_eq!(completion.message, Message::assistant("still streaming"));
     }
 }

@@ -1,7 +1,7 @@
 use std::io::{self, Stdout};
 
 use anyhow::{Context, Result};
-use ariadne_core::{AgentProfiles, Message};
+use ariadne_core::{AgentProfiles, CompletionDelta, Message};
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -83,6 +83,7 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MessageKind {
     User,
+    Thinking,
     Assistant,
     Error,
 }
@@ -91,6 +92,7 @@ enum MessageKind {
 struct DisplayMessage {
     kind: MessageKind,
     content: String,
+    expanded: bool,
 }
 
 struct ChatUi {
@@ -127,6 +129,7 @@ impl ChatUi {
         self.messages.push(DisplayMessage {
             kind,
             content: content.into(),
+            expanded: false,
         });
         self.scroll_from_bottom = 0;
     }
@@ -171,6 +174,18 @@ impl ChatUi {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<InputAction> {
+        if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(message) = self
+                .messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.kind == MessageKind::Thinking)
+            {
+                message.expanded = !message.expanded;
+                self.scroll_from_bottom = 0;
+            }
+            return None;
+        }
         if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::ALT) {
             self.input.insert(self.cursor, '\n');
             self.cursor += 1;
@@ -236,6 +251,50 @@ impl ChatUi {
         {
             message.content.push_str(delta);
             self.scroll_from_bottom = 0;
+        }
+    }
+
+    fn append_completion_delta(&mut self, delta: &CompletionDelta) {
+        match delta {
+            CompletionDelta::Thinking(delta) => {
+                if delta.is_empty() {
+                    return;
+                }
+                if let Some(message) = self.messages.last_mut()
+                    && message.kind == MessageKind::Thinking
+                {
+                    message.content.push_str(delta);
+                    message.expanded = true;
+                } else {
+                    self.messages.push(DisplayMessage {
+                        kind: MessageKind::Thinking,
+                        content: delta.clone(),
+                        expanded: true,
+                    });
+                }
+                self.scroll_from_bottom = 0;
+            }
+            CompletionDelta::Content(delta) => {
+                if delta.is_empty() {
+                    return;
+                }
+                if let Some(thinking) = self
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|message| message.kind == MessageKind::Thinking)
+                {
+                    thinking.expanded = false;
+                }
+                if self
+                    .messages
+                    .last()
+                    .is_none_or(|message| message.kind != MessageKind::Assistant)
+                {
+                    self.start_assistant_response();
+                }
+                self.append_assistant_delta(delta);
+            }
         }
     }
 
@@ -486,6 +545,30 @@ fn transcript_text(ui: &ChatUi, width: u16) -> Text<'static> {
                         .map(|line| highlighted_user_line(Line::from(format!("  {line}")), width)),
                 );
             }
+            MessageKind::Thinking => {
+                let marker = if message.expanded { "▼" } else { "▶" };
+                let label = if message.expanded {
+                    "Thinking".to_owned()
+                } else {
+                    format!(
+                        "Thinking ({} lines)",
+                        message.content.lines().count().max(1)
+                    )
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{marker} "), Style::default().fg(Color::DarkGray)),
+                    Span::styled(label, Style::default().fg(Color::DarkGray)),
+                ]));
+                if message.expanded {
+                    lines.push(Line::styled(
+                        format!("  {first}"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    lines.extend(content.map(|line| {
+                        Line::styled(format!("  {line}"), Style::default().fg(Color::DarkGray))
+                    }));
+                }
+            }
             MessageKind::Assistant => {
                 lines.push(Line::from(vec![
                     Span::styled("● ", Style::default().fg(Color::Cyan)),
@@ -551,7 +634,7 @@ fn render(frame: &mut Frame<'_>, ui: &ChatUi) {
 
     let state = if ui.busy { "Thinking…" } else { "Ready" };
     let controls = if commands.is_empty() {
-        "  Enter send · Alt-Enter newline · PgUp/PgDn scroll · Ctrl-C exit"
+        "  Enter send · Alt-Enter newline · Ctrl-T thinking · PgUp/PgDn scroll · Ctrl-C exit"
     } else {
         "  ↑/↓ select · Tab complete · Enter run · Ctrl-C exit"
     };
@@ -585,7 +668,7 @@ fn render(frame: &mut Frame<'_>, ui: &ChatUi) {
 }
 
 enum ResponseEvent {
-    Delta(String),
+    Delta(CompletionDelta),
     Finished {
         prompt: String,
         result: Result<Message, String>,
@@ -674,7 +757,6 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
                         };
 
                         ui.busy = true;
-                        ui.start_assistant_response();
                         let profiles = profiles.clone();
                         let profile = profile.to_owned();
                         let request_history = history.clone();
@@ -682,8 +764,19 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
                         tokio::spawn(async move {
                             let result = {
                                 let delta_sender = sender.clone();
-                                let mut on_delta = move |delta: &str| {
-                                    let delta = super::sanitize_terminal_text(delta);
+                                let mut on_delta = move |delta: &CompletionDelta| {
+                                    let delta = match delta {
+                                        CompletionDelta::Thinking(content) => {
+                                            CompletionDelta::Thinking(
+                                                super::sanitize_terminal_text(content),
+                                            )
+                                        }
+                                        CompletionDelta::Content(content) => {
+                                            CompletionDelta::Content(
+                                                super::sanitize_terminal_text(content),
+                                            )
+                                        }
+                                    };
                                     let _ = delta_sender.send(ResponseEvent::Delta(delta));
                                 };
                                 profiles
@@ -705,7 +798,7 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
             }
             Some(response) = response_rx.recv() => {
                 match response {
-                    ResponseEvent::Delta(delta) => ui.append_assistant_delta(&delta),
+                    ResponseEvent::Delta(delta) => ui.append_completion_delta(&delta),
                     ResponseEvent::Finished { prompt, result } => {
                         ui.busy = false;
                         match result {
@@ -730,8 +823,8 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
 
     use super::{
-        ChatUi, CommandAction, InputAction, MAX_COMPOSER_CONTENT_HEIGHT, Message, MessageKind,
-        apply_command, chat_layout, composer_cursor, composer_height, render,
+        ChatUi, CommandAction, CompletionDelta, InputAction, MAX_COMPOSER_CONTENT_HEIGHT, Message,
+        MessageKind, apply_command, chat_layout, composer_cursor, composer_height, render,
     };
 
     #[test]
@@ -1050,5 +1143,47 @@ mod tests {
         assert_eq!(ui.messages().len(), 1);
         assert_eq!(ui.messages()[0].kind, MessageKind::Assistant);
         assert_eq!(ui.messages()[0].content, "Hello world");
+    }
+
+    #[test]
+    fn reasoning_streams_separately_then_collapses_when_user_facing_content_begins() {
+        let mut ui = ChatUi::new("local", "test-model");
+
+        ui.append_completion_delta(&CompletionDelta::Thinking("Check".to_owned()));
+        ui.append_completion_delta(&CompletionDelta::Thinking(" facts".to_owned()));
+        assert_eq!(ui.messages().len(), 1);
+        assert_eq!(ui.messages()[0].kind, MessageKind::Thinking);
+        assert_eq!(ui.messages()[0].content, "Check facts");
+        assert!(ui.messages()[0].expanded);
+
+        ui.append_completion_delta(&CompletionDelta::Content("Answer".to_owned()));
+
+        assert_eq!(ui.messages().len(), 2);
+        assert!(!ui.messages()[0].expanded);
+        assert_eq!(ui.messages()[1].kind, MessageKind::Assistant);
+        assert_eq!(ui.messages()[1].content, "Answer");
+    }
+
+    #[test]
+    fn collapsed_reasoning_can_be_expanded_with_ctrl_t() {
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut ui = ChatUi::new("local", "test-model");
+        ui.append_completion_delta(&CompletionDelta::Thinking(
+            "Inspect the request\nCompare the fields".to_owned(),
+        ));
+        ui.append_completion_delta(&CompletionDelta::Content("Final answer".to_owned()));
+
+        terminal.draw(|frame| render(frame, &ui)).unwrap();
+        let collapsed = terminal.backend().to_string();
+        assert!(collapsed.contains("Thinking (2 lines)"), "{collapsed}");
+        assert!(!collapsed.contains("Inspect the request"), "{collapsed}");
+
+        ui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        terminal.draw(|frame| render(frame, &ui)).unwrap();
+        let expanded = terminal.backend().to_string();
+        assert!(expanded.contains("Inspect the request"), "{expanded}");
+        assert!(expanded.contains("Compare the fields"), "{expanded}");
+        assert!(expanded.contains("Final answer"), "{expanded}");
     }
 }

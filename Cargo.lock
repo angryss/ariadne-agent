@@ -185,6 +185,7 @@ dependencies = [
  "ariadne-core",
  "async-trait",
  "axum",
+ "futures-util",
  "serde",
  "serde_json",
  "tempfile",

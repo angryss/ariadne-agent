@@ -1,6 +1,8 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
   AgentClient,
+  CompletionDelta,
+  CompletionDeltaHandler,
   Profile,
   ProfileCatalog,
   RespondRequest,
@@ -8,12 +10,21 @@ import type {
 } from '@ariadne/ui';
 
 type Invoker = (command: string, args: Record<string, unknown>) => Promise<unknown>;
+interface DeltaChannel {
+  onmessage: ((message: CompletionDelta) => void) | null;
+}
+type ChannelFactory = () => DeltaChannel;
 
 export class TauriAgentClient implements AgentClient {
   private readonly invoke: Invoker;
+  private readonly createChannel: ChannelFactory;
 
-  constructor(invoker: Invoker = (command, args) => invoke(command, args)) {
+  constructor(
+    invoker: Invoker = (command, args) => invoke(command, args),
+    createChannel: ChannelFactory = () => new Channel<CompletionDelta>(),
+  ) {
     this.invoke = invoker;
+    this.createChannel = createChannel;
   }
 
   async listProfiles(): Promise<ProfileCatalog> {
@@ -24,13 +35,46 @@ export class TauriAgentClient implements AgentClient {
     return profiles;
   }
 
-  async respond(request: RespondRequest): Promise<RespondResponse> {
-    const response = await this.invoke('respond', { request });
+  async respond(
+    request: RespondRequest,
+    onDelta?: CompletionDeltaHandler,
+  ): Promise<RespondResponse> {
+    let command = 'respond';
+    let args: Record<string, unknown> = { request };
+    let invalidDelta = false;
+    if (onDelta) {
+      command = 'respond_stream';
+      const onEvent = this.createChannel();
+      onEvent.onmessage = (message) => {
+        if (isCompletionDelta(message)) {
+          onDelta(message);
+        } else {
+          invalidDelta = true;
+        }
+      };
+      args = { request, onEvent };
+    }
+
+    const response = await this.invoke(command, args);
+    if (invalidDelta) {
+      throw new Error('Ariadne desktop returned invalid stream data');
+    }
     if (!isRespondResponse(response)) {
       throw new Error('Ariadne desktop returned an invalid response');
     }
     return response;
   }
+}
+
+function isCompletionDelta(value: unknown): value is CompletionDelta {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      'kind' in value &&
+      (value.kind === 'thinking' || value.kind === 'content') &&
+      'content' in value &&
+      typeof value.content === 'string',
+  );
 }
 
 function isRespondResponse(value: unknown): value is RespondResponse {

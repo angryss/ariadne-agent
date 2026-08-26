@@ -1,5 +1,7 @@
 import type {
   AgentClient,
+  CompletionDelta,
+  CompletionDeltaHandler,
   Profile,
   ProfileCatalog,
   RespondRequest,
@@ -47,7 +49,13 @@ export class HttpAgentClient implements AgentClient {
     return body;
   }
 
-  async respond(request: RespondRequest): Promise<RespondResponse> {
+  async respond(
+    request: RespondRequest,
+    onDelta?: CompletionDeltaHandler,
+  ): Promise<RespondResponse> {
+    if (onDelta) {
+      return this.respondStream(request, onDelta);
+    }
     const response = await this.fetcher(this.endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -71,6 +79,87 @@ export class HttpAgentClient implements AgentClient {
 
     return body;
   }
+
+  private async respondStream(
+    request: RespondRequest,
+    onDelta: CompletionDeltaHandler,
+  ): Promise<RespondResponse> {
+    const response = await this.fetcher(`${this.endpoint}/stream`, {
+      method: 'POST',
+      headers: {
+        accept: 'text/event-stream',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        throw new Error(`Ariadne API returned ${response.status}`);
+      }
+      throw new Error(readApiError(body) ?? `Ariadne API returned ${response.status}`);
+    }
+    if (!response.body) {
+      throw new Error('Ariadne API returned an invalid stream');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    let result: RespondResponse | null = null;
+
+    const processRecords = (complete: boolean) => {
+      pending = pending.replaceAll('\r\n', '\n');
+      const records = pending.split('\n\n');
+      pending = complete ? '' : (records.pop() ?? '');
+      for (const record of records) {
+        const data = record
+          .split('\n')
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart())
+          .join('\n');
+        if (!data) {
+          continue;
+        }
+        let event: unknown;
+        try {
+          event = JSON.parse(data);
+        } catch {
+          throw new Error('Ariadne API returned an invalid stream event');
+        }
+        if (isCompletionDelta(event)) {
+          onDelta(event);
+        } else if (isDoneEvent(event)) {
+          result = { message: event.message };
+        } else if (isErrorEvent(event)) {
+          throw new Error(event.message);
+        } else {
+          throw new Error('Ariadne API returned an invalid stream event');
+        }
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        pending += decoder.decode();
+        if (pending) {
+          pending += '\n\n';
+        }
+        processRecords(true);
+        break;
+      }
+      pending += decoder.decode(value, { stream: true });
+      processRecords(false);
+    }
+
+    if (!result) {
+      throw new Error('Ariadne API stream ended without a response');
+    }
+    return result;
+  }
 }
 
 function defaultEndpoint(): string {
@@ -90,6 +179,50 @@ function isRespondResponse(value: unknown): value is RespondResponse {
       (message.role === 'assistant' || message.role === 'user') &&
       'content' in message &&
       typeof message.content === 'string',
+  );
+}
+
+function isCompletionDelta(value: unknown): value is CompletionDelta {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      'kind' in value &&
+      (value.kind === 'thinking' || value.kind === 'content') &&
+      'content' in value &&
+      typeof value.content === 'string',
+  );
+}
+
+function isDoneEvent(value: unknown): value is { kind: 'done'; message: RespondResponse['message'] } {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      'kind' in value &&
+      value.kind === 'done' &&
+      'message' in value &&
+      isMessage(value.message),
+  );
+}
+
+function isErrorEvent(value: unknown): value is { kind: 'error'; message: string } {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      'kind' in value &&
+      value.kind === 'error' &&
+      'message' in value &&
+      typeof value.message === 'string',
+  );
+}
+
+function isMessage(value: unknown): value is RespondResponse['message'] {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      'role' in value &&
+      (value.role === 'assistant' || value.role === 'user') &&
+      'content' in value &&
+      typeof value.content === 'string',
   );
 }
 

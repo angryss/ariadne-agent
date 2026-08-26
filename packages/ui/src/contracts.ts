@@ -15,6 +15,12 @@ export interface RespondResponse {
   message: Message;
 }
 
+export type CompletionDelta =
+  | { kind: 'thinking'; content: string }
+  | { kind: 'content'; content: string };
+
+export type CompletionDeltaHandler = (delta: CompletionDelta) => void;
+
 export interface Profile {
   name: string;
   provider: string;
@@ -29,6 +35,6 @@ export interface ProfileCatalog {
 }
 
 export interface AgentClient {
-  respond(request: RespondRequest): Promise<RespondResponse>;
+  respond(request: RespondRequest, onDelta?: CompletionDeltaHandler): Promise<RespondResponse>;
   listProfiles?(): Promise<ProfileCatalog>;
 }

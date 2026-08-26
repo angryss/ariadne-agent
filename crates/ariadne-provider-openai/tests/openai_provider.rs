@@ -1,4 +1,4 @@
-use ariadne_core::{CompletionRequest, Message, ModelProvider};
+use ariadne_core::{CompletionDelta, CompletionRequest, Message, ModelProvider};
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -101,7 +101,7 @@ async fn complete_calls_the_openai_compatible_chat_endpoint() {
 }
 
 #[tokio::test]
-async fn complete_stream_requests_sse_and_emits_content_deltas() {
+async fn complete_stream_distinguishes_reasoning_from_user_facing_content() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -114,7 +114,9 @@ async fn complete_stream_requests_sse_and_emits_content_deltas() {
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(concat!(
-                    "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Check\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning\":\" facts\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
                     "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
                     "data: [DONE]\n\n"
                 )),
@@ -125,7 +127,7 @@ async fn complete_stream_requests_sse_and_emits_content_deltas() {
     let provider =
         OpenAiCompatibleProvider::new(format!("{}/v1", server.uri()), "test-model", None).unwrap();
     let mut deltas = Vec::new();
-    let mut on_delta = |delta: &str| deltas.push(delta.to_owned());
+    let mut on_delta = |delta: &CompletionDelta| deltas.push(delta.clone());
 
     let completion = provider
         .complete_stream(
@@ -137,7 +139,15 @@ async fn complete_stream_requests_sse_and_emits_content_deltas() {
         .await
         .unwrap();
 
-    assert_eq!(deltas, ["Hello", " world"]);
+    assert_eq!(
+        deltas,
+        [
+            CompletionDelta::Thinking("Check".to_owned()),
+            CompletionDelta::Thinking(" facts".to_owned()),
+            CompletionDelta::Content("Hello".to_owned()),
+            CompletionDelta::Content(" world".to_owned()),
+        ]
+    );
     assert_eq!(completion.message, Message::assistant("Hello world"));
 }
 

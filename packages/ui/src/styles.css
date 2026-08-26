@@ -35,6 +35,11 @@ button, textarea { font: inherit; }
 .message p:last-child { margin: .4rem 0 0; line-height: 1.55; white-space: pre-wrap; }
 .message-user { align-self: flex-end; border-color: #433b76; background: #1b1830; }
 .message-assistant { align-self: flex-start; }
+.thinking-block { align-self: flex-start; width: min(78%, 42rem); padding: .7rem .9rem; border: 1px solid #252b36; border-radius: .8rem; color: #7f899a; background: #10141b; font-size: .86rem; }
+.thinking-block summary { cursor: pointer; font-weight: 650; user-select: none; }
+.thinking-block summary:hover { color: #a6afbd; }
+.thinking-block summary:focus-visible { outline: 2px solid #9d91f5; outline-offset: 3px; }
+.thinking-block p { margin: .65rem 0 0; padding-left: 1rem; border-left: 2px solid #2d3441; line-height: 1.5; white-space: pre-wrap; }
 
 .composer { padding: .85rem; border: 1px solid #2d3441; border-radius: 1.1rem; background: #12161e; box-shadow: 0 1rem 4rem rgba(0, 0, 0, .25); }
 .request-error { margin: 0 0 .75rem; padding: .75rem 1rem; border: 1px solid #6d3542; border-radius: .75rem; color: #ffb8c4; background: #27151a; font-size: .88rem; }

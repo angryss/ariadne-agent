@@ -1,14 +1,20 @@
+use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
 
-use ariadne_core::{Agent, AgentError, AgentProfiles, Message, Profile, ProfileAgentError};
+use ariadne_core::{
+    Agent, AgentError, AgentProfiles, CompletionDelta, Message, Profile, ProfileAgentError,
+};
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
+use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(Clone)]
@@ -39,6 +45,10 @@ pub fn router_with_profiles(profiles: AgentProfiles) -> Router {
         .route(
             "/v1/respond",
             post(respond).fallback(api_method_not_allowed),
+        )
+        .route(
+            "/v1/respond/stream",
+            post(respond_stream).fallback(api_method_not_allowed),
         )
         .route("/v1", any(api_not_found))
         .route("/v1/{*path}", any(api_not_found))
@@ -134,6 +144,69 @@ async fn respond(
         .await
         .map_err(ApiError::from)?;
     Ok(Json(RespondResponse { message }))
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum StreamResponseEvent {
+    Thinking { content: String },
+    Content { content: String },
+    Done { message: Message },
+    Error { message: String },
+}
+
+impl From<&CompletionDelta> for StreamResponseEvent {
+    fn from(delta: &CompletionDelta) -> Self {
+        match delta {
+            CompletionDelta::Thinking(content) => Self::Thinking {
+                content: content.clone(),
+            },
+            CompletionDelta::Content(content) => Self::Content {
+                content: content.clone(),
+            },
+        }
+    }
+}
+
+async fn respond_stream(
+    State(state): State<AppState>,
+    request: Result<Json<RespondRequest>, JsonRejection>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let Json(request) = request.map_err(ApiError::from)?;
+    let profiles = Arc::clone(&state.profiles);
+    let (sender, receiver) = mpsc::unbounded_channel();
+
+    tokio::spawn(async move {
+        let delta_sender = sender.clone();
+        let mut on_delta = move |delta: &CompletionDelta| {
+            let _ = delta_sender.send(StreamResponseEvent::from(delta));
+        };
+        let result = profiles
+            .respond_stream(
+                request.profile.as_deref(),
+                &request.history,
+                &request.prompt,
+                &mut on_delta,
+            )
+            .await;
+        let event = match result {
+            Ok(message) => StreamResponseEvent::Done { message },
+            Err(error) => StreamResponseEvent::Error {
+                message: ApiError::from(error).message,
+            },
+        };
+        let _ = sender.send(event);
+    });
+
+    let stream = stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|event| {
+            let event = Event::default()
+                .json_data(event)
+                .expect("stream response events must serialize");
+            (Ok(event), receiver)
+        })
+    });
+    Ok(Sse::new(stream))
 }
 
 struct ApiError {

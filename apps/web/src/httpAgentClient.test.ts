@@ -28,6 +28,38 @@ describe('HttpAgentClient', () => {
     expect(response.message.content).toBe('From the server.');
   });
 
+  it('streams typed thinking and content events from the Ariadne API', async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(
+        [
+          'data: {"kind":"thinking","content":"Inspect"}\n\n',
+          'data: {"kind":"content","content":"Answer"}\n\n',
+          'data: {"kind":"done","message":{"role":"assistant","content":"Answer"}}\n\n',
+        ].join(''),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ),
+    );
+    const client = new HttpAgentClient('/v1/respond', fetcher);
+    const deltas: unknown[] = [];
+    const request = { prompt: 'Hello', history: [] };
+
+    const response = await client.respond(request, (delta) => deltas.push(delta));
+
+    expect(fetcher).toHaveBeenCalledWith('/v1/respond/stream', {
+      method: 'POST',
+      headers: {
+        accept: 'text/event-stream',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(request),
+    });
+    expect(deltas).toEqual([
+      { kind: 'thinking', content: 'Inspect' },
+      { kind: 'content', content: 'Answer' },
+    ]);
+    expect(response.message.content).toBe('Answer');
+  });
+
   it('reports an HTTP status when an error response is not JSON', async () => {
     const fetcher = vi.fn().mockResolvedValue(
       new Response('Bad Gateway', {

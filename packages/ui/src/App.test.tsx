@@ -18,12 +18,61 @@ describe('App', () => {
     await user.type(screen.getByLabelText('Message Ariadne'), 'Help me plan this');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
-    expect(client.respond).toHaveBeenCalledWith({
-      prompt: 'Help me plan this',
-      history: [],
-    });
+    expect(client.respond).toHaveBeenCalledWith(
+      {
+        prompt: 'Help me plan this',
+        history: [],
+      },
+      expect.any(Function),
+    );
     expect(await screen.findByText('Follow the thread.')).toBeInTheDocument();
     expect(screen.getByText('Help me plan this')).toBeInTheDocument();
+  });
+
+  it('submits the prompt when Enter is pressed in the composer', async () => {
+    const respond = vi.fn().mockResolvedValue({
+      message: { role: 'assistant' as const, content: 'Submitted.' },
+    });
+    const user = userEvent.setup();
+    render(<App client={{ respond }} />);
+
+    await user.type(screen.getByLabelText('Message Ariadne'), 'Send with Enter{Enter}');
+
+    expect(respond).toHaveBeenCalledWith(
+      {
+        prompt: 'Send with Enter',
+        history: [],
+      },
+      expect.any(Function),
+    );
+    expect(await screen.findByText('Submitted.')).toBeInTheDocument();
+  });
+
+  it('collapses streamed thinking when user-facing content begins and lets the user expand it', async () => {
+    const client: AgentClient = {
+      respond: vi.fn(async (_request, onDelta) => {
+        onDelta?.({ kind: 'thinking', content: 'Inspect the request' });
+        onDelta?.({ kind: 'thinking', content: '\nCompare the fields' });
+        onDelta?.({ kind: 'content', content: 'Here is the result.' });
+        return { message: { role: 'assistant' as const, content: 'Here is the result.' } };
+      }),
+    };
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    await user.type(screen.getByLabelText('Message Ariadne'), 'Investigate this');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('Here is the result.')).toBeInTheDocument();
+    const disclosure = screen.getByText('Thinking').closest('details');
+    expect(disclosure).not.toHaveAttribute('open');
+
+    await user.click(screen.getByText('Thinking'));
+
+    expect(disclosure).toHaveAttribute('open');
+    expect(screen.getByText(/Inspect the request/)).toHaveTextContent(
+      'Inspect the request Compare the fields',
+    );
   });
 
   it('shows a recoverable error when the client request fails', async () => {
@@ -55,10 +104,14 @@ describe('App', () => {
     await screen.findByRole('alert');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
-    expect(respond).toHaveBeenNthCalledWith(2, {
-      prompt: 'Retry this',
-      history: [],
-    });
+    expect(respond).toHaveBeenNthCalledWith(
+      2,
+      {
+        prompt: 'Retry this',
+        history: [],
+      },
+      expect.any(Function),
+    );
     expect(await screen.findByText('Recovered.')).toBeInTheDocument();
     expect(screen.getAllByText('Retry this')).toHaveLength(1);
   });
@@ -101,11 +154,15 @@ describe('App', () => {
     await user.type(screen.getByLabelText('Message Ariadne'), 'Use work');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
-    expect(respond).toHaveBeenNthCalledWith(2, {
-      profile: 'work',
-      prompt: 'Use work',
-      history: [],
-    });
+    expect(respond).toHaveBeenNthCalledWith(
+      2,
+      {
+        profile: 'work',
+        prompt: 'Use work',
+        history: [],
+      },
+      expect.any(Function),
+    );
     expect(screen.getByText('gpt-5')).toBeInTheDocument();
     expect(screen.getByText('github skill')).toBeInTheDocument();
     expect(screen.getByText('github MCP')).toBeInTheDocument();

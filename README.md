@@ -55,7 +55,7 @@ In another terminal, start an interactive session:
 cargo run -p ariadne-cli -- chat
 ```
 
-In the interactive terminal, type `/` to open command typeahead. Use the arrow keys to select a command, Tab to complete it, and Enter to run it. Available commands are `/clear`, `/help`, and `/quit`; `/exit` is an alias for `/quit`.
+In the interactive terminal, type `/` to open command typeahead. Use the arrow keys to select a command, Tab to complete it, and Enter to run it. Available commands are `/clear`, `/help`, and `/quit`; `/exit` is an alias for `/quit`. Thinking-model reasoning streams into a dim section while it is active, collapses when the user-facing answer begins, and can be expanded or collapsed with Ctrl-T.
 
 Run one unattended request:
 
@@ -81,7 +81,7 @@ cargo run -p ariadne-cli -- serve
 npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Vite proxies API requests to port 3000.
+Open <http://127.0.0.1:5173>. Vite proxies API requests to port 3000. Press Enter in the composer to submit; use Shift-Enter or Alt-Enter to insert a newline. The browser streams typed thinking and content events from the server, keeps the active thinking section open, and collapses it when the user-facing answer begins. Select the Thinking summary to expand or collapse it later.
 
 To exercise the production topology, build the SPA and serve it from the Rust process:
 
@@ -99,7 +99,7 @@ npm install
 npm run desktop:dev
 ```
 
-The desktop frontend uses narrow Tauri commands instead of opening the HTTP server. It loads the same profile catalog as the CLI and provides a profile selector that shows the selected model, provider, active skills, and MCP servers.
+The desktop frontend uses narrow Tauri commands and a typed IPC channel instead of opening the HTTP server. Its shared composer submits with Enter and inserts newlines with Shift-Enter or Alt-Enter. It provides the same streaming, collapsible thinking display as the browser, loads the same profile catalog as the CLI, and shows the selected model, provider, active skills, and MCP servers.
 
 ## Configuration
 
@@ -155,6 +155,8 @@ The response is:
   "message": { "role": "assistant", "content": "..." }
 }
 ```
+
+`POST /v1/respond/stream` accepts the same request and returns `text/event-stream`. Each data event is JSON with `kind` set to `thinking` or `content` and a `content` string. The final event has `kind: "done"` and the complete assistant `message`; failures after streaming starts use `kind: "error"` with a safe `message`.
 
 `GET /healthz` reports process readiness. The initial API is stateless: callers send history on each request.
 
