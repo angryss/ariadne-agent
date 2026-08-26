@@ -29,6 +29,15 @@ impl ModelProvider for InvalidRoleProvider {
     }
 }
 
+struct EmptyProvider;
+
+#[async_trait]
+impl ModelProvider for EmptyProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        Ok(Completion::new(Message::assistant(" \n")))
+    }
+}
+
 struct ReplyProvider(&'static str);
 
 #[async_trait]
@@ -346,6 +355,30 @@ async fn respond_endpoint_rejects_a_blank_prompt_as_bad_input() {
 #[tokio::test]
 async fn respond_endpoint_hides_invalid_provider_responses() {
     let agent = ariadne_core::Agent::new(Arc::new(InvalidRoleProvider), "You are Ariadne.");
+    let response = router(agent)
+        .oneshot(
+            Request::post("/v1/respond")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"prompt":"hello","history":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "error": {"code": "provider_error", "message": "model provider request failed"}
+        })
+    );
+}
+
+#[tokio::test]
+async fn respond_endpoint_maps_exhausted_empty_responses_to_a_safe_provider_error() {
+    let agent = ariadne_core::Agent::new(Arc::new(EmptyProvider), "You are Ariadne.");
     let response = router(agent)
         .oneshot(
             Request::post("/v1/respond")

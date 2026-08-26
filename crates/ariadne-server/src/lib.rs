@@ -225,7 +225,10 @@ impl From<AgentError> for ApiError {
                 code: "invalid_request",
                 message: error.to_string(),
             },
-            AgentError::Provider(_) | AgentError::InvalidProviderResponse => Self {
+            AgentError::Provider(_)
+            | AgentError::InvalidProviderResponse
+            | AgentError::EmptyProviderResponse
+            | AgentError::UnexpectedToolCallAfterFinalAnswer => Self {
                 status: StatusCode::BAD_GATEWAY,
                 code: "provider_error",
                 message: "model provider request failed".to_owned(),

@@ -75,6 +75,48 @@ describe('App', () => {
     );
   });
 
+  it('renders the final response and collapses thinking when no content delta arrives', async () => {
+    const client: AgentClient = {
+      respond: vi.fn(async (_request, onDelta) => {
+        onDelta?.({ kind: 'thinking', content: 'Call sw_vers' });
+        onDelta?.({ kind: 'content', content: '' });
+        return {
+          message: {
+            role: 'assistant' as const,
+            content: 'The computer is running macOS 26.6.1.',
+          },
+        };
+      }),
+    };
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    await user.type(screen.getByLabelText('Message Ariadne'), 'Which operating system?');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('The computer is running macOS 26.6.1.')).toBeInTheDocument();
+    expect(screen.getByText('Thinking').closest('details')).not.toHaveAttribute('open');
+  });
+
+  it('replaces a streamed draft with the authoritative final response', async () => {
+    const client: AgentClient = {
+      respond: vi.fn(async (_request, onDelta) => {
+        onDelta?.({ kind: 'content', content: 'Draft answer' });
+        return {
+          message: { role: 'assistant' as const, content: 'Verified final answer' },
+        };
+      }),
+    };
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    await user.type(screen.getByLabelText('Message Ariadne'), 'Answer this');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('Verified final answer')).toBeInTheDocument();
+    expect(screen.queryByText('Draft answer')).not.toBeInTheDocument();
+  });
+
   it('shows a recoverable error when the client request fails', async () => {
     const client: AgentClient = {
       respond: vi.fn().mockRejectedValue(new Error('The local server is unavailable')),
