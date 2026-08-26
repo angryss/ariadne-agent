@@ -567,6 +567,21 @@ async fn nested_allowlist_authorizes_matching_files_not_their_ancestors_or_sibli
 }
 
 #[tokio::test]
+async fn file_info_applies_final_target_policy_to_the_workspace_root() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut config = FileSystemConfig::new(workspace.path());
+    config.allowed_patterns = vec!["src/**/*.rs".to_owned()];
+    let tools = FileSystemToolset::new(config).unwrap().tools();
+
+    let error = tool(&tools, "file_info")
+        .execute(json!({"path": "."}))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("denied by filesystem policy"));
+}
+
+#[tokio::test]
 async fn list_find_and_search_return_bounded_policy_filtered_results() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::create_dir(workspace.path().join("src")).unwrap();
@@ -710,7 +725,6 @@ async fn traversal_budget_counts_directories_before_descending() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::create_dir(workspace.path().join("00-dir")).unwrap();
     std::fs::write(workspace.path().join("00-dir/hidden.rs"), "hidden").unwrap();
-    std::fs::write(workspace.path().join("01.rs"), "visible").unwrap();
     let mut config = FileSystemConfig::new(workspace.path());
     config.max_traversal_files = 1;
     let tools = FileSystemToolset::new(config).unwrap().tools();

@@ -297,8 +297,186 @@ async fn respond_rejects_a_tool_batch_above_the_total_call_limit_before_side_eff
     assert_eq!(executions.load(Ordering::SeqCst), 0);
 }
 
+struct LargeResultProvider;
+
+#[async_trait]
+impl ModelProvider for LargeResultProvider {
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+        if request
+            .messages
+            .iter()
+            .any(|message| message.role == ariadne_core::Role::Tool)
+        {
+            return Ok(Completion::new(Message::assistant("done")));
+        }
+        Ok(Completion::with_tool_calls(vec![ToolCall::new(
+            "large-result-call",
+            "large_result",
+            json!({}),
+        )]))
+    }
+}
+
+struct LargeResultTool;
+
+#[async_trait]
+impl Tool for LargeResultTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "large_result",
+            "Return a large result",
+            json!({"type": "object"}),
+        )
+    }
+
+    async fn execute(&self, _arguments: Value) -> Result<Value, ToolError> {
+        Ok(json!({"content": "x".repeat(8 * 1024 * 1024)}))
+    }
+}
+
+#[tokio::test]
+async fn respond_rejects_aggregate_tool_results_above_the_byte_budget() {
+    let agent = Agent::with_tools(
+        Arc::new(LargeResultProvider),
+        "Trusted policy.",
+        vec![Arc::new(LargeResultTool)],
+    )
+    .unwrap();
+
+    let error = agent.respond(&[], "Return too much").await.unwrap_err();
+
+    assert!(error.to_string().contains("tool result byte limit"));
+}
+
+struct SlowToolProvider;
+
+#[async_trait]
+impl ModelProvider for SlowToolProvider {
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+        if request
+            .messages
+            .iter()
+            .any(|message| message.role == ariadne_core::Role::Tool)
+        {
+            return Ok(Completion::new(Message::assistant("done")));
+        }
+        Ok(Completion::with_tool_calls(vec![ToolCall::new(
+            "slow-call",
+            "slow",
+            json!({}),
+        )]))
+    }
+}
+
+struct SlowTool;
+
+#[async_trait]
+impl Tool for SlowTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("slow", "Wait too long", json!({"type": "object"}))
+    }
+
+    async fn execute(&self, _arguments: Value) -> Result<Value, ToolError> {
+        tokio::time::sleep(std::time::Duration::from_secs(301)).await;
+        Ok(json!({"ok": true}))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn respond_cancels_tools_at_the_aggregate_execution_deadline() {
+    let agent = Agent::with_tools(
+        Arc::new(SlowToolProvider),
+        "Trusted policy.",
+        vec![Arc::new(SlowTool)],
+    )
+    .unwrap();
+
+    let error = agent.respond(&[], "Wait too long").await.unwrap_err();
+
+    assert!(error.to_string().contains("tool execution deadline"));
+}
+
+struct SlowFinalProvider;
+
+#[async_trait]
+impl ModelProvider for SlowFinalProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        tokio::time::sleep(std::time::Duration::from_secs(301)).await;
+        Ok(Completion::new(Message::assistant("too late")))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn respond_applies_the_tool_loop_deadline_to_provider_turns() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::with_tools(
+        Arc::new(SlowFinalProvider),
+        "Trusted policy.",
+        vec![Arc::new(CountingTool { executions })],
+    )
+    .unwrap();
+
+    let error = agent.respond(&[], "Wait too long").await.unwrap_err();
+
+    assert!(error.to_string().contains("tool loop deadline"));
+}
+
 struct StreamingToolProvider {
     requests: AtomicUsize,
+    thinking_forwarded: Arc<AtomicUsize>,
+}
+
+struct LiveStreamingProvider {
+    thinking_forwarded: Arc<AtomicUsize>,
+    content_forwarded: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ModelProvider for LiveStreamingProvider {
+    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+        unreachable!("streaming test must use complete_stream")
+    }
+
+    async fn complete_stream(
+        &self,
+        _request: CompletionRequest,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+    ) -> Result<Completion, ProviderError> {
+        on_delta(&CompletionDelta::Thinking("working".to_owned()));
+        assert_eq!(self.thinking_forwarded.load(Ordering::SeqCst), 1);
+
+        on_delta(&CompletionDelta::Content("answer".to_owned()));
+        assert_eq!(self.content_forwarded.load(Ordering::SeqCst), 1);
+
+        Ok(Completion::new(Message::assistant("answer")))
+    }
+}
+
+#[tokio::test]
+async fn respond_stream_forwards_deltas_before_the_provider_completes() {
+    let thinking_forwarded = Arc::new(AtomicUsize::new(0));
+    let content_forwarded = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        Arc::new(LiveStreamingProvider {
+            thinking_forwarded: Arc::clone(&thinking_forwarded),
+            content_forwarded: Arc::clone(&content_forwarded),
+        }),
+        "Trusted policy.",
+    );
+
+    let reply = agent
+        .respond_stream(&[], "Answer immediately", &mut |delta| match delta {
+            CompletionDelta::Thinking(_) => {
+                thinking_forwarded.fetch_add(1, Ordering::SeqCst);
+            }
+            CompletionDelta::Content(_) => {
+                content_forwarded.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(reply, Message::assistant("answer"));
 }
 
 #[async_trait]
@@ -312,10 +490,12 @@ impl ModelProvider for StreamingToolProvider {
         _request: CompletionRequest,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
     ) -> Result<Completion, ProviderError> {
-        if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+        let turn = self.requests.fetch_add(1, Ordering::SeqCst);
+        if turn == 0 {
             on_delta(&CompletionDelta::Thinking(
                 "intermediate thought".to_owned(),
             ));
+            assert_eq!(self.thinking_forwarded.load(Ordering::SeqCst), turn + 1);
             on_delta(&CompletionDelta::Content("intermediate content".to_owned()));
             Ok(Completion::with_tool_calls(vec![ToolCall::new(
                 "call-1",
@@ -324,6 +504,7 @@ impl ModelProvider for StreamingToolProvider {
             )]))
         } else {
             on_delta(&CompletionDelta::Thinking("final thought".to_owned()));
+            assert_eq!(self.thinking_forwarded.load(Ordering::SeqCst), turn + 1);
             on_delta(&CompletionDelta::Content("final answer".to_owned()));
             Ok(Completion::new(Message::assistant("final answer")))
         }
@@ -331,11 +512,13 @@ impl ModelProvider for StreamingToolProvider {
 }
 
 #[tokio::test]
-async fn respond_stream_emits_only_deltas_from_the_final_answer_turn() {
+async fn respond_stream_emits_thinking_live_but_content_only_from_the_final_answer_turn() {
     let executions = Arc::new(AtomicUsize::new(0));
+    let thinking_forwarded = Arc::new(AtomicUsize::new(0));
     let agent = Agent::with_tools(
         Arc::new(StreamingToolProvider {
             requests: AtomicUsize::new(0),
+            thinking_forwarded: Arc::clone(&thinking_forwarded),
         }),
         "Trusted policy.",
         vec![Arc::new(CountingTool { executions })],
@@ -345,6 +528,9 @@ async fn respond_stream_emits_only_deltas_from_the_final_answer_turn() {
 
     let reply = agent
         .respond_stream(&[], "Answer after inspecting", &mut |delta| {
+            if matches!(delta, CompletionDelta::Thinking(_)) {
+                thinking_forwarded.fetch_add(1, Ordering::SeqCst);
+            }
             deltas.push(delta.clone());
         })
         .await
@@ -354,6 +540,7 @@ async fn respond_stream_emits_only_deltas_from_the_final_answer_turn() {
     assert_eq!(
         deltas,
         vec![
+            CompletionDelta::Thinking("intermediate thought".to_owned()),
             CompletionDelta::Thinking("final thought".to_owned()),
             CompletionDelta::Content("final answer".to_owned()),
         ]

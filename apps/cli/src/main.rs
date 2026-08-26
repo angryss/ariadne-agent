@@ -8,6 +8,7 @@ use anyhow::{Context, Result, ensure};
 use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedCapability, ResolvedProfile};
 use ariadne_core::{Agent, AgentProfiles, ModelProvider, Tool};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
+use ariadne_tools_command::{CommandConfig, CommandTool};
 use ariadne_tools_filesystem::{FileSystemConfig, FileSystemToolset};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
@@ -254,9 +255,20 @@ fn configured_agent(profile: &ResolvedProfile, api_key_override: Option<String>)
 }
 
 fn configured_tools(profile: &ResolvedProfile) -> Result<Vec<Arc<dyn Tool>>> {
-    let mut tools = Vec::new();
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     for capability in &profile.capabilities {
         match capability {
+            ResolvedCapability::Command(capability) => {
+                tools.push(Arc::new(
+                    CommandTool::new(CommandConfig {
+                        working_directory: capability.working_directory.clone(),
+                        programs: capability.programs.clone(),
+                        timeout_seconds: capability.timeout_seconds,
+                        max_output_bytes: capability.max_output_bytes,
+                    })
+                    .context("invalid command capability")?,
+                ));
+            }
             ResolvedCapability::FileSystem(capability) => {
                 let mut config = FileSystemConfig::new(&capability.root);
                 config.read_only = capability.read_only;

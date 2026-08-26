@@ -7,6 +7,9 @@ use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
 
+const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 300;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+
 pub const DEFAULT_API_BASE: &str = "http://127.0.0.1:11434/v1";
 pub const DEFAULT_MODEL: &str = "qwen3:8b";
 pub const DEFAULT_PROFILE: &str = "default";
@@ -33,6 +36,15 @@ pub struct ResolvedProfile {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolvedCapability {
     FileSystem(FileSystemCapability),
+    Command(CommandCapability),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandCapability {
+    pub working_directory: PathBuf,
+    pub programs: BTreeMap<String, PathBuf>,
+    pub timeout_seconds: u64,
+    pub max_output_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -173,6 +185,9 @@ impl ProfileCatalog {
                     CapabilityConfig::FileSystem(config) => {
                         ResolvedCapability::FileSystem(config.clone().into())
                     }
+                    CapabilityConfig::Command(config) => {
+                        ResolvedCapability::Command(config.clone().into())
+                    }
                 })
                 .collect(),
         })
@@ -202,6 +217,35 @@ impl ProfileCatalog {
             }
             if let Some(api_key_env) = &provider.api_key_env {
                 ensure_not_blank("provider API key environment variable", api_key_env)?;
+            }
+        }
+
+        for (name, capability) in &file.capabilities {
+            ensure_not_blank("capability name", name)?;
+            if let CapabilityConfig::Command(command) = capability {
+                if command.programs.is_empty() {
+                    return Err(ConfigError::CommandProgramsEmpty {
+                        capability: name.clone(),
+                    });
+                }
+                if command.timeout_seconds == 0
+                    || command.max_output_bytes == 0
+                    || command.timeout_seconds > MAX_COMMAND_TIMEOUT_SECONDS
+                    || command.max_output_bytes > MAX_COMMAND_OUTPUT_BYTES
+                {
+                    return Err(ConfigError::InvalidCommandLimit {
+                        capability: name.clone(),
+                    });
+                }
+                for (alias, path) in &command.programs {
+                    ensure_not_blank("command program alias", alias)?;
+                    if !path.is_absolute() {
+                        return Err(ConfigError::CommandProgramNotAbsolute {
+                            capability: name.clone(),
+                            alias: alias.clone(),
+                        });
+                    }
+                }
             }
         }
 
@@ -246,6 +290,21 @@ impl ProfileCatalog {
                 .count();
             if filesystem_capabilities > 1 {
                 return Err(ConfigError::ConflictingFileSystemCapabilities {
+                    profile: name.clone(),
+                });
+            }
+            let command_capabilities = profile
+                .capabilities
+                .iter()
+                .filter(|capability| {
+                    matches!(
+                        file.capabilities.get(*capability),
+                        Some(CapabilityConfig::Command(_))
+                    )
+                })
+                .count();
+            if command_capabilities > 1 {
+                return Err(ConfigError::ConflictingCommandCapabilities {
                     profile: name.clone(),
                 });
             }
@@ -301,6 +360,28 @@ struct ProfileConfig {
 enum CapabilityConfig {
     #[serde(rename = "filesystem")]
     FileSystem(FileSystemCapabilityConfig),
+    #[serde(rename = "command")]
+    Command(CommandCapabilityConfig),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandCapabilityConfig {
+    working_directory: PathBuf,
+    programs: BTreeMap<String, PathBuf>,
+    timeout_seconds: u64,
+    max_output_bytes: usize,
+}
+
+impl From<CommandCapabilityConfig> for CommandCapability {
+    fn from(config: CommandCapabilityConfig) -> Self {
+        Self {
+            working_directory: config.working_directory,
+            programs: config.programs,
+            timeout_seconds: config.timeout_seconds,
+            max_output_bytes: config.max_output_bytes,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -364,6 +445,18 @@ pub enum ConfigError {
         "profile `{profile}` activates multiple filesystem capabilities, whose tool names would conflict"
     )]
     ConflictingFileSystemCapabilities { profile: String },
+    #[error(
+        "profile `{profile}` activates multiple command capabilities, whose tool names would conflict"
+    )]
+    ConflictingCommandCapabilities { profile: String },
+    #[error("command capability `{capability}` must configure at least one program")]
+    CommandProgramsEmpty { capability: String },
+    #[error(
+        "command capability `{capability}` timeout and output limits must be greater than zero and within the safe maximum"
+    )]
+    InvalidCommandLimit { capability: String },
+    #[error("command capability `{capability}` program `{alias}` must use an absolute path")]
+    CommandProgramNotAbsolute { capability: String, alias: String },
     #[error("{0} must not be blank")]
     BlankValue(&'static str),
     #[error("{kind} `{name}` is listed more than once")]

@@ -207,6 +207,12 @@ pub enum AgentError {
     ToolLoopLimit(usize),
     #[error("agent exceeded the maximum of {0} tool calls")]
     ToolCallLimit(usize),
+    #[error("agent exceeded the {0}-byte aggregate tool result byte limit")]
+    ToolResultByteLimit(usize),
+    #[error("agent exceeded the {0}-second aggregate tool execution deadline")]
+    ToolExecutionDeadline(u64),
+    #[error("agent exceeded the {0}-second aggregate tool loop deadline")]
+    ToolLoopDeadline(u64),
     #[error(transparent)]
     Provider(#[from] ProviderError),
 }
@@ -220,6 +226,8 @@ pub struct Agent {
 
 const MAX_MODEL_TURNS: usize = 8;
 const MAX_TOOL_CALLS: usize = 64;
+const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TOOL_EXECUTION_SECONDS: u64 = 300;
 
 impl Agent {
     pub fn new(provider: Arc<dyn ModelProvider>, system_prompt: impl Into<Arc<str>>) -> Self {
@@ -296,27 +304,49 @@ impl Agent {
             .map(|tool| tool.definition())
             .collect::<Vec<_>>();
         let mut tool_calls_used = 0;
+        let mut tool_result_bytes = 0_usize;
+        let tool_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(MAX_TOOL_EXECUTION_SECONDS);
         for turn in 0..MAX_MODEL_TURNS {
             let request = CompletionRequest {
                 messages: messages.clone(),
                 tools: tools.clone(),
             };
-            let mut turn_deltas = Vec::new();
-            let completion = if stream {
-                let mut buffer_delta = |delta: &CompletionDelta| turn_deltas.push(delta.clone());
-                self.provider
-                    .complete_stream(request, &mut buffer_delta)
-                    .await?
+            let completion = if tools.is_empty() {
+                if stream {
+                    self.provider.complete_stream(request, on_delta).await?
+                } else {
+                    self.provider.complete(request).await?
+                }
             } else {
-                self.provider.complete(request).await?
+                tokio::time::timeout_at(tool_deadline, async {
+                    if stream {
+                        let mut content_deltas = Vec::new();
+                        let mut forward_thinking = |delta: &CompletionDelta| match delta {
+                            CompletionDelta::Thinking(_) => on_delta(delta),
+                            CompletionDelta::Content(_) => content_deltas.push(delta.clone()),
+                        };
+                        let completion = self
+                            .provider
+                            .complete_stream(request, &mut forward_thinking)
+                            .await?;
+                        if completion.message.tool_calls.is_empty() {
+                            for delta in &content_deltas {
+                                on_delta(delta);
+                            }
+                        }
+                        Ok(completion)
+                    } else {
+                        self.provider.complete(request).await
+                    }
+                })
+                .await
+                .map_err(|_| AgentError::ToolLoopDeadline(MAX_TOOL_EXECUTION_SECONDS))??
             };
             if completion.message.role != Role::Assistant {
                 return Err(AgentError::InvalidProviderResponse);
             }
             if completion.message.tool_calls.is_empty() {
-                for delta in &turn_deltas {
-                    on_delta(delta);
-                }
                 return Ok(completion.message);
             }
             if turn + 1 == MAX_MODEL_TURNS {
@@ -331,13 +361,24 @@ impl Agent {
             messages.push(completion.message);
             for call in tool_calls {
                 let result = match self.tools.get(&call.name) {
-                    Some(tool) => tool
-                        .execute(call.arguments)
-                        .await
-                        .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()})),
+                    Some(tool) => {
+                        tokio::time::timeout_at(tool_deadline, tool.execute(call.arguments))
+                            .await
+                            .map_err(|_| {
+                                AgentError::ToolExecutionDeadline(MAX_TOOL_EXECUTION_SECONDS)
+                            })?
+                            .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()}))
+                    }
                     None => serde_json::json!({"error": format!("unknown tool `{}`", call.name)}),
                 };
-                messages.push(Message::tool(call.id, result.to_string()));
+                let result = result.to_string();
+                tool_result_bytes = tool_result_bytes
+                    .checked_add(result.len())
+                    .ok_or(AgentError::ToolResultByteLimit(MAX_TOOL_RESULT_BYTES))?;
+                if tool_result_bytes > MAX_TOOL_RESULT_BYTES {
+                    return Err(AgentError::ToolResultByteLimit(MAX_TOOL_RESULT_BYTES));
+                }
+                messages.push(Message::tool(call.id, result));
             }
         }
         Err(AgentError::ToolLoopLimit(MAX_MODEL_TURNS))

@@ -6,6 +6,7 @@ members = [
   "crates/ariadne-core",
   "crates/ariadne-provider-openai",
   "crates/ariadne-server",
+  "crates/ariadne-tools-command",
   "crates/ariadne-tools-filesystem",
 ]
 resolver = "3"
@@ -28,6 +29,8 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 dirs = "6"
 futures-util = "0.3"
 globset = "0.4"
+libc = "0.2"
+process-wrap = { version = "10.0.0", default-features = false, features = ["kill-on-drop", "process-group", "tokio1"] }
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
@@ -35,7 +38,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 toml = "0.9"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["fs", "trace"] }

@@ -406,3 +406,96 @@ read_only = true
         .success()
         .stdout(predicate::eq("Read the workspace file.\n"));
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn run_executes_the_selected_profiles_command_capability() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("\"name\":\"run_command\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "run_command",
+                            "arguments": "{\"program\":\"inspect_os\"}"
+                        }
+                    }]
+                }
+            }]
+        })))
+        .with_priority(10)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .and(body_string_contains("TestOS 26.6"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "TestOS 26.6 is installed."}
+            }]
+        })))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let program = directory.path().join("inspect-os");
+    std::fs::write(&program, "#!/bin/sh\nprintf 'TestOS 26.6\\n'\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+version = 1
+default_profile = "local"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "{server}/v1"
+
+[profiles.local]
+provider = "local"
+model = "test-model"
+capabilities = ["host-commands"]
+
+[capabilities.host-commands]
+kind = "command"
+working_directory = "{root}"
+programs = {{ inspect_os = "{program}" }}
+timeout_seconds = 5
+max_output_bytes = 8192
+"#,
+            server = server.uri(),
+            root = directory.path().display(),
+            program = program.display()
+        ),
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("ariadne").unwrap();
+    command.args([
+        "--config",
+        config.to_str().unwrap(),
+        "run",
+        "--prompt",
+        "What operating system is installed on this computer?",
+    ]);
+
+    command
+        .assert()
+        .success()
+        .stdout(predicate::eq("TestOS 26.6 is installed.\n"));
+}

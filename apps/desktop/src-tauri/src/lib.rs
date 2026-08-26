@@ -4,6 +4,7 @@ use std::sync::Arc;
 use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedCapability, ResolvedProfile};
 use ariadne_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile, Tool};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
+use ariadne_tools_command::{CommandConfig, CommandTool};
 use ariadne_tools_filesystem::{FileSystemConfig, FileSystemToolset};
 use serde::{Deserialize, Serialize};
 use tauri::{State, ipc::Channel};
@@ -212,6 +213,14 @@ fn configured_agent(
         ),
     };
 
+    compose_agent(profile, provider)
+}
+
+#[doc(hidden)]
+pub fn compose_agent(
+    profile: &ResolvedProfile,
+    provider: Arc<dyn ModelProvider>,
+) -> Result<Agent, String> {
     let tools = configured_tools(profile)?;
     if tools.is_empty() {
         Ok(Agent::new(provider, profile.system_prompt.clone()))
@@ -222,9 +231,20 @@ fn configured_agent(
 }
 
 fn configured_tools(profile: &ResolvedProfile) -> Result<Vec<Arc<dyn Tool>>, String> {
-    let mut tools = Vec::new();
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     for capability in &profile.capabilities {
         match capability {
+            ResolvedCapability::Command(capability) => {
+                tools.push(Arc::new(
+                    CommandTool::new(CommandConfig {
+                        working_directory: capability.working_directory.clone(),
+                        programs: capability.programs.clone(),
+                        timeout_seconds: capability.timeout_seconds,
+                        max_output_bytes: capability.max_output_bytes,
+                    })
+                    .map_err(|error| error.to_string())?,
+                ));
+            }
             ResolvedCapability::FileSystem(capability) => {
                 let mut config = FileSystemConfig::new(&capability.root);
                 config.read_only = capability.read_only;

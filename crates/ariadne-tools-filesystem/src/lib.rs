@@ -716,6 +716,7 @@ impl FileSystem {
     fn file_info(&self, path: &str) -> Result<Value, FileSystemError> {
         let relative_path = validate_relative(path)?;
         let relative = relative_string(&relative_path);
+        self.ensure_read_allowed(&relative)?;
         let metadata = if relative.is_empty() {
             self.root_dir
                 .metadata(".")

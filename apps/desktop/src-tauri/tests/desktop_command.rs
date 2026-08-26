@@ -2,10 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use ariadne_core::{
     Agent, AgentProfiles, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
-    Profile, ProviderError,
+    Profile, ProviderError, ToolCall,
 };
 use ariadne_desktop::{
-    RespondRequest, list_profiles, respond_stream_with_profiles, respond_with_agent,
+    RespondRequest, compose_agent, list_profiles, respond_stream_with_profiles, respond_with_agent,
     respond_with_profiles,
 };
 use async_trait::async_trait;
@@ -153,4 +153,98 @@ async fn desktop_stream_command_forwards_typed_deltas() {
         ]
     );
     assert_eq!(response.message, Message::assistant("Answer"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn desktop_composition_executes_command_capabilities_without_leaking_paths() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use ariadne_config::ProfileCatalog;
+    use serde_json::json;
+
+    struct CommandProvider {
+        requests: Mutex<Vec<CompletionRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CommandProvider {
+        async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+            let has_result = request
+                .messages
+                .iter()
+                .any(|message| message.role == ariadne_core::Role::Tool);
+            self.requests.lock().unwrap().push(request);
+            if has_result {
+                Ok(Completion::new(Message::assistant("command complete")))
+            } else {
+                Ok(Completion::with_tool_calls(vec![ToolCall::new(
+                    "desktop-command",
+                    "run_command",
+                    json!({"program": "inspect"}),
+                )]))
+            }
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let program = directory.path().join("inspect");
+    std::fs::write(&program, "#!/bin/sh\nprintf 'desktop-command-result'\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let catalog = ProfileCatalog::from_toml(&format!(
+        r#"
+version = 1
+default_profile = "desktop"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.desktop]
+provider = "local"
+model = "test"
+capabilities = ["host"]
+
+[capabilities.host]
+kind = "command"
+working_directory = "{}"
+programs = {{ inspect = "{}" }}
+timeout_seconds = 5
+max_output_bytes = 8192
+"#,
+        directory.path().display(),
+        program.display()
+    ))
+    .unwrap();
+    let profile = catalog.resolve("desktop").unwrap();
+    let provider = Arc::new(CommandProvider {
+        requests: Mutex::new(Vec::new()),
+    });
+    let agent = compose_agent(&profile, Arc::clone(&provider) as Arc<dyn ModelProvider>).unwrap();
+
+    let response = respond_with_agent(
+        &agent,
+        RespondRequest {
+            profile: None,
+            prompt: "Inspect the host".to_owned(),
+            history: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.message, Message::assistant("command complete"));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests[0].tools[0].name, "run_command");
+    assert!(
+        !requests[0].tools[0]
+            .description
+            .contains(&program.display().to_string())
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("desktop-command-result"))
+    );
 }
