@@ -1,4 +1,6 @@
-use ariadne_core::{CompletionDelta, CompletionRequest, Message, ModelProvider};
+use ariadne_core::{
+    CompletionDelta, CompletionRequest, Message, ModelProvider, ToolCall, ToolDefinition,
+};
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -90,6 +92,7 @@ async fn complete_calls_the_openai_compatible_chat_endpoint() {
     let completion = provider
         .complete(CompletionRequest {
             messages: vec![Message::system("You are Ariadne."), Message::user("Hello")],
+            tools: Vec::new(),
         })
         .await
         .unwrap();
@@ -98,6 +101,123 @@ async fn complete_calls_the_openai_compatible_chat_endpoint() {
         completion.message,
         Message::assistant("Hello from the model")
     );
+}
+
+#[tokio::test]
+async fn complete_sends_tool_definitions_and_parses_tool_calls() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Read README.md"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a workspace file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]
+                    }
+                }
+            }]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                }
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        OpenAiCompatibleProvider::new(format!("{}/v1", server.uri()), "test-model", None).unwrap();
+
+    let completion = provider
+        .complete(CompletionRequest {
+            messages: vec![Message::user("Read README.md")],
+            tools: vec![ToolDefinition::new(
+                "read_file",
+                "Read a workspace file",
+                json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+            )],
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(completion.message.tool_calls.len(), 1);
+    assert_eq!(completion.message.tool_calls[0].name, "read_file");
+    assert_eq!(
+        completion.message.tool_calls[0].arguments,
+        json!({"path": "README.md"})
+    );
+}
+
+#[tokio::test]
+async fn complete_serializes_assistant_tool_calls_and_tool_results() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Read it"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                },
+                {"role": "tool", "content": "{\"content\":\"# Ariadne\"}", "tool_call_id": "call-1"}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "Done"}}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        OpenAiCompatibleProvider::new(format!("{}/v1", server.uri()), "test-model", None).unwrap();
+
+    provider
+        .complete(CompletionRequest {
+            messages: vec![
+                Message::user("Read it"),
+                Message::assistant_with_tool_calls(vec![ToolCall::new(
+                    "call-1",
+                    "read_file",
+                    json!({"path": "README.md"}),
+                )]),
+                Message::tool("call-1", "{\"content\":\"# Ariadne\"}"),
+            ],
+            tools: Vec::new(),
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -133,6 +253,7 @@ async fn complete_stream_distinguishes_reasoning_from_user_facing_content() {
         .complete_stream(
             CompletionRequest {
                 messages: vec![Message::user("Hello")],
+                tools: Vec::new(),
             },
             &mut on_delta,
         )
@@ -152,6 +273,102 @@ async fn complete_stream_distinguishes_reasoning_from_user_facing_content() {
 }
 
 #[tokio::test]
+async fn complete_stream_accumulates_fragmented_tool_calls() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"README.md\\\"}\"}}]}}]}\n\n",
+                    "data: [DONE]\n\n"
+                )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        OpenAiCompatibleProvider::new(format!("{}/v1", server.uri()), "test-model", None).unwrap();
+    let mut deltas = Vec::new();
+
+    let completion = provider
+        .complete_stream(
+            CompletionRequest {
+                messages: vec![Message::user("Read README.md")],
+                tools: vec![ToolDefinition::new(
+                    "read_file",
+                    "Read a workspace file",
+                    json!({"type": "object"}),
+                )],
+            },
+            &mut |delta| deltas.push(delta.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert!(deltas.is_empty());
+    assert_eq!(completion.message.tool_calls.len(), 1);
+    assert_eq!(completion.message.tool_calls[0].id, "call-1");
+    assert_eq!(
+        completion.message.tool_calls[0].arguments,
+        json!({"path": "README.md"})
+    );
+}
+
+async fn incomplete_stream_error(body: &str) -> String {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatibleProvider::new(server.uri(), "test-model", None).unwrap();
+
+    provider
+        .complete_stream(
+            CompletionRequest {
+                messages: vec![Message::user("Hello")],
+                tools: Vec::new(),
+            },
+            &mut |_| {},
+        )
+        .await
+        .expect_err("an SSE response without a protocol terminator must fail")
+        .to_string()
+}
+
+#[tokio::test]
+async fn complete_stream_rejects_abrupt_empty_success_response() {
+    let error = incomplete_stream_error("").await;
+    assert!(error.contains("before [DONE]"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn complete_stream_rejects_truncated_answer() {
+    let error = incomplete_stream_error(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial answer\"}}]}\n\n",
+    )
+    .await;
+    assert!(error.contains("before [DONE]"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn complete_stream_rejects_complete_looking_tool_call_without_terminator() {
+    let error = incomplete_stream_error(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]}}]}\n\n",
+    )
+    .await;
+    assert!(error.contains("before [DONE]"), "unexpected error: {error}");
+}
+
+#[tokio::test]
 async fn oversized_success_response_is_rejected() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -165,6 +382,7 @@ async fn oversized_success_response_is_rejected() {
     let error = provider
         .complete(CompletionRequest {
             messages: vec![Message::user("Hello")],
+            tools: Vec::new(),
         })
         .await
         .expect_err("oversized success body must be rejected");
@@ -189,6 +407,7 @@ async fn oversized_error_response_is_rejected() {
     let error = provider
         .complete(CompletionRequest {
             messages: vec![Message::user("Hello")],
+            tools: Vec::new(),
         })
         .await
         .expect_err("oversized error body must be rejected");

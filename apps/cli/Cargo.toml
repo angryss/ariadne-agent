@@ -17,6 +17,7 @@ ariadne-config = { path = "../../crates/ariadne-config" }
 ariadne-core = { path = "../../crates/ariadne-core" }
 ariadne-provider-openai = { path = "../../crates/ariadne-provider-openai" }
 ariadne-server = { path = "../../crates/ariadne-server" }
+ariadne-tools-filesystem = { path = "../../crates/ariadne-tools-filesystem" }
 axum.workspace = true
 clap.workspace = true
 crossterm.workspace = true

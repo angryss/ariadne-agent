@@ -253,7 +253,10 @@ function isProfile(value: unknown): value is Profile {
       value.active_skills.every((skill) => typeof skill === 'string') &&
       'mcp_servers' in value &&
       Array.isArray(value.mcp_servers) &&
-      value.mcp_servers.every((server) => typeof server === 'string'),
+      value.mcp_servers.every((server) => typeof server === 'string') &&
+      'capabilities' in value &&
+      Array.isArray(value.capabilities) &&
+      value.capabilities.every((capability) => typeof capability === 'string'),
   );
 }
 

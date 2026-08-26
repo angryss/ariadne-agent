@@ -1,6 +1,6 @@
 [package]
-name = "ariadne-core"
-description = "Transport-independent application core for Ariadne"
+name = "ariadne-tools-filesystem"
+description = "Workspace-scoped native filesystem tools for Ariadne"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,17 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ariadne-core = { path = "../ariadne-core" }
 async-trait.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
+globset.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 tokio.workspace = true

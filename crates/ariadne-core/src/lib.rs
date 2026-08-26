@@ -11,12 +11,17 @@ pub enum Role {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
@@ -24,6 +29,8 @@ impl Message {
         Self {
             role: Role::System,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
 
@@ -31,6 +38,8 @@ impl Message {
         Self {
             role: Role::User,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
 
@@ -38,13 +47,96 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant_with_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
         }
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+impl ToolCall {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+impl ToolDefinition {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("tool failed: {message}")]
+pub struct ToolError {
+    message: String,
+}
+
+impl ToolError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn definition(&self) -> ToolDefinition;
+    async fn execute(&self, arguments: serde_json::Value) -> Result<serde_json::Value, ToolError>;
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CompletionRequest {
     pub messages: Vec<Message>,
+    pub tools: Vec<ToolDefinition>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -55,6 +147,10 @@ pub struct Completion {
 impl Completion {
     pub fn new(message: Message) -> Self {
         Self { message }
+    }
+
+    pub fn with_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self::new(Message::assistant_with_tool_calls(tool_calls))
     }
 }
 
@@ -103,6 +199,14 @@ pub enum AgentError {
     InvalidHistory,
     #[error("model provider response must contain an assistant message")]
     InvalidProviderResponse,
+    #[error("tool name must not be blank")]
+    BlankToolName,
+    #[error("tool `{0}` is defined more than once")]
+    DuplicateTool(String),
+    #[error("agent exceeded the maximum of {0} model turns")]
+    ToolLoopLimit(usize),
+    #[error("agent exceeded the maximum of {0} tool calls")]
+    ToolCallLimit(usize),
     #[error(transparent)]
     Provider(#[from] ProviderError),
 }
@@ -111,14 +215,41 @@ pub enum AgentError {
 pub struct Agent {
     provider: Arc<dyn ModelProvider>,
     system_prompt: Arc<str>,
+    tools: Arc<BTreeMap<String, Arc<dyn Tool>>>,
 }
+
+const MAX_MODEL_TURNS: usize = 8;
+const MAX_TOOL_CALLS: usize = 64;
 
 impl Agent {
     pub fn new(provider: Arc<dyn ModelProvider>, system_prompt: impl Into<Arc<str>>) -> Self {
         Self {
             provider,
             system_prompt: system_prompt.into(),
+            tools: Arc::new(BTreeMap::new()),
         }
+    }
+
+    pub fn with_tools(
+        provider: Arc<dyn ModelProvider>,
+        system_prompt: impl Into<Arc<str>>,
+        tools: Vec<Arc<dyn Tool>>,
+    ) -> Result<Self, AgentError> {
+        let mut indexed = BTreeMap::new();
+        for tool in tools {
+            let name = tool.definition().name;
+            if name.trim().is_empty() {
+                return Err(AgentError::BlankToolName);
+            }
+            if indexed.insert(name.clone(), tool).is_some() {
+                return Err(AgentError::DuplicateTool(name));
+            }
+        }
+        Ok(Self {
+            provider,
+            system_prompt: system_prompt.into(),
+            tools: Arc::new(indexed),
+        })
     }
 
     pub async fn respond(&self, history: &[Message], input: &str) -> Result<Message, AgentError> {
@@ -146,7 +277,11 @@ impl Agent {
         if input.trim().is_empty() {
             return Err(AgentError::BlankInput);
         }
-        if history.iter().any(|message| message.role == Role::System) {
+        if history.iter().any(|message| {
+            !matches!(message.role, Role::User | Role::Assistant)
+                || !message.tool_calls.is_empty()
+                || message.tool_call_id.is_some()
+        }) {
             return Err(AgentError::InvalidHistory);
         }
 
@@ -155,16 +290,57 @@ impl Agent {
         messages.extend_from_slice(history);
         messages.push(Message::user(input));
 
-        let request = CompletionRequest { messages };
-        let completion = if stream {
-            self.provider.complete_stream(request, on_delta).await?
-        } else {
-            self.provider.complete(request).await?
-        };
-        if completion.message.role != Role::Assistant {
-            return Err(AgentError::InvalidProviderResponse);
+        let tools = self
+            .tools
+            .values()
+            .map(|tool| tool.definition())
+            .collect::<Vec<_>>();
+        let mut tool_calls_used = 0;
+        for turn in 0..MAX_MODEL_TURNS {
+            let request = CompletionRequest {
+                messages: messages.clone(),
+                tools: tools.clone(),
+            };
+            let mut turn_deltas = Vec::new();
+            let completion = if stream {
+                let mut buffer_delta = |delta: &CompletionDelta| turn_deltas.push(delta.clone());
+                self.provider
+                    .complete_stream(request, &mut buffer_delta)
+                    .await?
+            } else {
+                self.provider.complete(request).await?
+            };
+            if completion.message.role != Role::Assistant {
+                return Err(AgentError::InvalidProviderResponse);
+            }
+            if completion.message.tool_calls.is_empty() {
+                for delta in &turn_deltas {
+                    on_delta(delta);
+                }
+                return Ok(completion.message);
+            }
+            if turn + 1 == MAX_MODEL_TURNS {
+                return Err(AgentError::ToolLoopLimit(MAX_MODEL_TURNS));
+            }
+            if tool_calls_used + completion.message.tool_calls.len() > MAX_TOOL_CALLS {
+                return Err(AgentError::ToolCallLimit(MAX_TOOL_CALLS));
+            }
+            tool_calls_used += completion.message.tool_calls.len();
+
+            let tool_calls = completion.message.tool_calls.clone();
+            messages.push(completion.message);
+            for call in tool_calls {
+                let result = match self.tools.get(&call.name) {
+                    Some(tool) => tool
+                        .execute(call.arguments)
+                        .await
+                        .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()})),
+                    None => serde_json::json!({"error": format!("unknown tool `{}`", call.name)}),
+                };
+                messages.push(Message::tool(call.id, result.to_string()));
+            }
         }
-        Ok(completion.message)
+        Err(AgentError::ToolLoopLimit(MAX_MODEL_TURNS))
     }
 }
 
@@ -177,6 +353,8 @@ pub struct Profile {
     pub active_skills: Vec<String>,
     #[serde(default)]
     pub mcp_servers: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Error)]

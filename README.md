@@ -2,7 +2,7 @@
 
 Ariadne is an open-source, local-first AI agent built with Rust, React, and Tauri. One shared application core powers an interactive CLI, deterministic one-shot jobs, a long-running HTTP service, a browser UI, and a native desktop app.
 
-> **Project status:** bootstrap foundation. The model-provider path, versioned profiles, and all product surfaces are working, but skill execution, MCP tool execution, durable memory, approvals, and long-running agent loops are intentionally future capabilities.
+> **Project status:** bootstrap foundation. The model-provider path, versioned profiles, native workspace filesystem tools, and all product surfaces are working. Skill execution, MCP tool execution, durable memory, approvals, and long-running autonomous loops remain future capabilities.
 
 ## Why Ariadne
 
@@ -11,7 +11,7 @@ Ariadne is an open-source, local-first AI agent built with Rust, React, and Taur
 - **VPS ready:** `ariadne serve` is stateless, handles graceful shutdown, and can serve the web build from the same binary.
 - **One core, several surfaces:** HTTP, terminal, and Tauri code remain thin adapters around `ariadne-core`.
 - **Provider portable:** use Ollama locally or set environment variables for another OpenAI-compatible API.
-- **Profile scoped:** local, work, automation, and hosted profiles can select different providers, models, system prompts, active skills, and MCP servers.
+- **Profile scoped:** local, work, automation, and hosted profiles can select different providers, models, system prompts, native capabilities, active skills, and MCP servers.
 
 ## Repository layout
 
@@ -25,6 +25,7 @@ crates/
   ariadne-core/        Domain types, model-provider port, and agent orchestration
   ariadne-provider-openai/  OpenAI-compatible HTTP adapter
   ariadne-server/      Axum API and static SPA hosting
+  ariadne-tools-filesystem/ Native workspace-scoped filesystem tool adapter
 packages/
   ui/                  Shared React conversation UI and client contract
 docs/
@@ -125,11 +126,14 @@ Ariadne reads TOML from the platform configuration directory at `<config-dir>/ar
 See [`ariadne.example.toml`](ariadne.example.toml) for the complete version 1 schema. The catalog separates reusable provider connections from profiles:
 
 - `providers.<name>` defines `kind = "openai-compatible"`, `api_base`, and optional `api_key_env`. Store the secret in the named environment variable, never in TOML.
-- `profiles.<name>` selects a provider and model and may define `system_prompt`, `active_skills`, and `mcp_servers`.
+- `profiles.<name>` selects a provider and model and may define `system_prompt`, `capabilities`, `active_skills`, and `mcp_servers`.
+- `capabilities.<name>` defines an in-process native capability. `kind = "filesystem"` supplies eight workspace-scoped tools: read, write, exact edit, list, find, search, create directory, and file metadata.
 - `mcp_servers.<name>` stores a structured MCP server definition. Every profile reference is validated when the catalog loads.
 - `default_profile` selects the profile used when a request or process does not specify one.
 
-Profile-scoped skill and MCP activation is represented and exposed consistently now. Actual skill loading and MCP tool execution remain future capabilities and are not implied by listing an item as active.
+Native filesystem capabilities execute today through a provider-neutral tool loop bounded to eight model turns and 64 total tool calls. Filesystem roots are explicit capability handles; path traversal is descriptor-relative and no-follow, so tool paths reject all symlinks as well as absolute and parent-traversal paths. Metadata-only operations use descriptor-relative no-follow metadata without opening file content. Content handles are opened nonblocking where the platform supports it and validated as regular files before I/O; special files are rejected or omitted from listings and traversal. Secret patterns are denied by default, and `.git` is write-protected by default. Allow globs authorize final files and visible listing results, while nonmatching policy-safe parent directories may be traversed to reach matches; `create_directory` requires its final directory path to match the allowlist. Per-file reads, result counts, total visited directory entries, traversal depth, and bytes actually read for search are bounded; writes can use bounded SHA-256 optimistic concurrency checks. `read_only`, allow/deny/protected globs, and limits are profile-catalog settings. These controls do not replace an OS sandbox for hostile or multi-tenant workloads.
+
+Profile-scoped skill and MCP activation is represented and exposed consistently, but actual skill loading and MCP tool execution remain future capabilities and are not implied by listing an item as active.
 
 ## HTTP API
 

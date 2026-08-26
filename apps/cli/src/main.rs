@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::{io, io::BufRead, io::IsTerminal, io::Read, io::Write};
 
 use anyhow::{Context, Result, ensure};
-use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedProfile};
-use ariadne_core::{Agent, AgentProfiles, ModelProvider};
+use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedCapability, ResolvedProfile};
+use ariadne_core::{Agent, AgentProfiles, ModelProvider, Tool};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
+use ariadne_tools_filesystem::{FileSystemConfig, FileSystemToolset};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
@@ -164,12 +165,13 @@ fn list_profiles(
                     " "
                 };
                 println!(
-                    "{marker} {}\tprovider={}\tmodel={}\tskills={}\tmcp_servers={}",
+                    "{marker} {}\tprovider={}\tmodel={}\tskills={}\tmcp_servers={}\tcapabilities={}",
                     profile.name,
                     profile.provider,
                     profile.model,
                     profile.active_skills.join(","),
-                    profile.mcp_servers.join(",")
+                    profile.mcp_servers.join(","),
+                    profile.capabilities.join(",")
                 );
             }
         }
@@ -242,7 +244,53 @@ fn configured_agent(profile: &ResolvedProfile, api_key_override: Option<String>)
         ),
     };
 
-    Ok(Agent::new(provider, profile.system_prompt.clone()))
+    let tools = configured_tools(profile)?;
+    if tools.is_empty() {
+        Ok(Agent::new(provider, profile.system_prompt.clone()))
+    } else {
+        Agent::with_tools(provider, profile.system_prompt.clone(), tools)
+            .context("invalid profile tool configuration")
+    }
+}
+
+fn configured_tools(profile: &ResolvedProfile) -> Result<Vec<Arc<dyn Tool>>> {
+    let mut tools = Vec::new();
+    for capability in &profile.capabilities {
+        match capability {
+            ResolvedCapability::FileSystem(capability) => {
+                let mut config = FileSystemConfig::new(&capability.root);
+                config.read_only = capability.read_only;
+                config.allowed_patterns = capability.allowed_patterns.clone();
+                if let Some(patterns) = &capability.denied_patterns {
+                    config.denied_patterns.clone_from(patterns);
+                }
+                if let Some(patterns) = &capability.protected_patterns {
+                    config.protected_patterns.clone_from(patterns);
+                }
+                if let Some(limit) = capability.max_read_bytes {
+                    config.max_read_bytes = limit;
+                }
+                if let Some(limit) = capability.max_results {
+                    config.max_results = limit;
+                }
+                if let Some(limit) = capability.max_traversal_files {
+                    config.max_traversal_files = limit;
+                }
+                if let Some(limit) = capability.max_traversal_depth {
+                    config.max_traversal_depth = limit;
+                }
+                if let Some(limit) = capability.max_search_bytes {
+                    config.max_search_bytes = limit;
+                }
+                tools.extend(
+                    FileSystemToolset::new(config)
+                        .context("invalid filesystem capability")?
+                        .tools(),
+                );
+            }
+        }
+    }
+    Ok(tools)
 }
 
 async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {

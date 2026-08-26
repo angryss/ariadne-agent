@@ -167,6 +167,9 @@ export function App({ client }: AppProps) {
           {activeProfile.mcp_servers.map((server) => (
             <span key={`mcp-${server}`}>{server} MCP</span>
           ))}
+          {activeProfile.capabilities.map((capability) => (
+            <span key={`capability-${capability}`}>{capability} capability</span>
+          ))}
         </aside>
       ) : null}
 

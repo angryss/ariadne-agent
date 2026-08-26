@@ -18,21 +18,29 @@ provider = "ollama"
 model = "qwen3:8b"
 system_prompt = "You are Ariadne, a careful and capable local AI software agent."
 active_skills = ["rust", "repository-inspection"]
-mcp_servers = ["filesystem"]
+capabilities = ["workspace"]
 
 [profiles.work]
 provider = "work-openai"
 model = "gpt-5"
 system_prompt = "You are Ariadne, a careful AI software agent working in a professional environment."
 active_skills = ["github", "code-review"]
-mcp_servers = ["filesystem", "github"]
+mcp_servers = ["github"]
+capabilities = ["workspace"]
 
-# MCP definitions are retained as structured TOML tables and activated by profile name.
-# MCP tool execution is still a future capability; profile scoping is ready now.
-[mcp_servers.filesystem]
-transport = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+# Native capabilities execute in-process and are separate from skills and MCP servers.
+# Relative roots are resolved from Ariadne's process working directory.
+[capabilities.workspace]
+kind = "filesystem"
+root = "."
+read_only = false
+allowed_patterns = []
+# Omit denied_patterns and protected_patterns to retain secure built-in defaults.
+max_read_bytes = 1048576
+max_results = 1000
+max_traversal_files = 10000
+max_traversal_depth = 32
+max_search_bytes = 16777216
 
 [mcp_servers.github]
 transport = "stdio"

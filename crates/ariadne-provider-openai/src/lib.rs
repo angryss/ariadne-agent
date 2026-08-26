@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use ariadne_core::{
-    Completion, CompletionDelta, CompletionRequest, ModelProvider, ProviderError, Role,
+    Completion, CompletionDelta, CompletionRequest, Message, ModelProvider, ProviderError, Role,
+    ToolCall, ToolDefinition,
 };
 use async_trait::async_trait;
 use reqwest::{Client, Url};
@@ -90,9 +92,49 @@ pub enum ProviderConfigError {
 #[derive(Serialize)]
 struct ChatCompletionRequest<'a> {
     model: &'a str,
-    messages: &'a [ariadne_core::Message],
+    messages: Vec<OpenAiRequestMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAiTool>,
     #[serde(skip_serializing_if = "is_false")]
     stream: bool,
+}
+
+#[derive(Serialize)]
+struct OpenAiRequestMessage {
+    role: Role,
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<OpenAiToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OpenAiToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: OpenAiToolCallFunction,
+}
+
+#[derive(Serialize)]
+struct OpenAiToolCallFunction {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Serialize)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: OpenAiToolFunction,
+}
+
+#[derive(Serialize)]
+struct OpenAiToolFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -106,7 +148,28 @@ struct ChatCompletionResponse {
 
 #[derive(Deserialize)]
 struct Choice {
-    message: ariadne_core::Message,
+    message: OpenAiResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct OpenAiResponseMessage {
+    role: Role,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<OpenAiResponseToolCall>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiResponseToolCall {
+    id: String,
+    function: OpenAiResponseToolCallFunction,
+}
+
+#[derive(Deserialize)]
+struct OpenAiResponseToolCallFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Deserialize)]
@@ -124,16 +187,34 @@ struct StreamDelta {
     content: Option<String>,
     reasoning_content: Option<String>,
     reasoning: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<OpenAiStreamToolCall>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamToolCall {
+    index: usize,
+    id: Option<String>,
+    function: Option<OpenAiStreamToolCallFunction>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamToolCallFunction {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+#[derive(Default)]
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
-        let payload = ChatCompletionRequest {
-            model: &self.model,
-            messages: &request.messages,
-            stream: false,
-        };
+        let payload = chat_completion_request(&self.model, request, false);
         let mut request_builder = self.client.post(self.completion_url.clone()).json(&payload);
         if let Some(api_key) = &self.api_key {
             request_builder = request_builder.bearer_auth(api_key);
@@ -170,7 +251,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             ));
         }
 
-        Ok(Completion::new(message))
+        Ok(Completion::new(response_message(message)?))
     }
 
     async fn complete_stream(
@@ -178,11 +259,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         request: CompletionRequest,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
     ) -> Result<Completion, ProviderError> {
-        let payload = ChatCompletionRequest {
-            model: &self.model,
-            messages: &request.messages,
-            stream: true,
-        };
+        let payload = chat_completion_request(&self.model, request, true);
         let mut request_builder = self.client.post(self.completion_url.clone()).json(&payload);
         if let Some(api_key) = &self.api_key {
             request_builder = request_builder.bearer_auth(api_key);
@@ -204,7 +281,9 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
         let mut pending = Vec::new();
         let mut content = String::new();
+        let mut tool_calls = BTreeMap::new();
         let mut received = 0usize;
+        let mut done = false;
         while let Some(chunk) = response
             .chunk()
             .await
@@ -221,32 +300,159 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
-                process_sse_line(&line, &mut content, on_delta)?;
+                if process_sse_line(&line, &mut content, &mut tool_calls, on_delta)? {
+                    done = true;
+                    pending.clear();
+                    break;
+                }
+            }
+            if done {
+                break;
             }
         }
-        if !pending.is_empty() {
-            process_sse_line(&pending, &mut content, on_delta)?;
+        if !done && !pending.is_empty() {
+            done = process_sse_line(&pending, &mut content, &mut tool_calls, on_delta)?;
+        }
+        if !done {
+            return Err(ProviderError::new(
+                "provider stream ended before [DONE] terminator",
+            ));
         }
 
-        Ok(Completion::new(ariadne_core::Message::assistant(content)))
+        Ok(Completion::new(stream_message(content, tool_calls)?))
     }
+}
+
+fn chat_completion_request(
+    model: &str,
+    request: CompletionRequest,
+    stream: bool,
+) -> ChatCompletionRequest<'_> {
+    ChatCompletionRequest {
+        model,
+        messages: request
+            .messages
+            .into_iter()
+            .map(|message| {
+                let content = if message.role == Role::Assistant
+                    && !message.tool_calls.is_empty()
+                    && message.content.is_empty()
+                {
+                    None
+                } else {
+                    Some(message.content)
+                };
+                OpenAiRequestMessage {
+                    role: message.role,
+                    content,
+                    tool_calls: message
+                        .tool_calls
+                        .into_iter()
+                        .map(|call| OpenAiToolCall {
+                            id: call.id,
+                            kind: "function",
+                            function: OpenAiToolCallFunction {
+                                name: call.name,
+                                arguments: call.arguments.to_string(),
+                            },
+                        })
+                        .collect(),
+                    tool_call_id: message.tool_call_id,
+                }
+            })
+            .collect(),
+        tools: request.tools.into_iter().map(openai_tool).collect(),
+        stream,
+    }
+}
+
+fn openai_tool(definition: ToolDefinition) -> OpenAiTool {
+    OpenAiTool {
+        kind: "function",
+        function: OpenAiToolFunction {
+            name: definition.name,
+            description: definition.description,
+            parameters: definition.input_schema,
+        },
+    }
+}
+
+fn response_message(message: OpenAiResponseMessage) -> Result<Message, ProviderError> {
+    let tool_calls = message
+        .tool_calls
+        .into_iter()
+        .map(|call| {
+            let arguments = serde_json::from_str(&call.function.arguments).map_err(|error| {
+                ProviderError::new(format!("invalid tool-call arguments: {error}"))
+            })?;
+            Ok(ToolCall::new(call.id, call.function.name, arguments))
+        })
+        .collect::<Result<Vec<_>, ProviderError>>()?;
+    Ok(Message {
+        role: message.role,
+        content: message.content.unwrap_or_default(),
+        tool_calls,
+        tool_call_id: None,
+    })
+}
+
+fn stream_message(
+    content: String,
+    pending: BTreeMap<usize, PendingToolCall>,
+) -> Result<Message, ProviderError> {
+    let tool_calls = pending
+        .into_values()
+        .map(|call| {
+            if call.id.is_empty() || call.name.is_empty() {
+                return Err(ProviderError::new("incomplete streamed tool call"));
+            }
+            let arguments = serde_json::from_str(&call.arguments).map_err(|error| {
+                ProviderError::new(format!("invalid streamed tool-call arguments: {error}"))
+            })?;
+            Ok(ToolCall::new(call.id, call.name, arguments))
+        })
+        .collect::<Result<Vec<_>, ProviderError>>()?;
+    Ok(Message {
+        role: Role::Assistant,
+        content,
+        tool_calls,
+        tool_call_id: None,
+    })
 }
 
 fn process_sse_line(
     line: &[u8],
     content: &mut String,
+    tool_calls: &mut BTreeMap<usize, PendingToolCall>,
     on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
-) -> Result<(), ProviderError> {
+) -> Result<bool, ProviderError> {
     let Some(data) = line.strip_prefix(b"data:") else {
-        return Ok(());
+        return Ok(false);
     };
     let data = data.strip_prefix(b" ").unwrap_or(data);
-    if data == b"[DONE]" || data.is_empty() {
-        return Ok(());
+    if data == b"[DONE]" {
+        return Ok(true);
+    }
+    if data.is_empty() {
+        return Ok(false);
     }
     let chunk: ChatCompletionChunk = serde_json::from_slice(data)
         .map_err(|error| ProviderError::new(format!("invalid provider stream: {error}")))?;
     for choice in chunk.choices {
+        for delta in choice.delta.tool_calls {
+            let pending = tool_calls.entry(delta.index).or_default();
+            if let Some(id) = delta.id {
+                pending.id.push_str(&id);
+            }
+            if let Some(function) = delta.function {
+                if let Some(name) = function.name {
+                    pending.name.push_str(&name);
+                }
+                if let Some(arguments) = function.arguments {
+                    pending.arguments.push_str(&arguments);
+                }
+            }
+        }
         if let Some(reasoning) = choice
             .delta
             .reasoning_content
@@ -260,7 +466,7 @@ fn process_sse_line(
             content.push_str(&delta);
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn read_response_body(mut response: reqwest::Response) -> Result<Vec<u8>, ProviderError> {
@@ -344,6 +550,7 @@ mod tests {
             .complete_stream(
                 CompletionRequest {
                     messages: vec![Message::user("Hello")],
+                    tools: Vec::new(),
                 },
                 &mut |delta| deltas.push(delta.clone()),
             )

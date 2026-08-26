@@ -50,6 +50,7 @@ describe('TauriAgentClient', () => {
           model: 'qwen3:8b',
           active_skills: [],
           mcp_servers: ['filesystem'],
+          capabilities: ['workspace'],
         },
       ],
     });

@@ -1,9 +1,10 @@
 use std::env;
 use std::sync::Arc;
 
-use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedProfile};
-use ariadne_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile};
+use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedCapability, ResolvedProfile};
+use ariadne_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile, Tool};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
+use ariadne_tools_filesystem::{FileSystemConfig, FileSystemToolset};
 use serde::{Deserialize, Serialize};
 use tauri::{State, ipc::Channel};
 
@@ -211,7 +212,53 @@ fn configured_agent(
         ),
     };
 
-    Ok(Agent::new(provider, profile.system_prompt.clone()))
+    let tools = configured_tools(profile)?;
+    if tools.is_empty() {
+        Ok(Agent::new(provider, profile.system_prompt.clone()))
+    } else {
+        Agent::with_tools(provider, profile.system_prompt.clone(), tools)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn configured_tools(profile: &ResolvedProfile) -> Result<Vec<Arc<dyn Tool>>, String> {
+    let mut tools = Vec::new();
+    for capability in &profile.capabilities {
+        match capability {
+            ResolvedCapability::FileSystem(capability) => {
+                let mut config = FileSystemConfig::new(&capability.root);
+                config.read_only = capability.read_only;
+                config.allowed_patterns = capability.allowed_patterns.clone();
+                if let Some(patterns) = &capability.denied_patterns {
+                    config.denied_patterns.clone_from(patterns);
+                }
+                if let Some(patterns) = &capability.protected_patterns {
+                    config.protected_patterns.clone_from(patterns);
+                }
+                if let Some(limit) = capability.max_read_bytes {
+                    config.max_read_bytes = limit;
+                }
+                if let Some(limit) = capability.max_results {
+                    config.max_results = limit;
+                }
+                if let Some(limit) = capability.max_traversal_files {
+                    config.max_traversal_files = limit;
+                }
+                if let Some(limit) = capability.max_traversal_depth {
+                    config.max_traversal_depth = limit;
+                }
+                if let Some(limit) = capability.max_search_bytes {
+                    config.max_search_bytes = limit;
+                }
+                tools.extend(
+                    FileSystemToolset::new(config)
+                        .map_err(|error| error.to_string())?
+                        .tools(),
+                );
+            }
+        }
+    }
+    Ok(tools)
 }
 
 #[cfg(test)]

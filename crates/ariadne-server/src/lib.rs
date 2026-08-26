@@ -29,6 +29,7 @@ pub fn router(agent: Agent) -> Router {
         model: "configured".to_owned(),
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
+        capabilities: Vec::new(),
     };
     let profiles = AgentProfiles::new("default", [(profile, agent)])
         .expect("the built-in server profile must be valid");
@@ -64,6 +65,7 @@ pub fn router_with_web(agent: Agent, web_dir: impl AsRef<Path>) -> Router {
         model: "configured".to_owned(),
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
+        capabilities: Vec::new(),
     };
     let profiles = AgentProfiles::new("default", [(profile, agent)])
         .expect("the built-in server profile must be valid");
@@ -227,6 +229,16 @@ impl From<AgentError> for ApiError {
                 status: StatusCode::BAD_GATEWAY,
                 code: "provider_error",
                 message: "model provider request failed".to_owned(),
+            },
+            AgentError::ToolLoopLimit(_) | AgentError::ToolCallLimit(_) => Self {
+                status: StatusCode::BAD_GATEWAY,
+                code: "tool_loop_error",
+                message: error.to_string(),
+            },
+            AgentError::BlankToolName | AgentError::DuplicateTool(_) => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "agent_configuration_error",
+                message: "agent tool configuration is invalid".to_owned(),
             },
         }
     }

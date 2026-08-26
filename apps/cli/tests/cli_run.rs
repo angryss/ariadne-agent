@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::json;
-use wiremock::matchers::{body_json, method, path};
+use wiremock::matchers::{body_json, body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -321,4 +321,88 @@ model = "remote-model"
         .assert()
         .success()
         .stdout(predicate::eq("Local profile.\n"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_executes_the_selected_profiles_filesystem_capability() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("\"name\":\"read_file\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                }
+            }]
+        })))
+        .with_priority(10)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .and(body_string_contains("# Ariadne"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "Read the workspace file."}
+            }]
+        })))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("README.md"), "# Ariadne\n").unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+version = 1
+default_profile = "local"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "{server}/v1"
+
+[profiles.local]
+provider = "local"
+model = "test-model"
+capabilities = ["workspace"]
+
+[capabilities.workspace]
+kind = "filesystem"
+root = "{root}"
+read_only = true
+"#,
+            server = server.uri(),
+            root = directory.path().display()
+        ),
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("ariadne").unwrap();
+    command.args([
+        "--config",
+        config.to_str().unwrap(),
+        "run",
+        "--prompt",
+        "Read README.md",
+    ]);
+
+    command
+        .assert()
+        .success()
+        .stdout(predicate::eq("Read the workspace file.\n"));
 }

@@ -1,4 +1,4 @@
-use ariadne_config::{ProfileCatalog, ProviderKind};
+use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedCapability};
 
 #[test]
 fn parses_profile_provider_model_skills_and_mcp_servers() {
@@ -18,6 +18,16 @@ model = "qwen3:14b"
 system_prompt = "You are Ariadne at work."
 active_skills = ["rust", "github"]
 mcp_servers = ["filesystem"]
+capabilities = ["workspace"]
+
+[capabilities.workspace]
+kind = "filesystem"
+root = "."
+read_only = true
+denied_patterns = ["private/**"]
+max_traversal_files = 200
+max_traversal_depth = 12
+max_search_bytes = 4096
 
 [mcp_servers.filesystem]
 transport = "stdio"
@@ -35,6 +45,17 @@ args = ["/workspace"]
     assert_eq!(profile.profile.model, "qwen3:14b");
     assert_eq!(profile.profile.active_skills, ["rust", "github"]);
     assert_eq!(profile.profile.mcp_servers, ["filesystem"]);
+    assert_eq!(profile.profile.capabilities, ["workspace"]);
+    let ResolvedCapability::FileSystem(filesystem) = &profile.capabilities[0];
+    assert_eq!(filesystem.root.to_string_lossy(), ".");
+    assert!(filesystem.read_only);
+    assert_eq!(
+        filesystem.denied_patterns.as_deref(),
+        Some(&["private/**".to_owned()][..])
+    );
+    assert_eq!(filesystem.max_traversal_files, Some(200));
+    assert_eq!(filesystem.max_traversal_depth, Some(12));
+    assert_eq!(filesystem.max_search_bytes, Some(4096));
     assert_eq!(profile.provider_kind, ProviderKind::OpenAiCompatible);
     assert_eq!(profile.api_base, "http://127.0.0.1:11434/v1");
     assert_eq!(profile.api_key_env.as_deref(), Some("OLLAMA_API_KEY"));
@@ -135,6 +156,96 @@ mcp_servers = ["missing"]
         unknown_mcp
             .to_string()
             .contains("references unknown MCP server `missing`")
+    );
+}
+
+#[test]
+fn rejects_profiles_that_reference_unknown_capabilities() {
+    let error = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "broken"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.broken]
+provider = "local"
+model = "model"
+capabilities = ["missing"]
+"#,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("references unknown capability `missing`")
+    );
+}
+
+#[test]
+fn filesystem_capabilities_are_unique_per_profile_not_globally() {
+    let valid = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "one"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.one]
+provider = "local"
+model = "model"
+capabilities = ["workspace-one"]
+
+[profiles.two]
+provider = "local"
+model = "model"
+capabilities = ["workspace-two"]
+
+[capabilities.workspace-one]
+kind = "filesystem"
+root = "."
+
+[capabilities.workspace-two]
+kind = "filesystem"
+root = ".."
+"#,
+    )
+    .unwrap();
+    assert_eq!(valid.resolve_all().unwrap().len(), 2);
+
+    let error = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "broken"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.broken]
+provider = "local"
+model = "model"
+capabilities = ["workspace-one", "workspace-two"]
+
+[capabilities.workspace-one]
+kind = "filesystem"
+root = "."
+
+[capabilities.workspace-two]
+kind = "filesystem"
+root = ".."
+"#,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "profile `broken` activates multiple filesystem capabilities, whose tool names would conflict"
     );
 }
 

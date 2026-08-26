@@ -63,6 +63,7 @@ fn profile(name: &str, reply: &'static str) -> (Profile, Agent) {
             model: format!("{name}-model"),
             active_skills: vec![format!("{name}-skill")],
             mcp_servers: vec![format!("{name}-mcp")],
+            capabilities: Vec::new(),
         },
         Agent::new(Arc::new(FixedProvider(reply)), "Desktop policy"),
     )
@@ -123,6 +124,7 @@ async fn desktop_stream_command_forwards_typed_deltas() {
         model: "test".to_owned(),
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
+        capabilities: Vec::new(),
     };
     let profiles = AgentProfiles::new(
         "local",

@@ -27,6 +27,26 @@ pub struct ResolvedProfile {
     pub api_base: String,
     pub api_key_env: Option<String>,
     pub system_prompt: String,
+    pub capabilities: Vec<ResolvedCapability>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedCapability {
+    FileSystem(FileSystemCapability),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileSystemCapability {
+    pub root: PathBuf,
+    pub read_only: bool,
+    pub allowed_patterns: Vec<String>,
+    pub denied_patterns: Option<Vec<String>>,
+    pub protected_patterns: Option<Vec<String>>,
+    pub max_read_bytes: Option<usize>,
+    pub max_results: Option<usize>,
+    pub max_traversal_files: Option<usize>,
+    pub max_traversal_depth: Option<usize>,
+    pub max_search_bytes: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +55,7 @@ pub struct ProfileCatalog {
     providers: BTreeMap<String, ProviderConfig>,
     profiles: BTreeMap<String, ProfileConfig>,
     mcp_servers: BTreeMap<String, toml::Table>,
+    capabilities: BTreeMap<String, CapabilityConfig>,
 }
 
 impl ProfileCatalog {
@@ -57,9 +78,11 @@ impl ProfileCatalog {
                     system_prompt: Some(DEFAULT_SYSTEM_PROMPT.to_owned()),
                     active_skills: Vec::new(),
                     mcp_servers: Vec::new(),
+                    capabilities: Vec::new(),
                 },
             )]),
             mcp_servers: BTreeMap::new(),
+            capabilities: BTreeMap::new(),
         }
     }
 
@@ -134,6 +157,7 @@ impl ProfileCatalog {
                 model: profile.model.clone(),
                 active_skills: profile.active_skills.clone(),
                 mcp_servers: profile.mcp_servers.clone(),
+                capabilities: profile.capabilities.clone(),
             },
             provider_kind: provider.kind,
             api_base: provider.api_base.clone(),
@@ -142,6 +166,15 @@ impl ProfileCatalog {
                 .system_prompt
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_owned()),
+            capabilities: profile
+                .capabilities
+                .iter()
+                .map(|name| match &self.capabilities[name] {
+                    CapabilityConfig::FileSystem(config) => {
+                        ResolvedCapability::FileSystem(config.clone().into())
+                    }
+                })
+                .collect(),
         })
     }
 
@@ -184,6 +217,7 @@ impl ProfileCatalog {
             }
             ensure_unique("active skill", &profile.active_skills)?;
             ensure_unique("MCP server", &profile.mcp_servers)?;
+            ensure_unique("capability", &profile.capabilities)?;
             for server in &profile.mcp_servers {
                 if !file.mcp_servers.contains_key(server) {
                     return Err(ConfigError::UnknownMcpServer {
@@ -192,6 +226,29 @@ impl ProfileCatalog {
                     });
                 }
             }
+            for capability in &profile.capabilities {
+                if !file.capabilities.contains_key(capability) {
+                    return Err(ConfigError::UnknownCapability {
+                        profile: name.clone(),
+                        capability: capability.clone(),
+                    });
+                }
+            }
+            let filesystem_capabilities = profile
+                .capabilities
+                .iter()
+                .filter(|capability| {
+                    matches!(
+                        file.capabilities.get(*capability),
+                        Some(CapabilityConfig::FileSystem(_))
+                    )
+                })
+                .count();
+            if filesystem_capabilities > 1 {
+                return Err(ConfigError::ConflictingFileSystemCapabilities {
+                    profile: name.clone(),
+                });
+            }
         }
 
         Ok(Self {
@@ -199,6 +256,7 @@ impl ProfileCatalog {
             providers: file.providers,
             profiles: file.profiles,
             mcp_servers: file.mcp_servers,
+            capabilities: file.capabilities,
         })
     }
 }
@@ -212,6 +270,8 @@ struct ConfigFile {
     profiles: BTreeMap<String, ProfileConfig>,
     #[serde(default)]
     mcp_servers: BTreeMap<String, toml::Table>,
+    #[serde(default)]
+    capabilities: BTreeMap<String, CapabilityConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -232,6 +292,49 @@ struct ProfileConfig {
     active_skills: Vec<String>,
     #[serde(default)]
     mcp_servers: Vec<String>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+enum CapabilityConfig {
+    #[serde(rename = "filesystem")]
+    FileSystem(FileSystemCapabilityConfig),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileSystemCapabilityConfig {
+    root: PathBuf,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    allowed_patterns: Vec<String>,
+    denied_patterns: Option<Vec<String>>,
+    protected_patterns: Option<Vec<String>>,
+    max_read_bytes: Option<usize>,
+    max_results: Option<usize>,
+    max_traversal_files: Option<usize>,
+    max_traversal_depth: Option<usize>,
+    max_search_bytes: Option<usize>,
+}
+
+impl From<FileSystemCapabilityConfig> for FileSystemCapability {
+    fn from(config: FileSystemCapabilityConfig) -> Self {
+        Self {
+            root: config.root,
+            read_only: config.read_only,
+            allowed_patterns: config.allowed_patterns,
+            denied_patterns: config.denied_patterns,
+            protected_patterns: config.protected_patterns,
+            max_read_bytes: config.max_read_bytes,
+            max_results: config.max_results,
+            max_traversal_files: config.max_traversal_files,
+            max_traversal_depth: config.max_traversal_depth,
+            max_search_bytes: config.max_search_bytes,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -255,6 +358,12 @@ pub enum ConfigError {
     EmbeddedProviderCredentials { provider: String },
     #[error("profile `{profile}` references unknown MCP server `{server}`")]
     UnknownMcpServer { profile: String, server: String },
+    #[error("profile `{profile}` references unknown capability `{capability}`")]
+    UnknownCapability { profile: String, capability: String },
+    #[error(
+        "profile `{profile}` activates multiple filesystem capabilities, whose tool names would conflict"
+    )]
+    ConflictingFileSystemCapabilities { profile: String },
     #[error("{0} must not be blank")]
     BlankValue(&'static str),
     #[error("{kind} `{name}` is listed more than once")]

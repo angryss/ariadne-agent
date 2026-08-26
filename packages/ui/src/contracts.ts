@@ -27,6 +27,7 @@ export interface Profile {
   model: string;
   active_skills: string[];
   mcp_servers: string[];
+  capabilities: string[];
 }
 
 export interface ProfileCatalog {

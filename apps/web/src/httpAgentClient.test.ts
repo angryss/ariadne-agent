@@ -86,6 +86,7 @@ describe('HttpAgentClient', () => {
               model: 'qwen3:8b',
               active_skills: ['rust'],
               mcp_servers: [],
+              capabilities: ['workspace'],
             },
           ],
         }),

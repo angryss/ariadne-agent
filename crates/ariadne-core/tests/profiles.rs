@@ -23,6 +23,7 @@ fn profile(name: &str, reply: &'static str) -> (Profile, Agent) {
             model: format!("{name}-model"),
             active_skills: Vec::new(),
             mcp_servers: Vec::new(),
+            capabilities: Vec::new(),
         },
         Agent::new(Arc::new(FixedProvider(reply)), "Profile policy"),
     )

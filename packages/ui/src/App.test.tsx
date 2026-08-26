@@ -130,6 +130,7 @@ describe('App', () => {
             model: 'qwen3:8b',
             active_skills: [],
             mcp_servers: [],
+            capabilities: ['workspace'],
           },
           {
             name: 'work',
@@ -137,6 +138,7 @@ describe('App', () => {
             model: 'gpt-5',
             active_skills: ['github'],
             mcp_servers: ['github'],
+            capabilities: [],
           },
         ],
       }),
@@ -146,6 +148,7 @@ describe('App', () => {
     render(<App client={client} />);
 
     const profile = await screen.findByLabelText('Profile');
+    expect(screen.getByText('workspace capability')).toBeInTheDocument();
     await user.type(screen.getByLabelText('Message Ariadne'), 'Use local');
     await user.click(screen.getByRole('button', { name: 'Send' }));
     await screen.findByText('Work reply.');
