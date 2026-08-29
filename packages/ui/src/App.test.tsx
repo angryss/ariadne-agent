@@ -430,6 +430,10 @@ describe('App', () => {
       kind: 'openai' as const,
       authentication: 'chatgpt' as const,
     });
+    const getOpenAiAccount = vi
+      .fn()
+      .mockResolvedValueOnce({ connected: false, method: null })
+      .mockResolvedValue({ connected: true, method: 'chatgpt' as const, plan: 'plus' });
     const user = userEvent.setup();
     render(
       <App
@@ -440,6 +444,8 @@ describe('App', () => {
             method: 'chatgpt' as const,
             plan: 'plus',
           }),
+          getOpenAiAccount,
+          connectOpenAi: vi.fn(),
           listProviders: vi.fn().mockResolvedValue([]),
           createProvider,
           updateProvider: vi.fn(),
@@ -462,6 +468,9 @@ describe('App', () => {
       authentication: 'chatgpt',
       reuse_existing: true,
     });
+    expect(getOpenAiAccount).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole('button', { name: 'Back to chat' }));
+    expect(await screen.findByText('Connected with ChatGPT Plus')).toBeInTheDocument();
   });
 
   it('waits for existing ChatGPT credential discovery before allowing provider creation', async () => {

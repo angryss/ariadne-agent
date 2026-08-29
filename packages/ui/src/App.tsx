@@ -243,6 +243,19 @@ export function App({ client }: AppProps) {
     setProviderApiKey('');
   }
 
+  async function refreshOpenAiAccountStatus() {
+    if (!client.getOpenAiAccount) return;
+    const request = ++openAiAccountRequest.current;
+    try {
+      const account = await client.getOpenAiAccount();
+      if (request === openAiAccountRequest.current) setOpenAiAccount(account);
+    } catch {
+      if (request === openAiAccountRequest.current) {
+        setOpenAiAccount({ connected: false, method: null });
+      }
+    }
+  }
+
   async function saveProvider(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (savingProvider) return;
@@ -268,6 +281,7 @@ export function App({ client }: AppProps) {
         ...current.filter((provider) => provider.kind !== saved.kind),
         saved,
       ]);
+      if (saved.kind === 'openai') await refreshOpenAiAccountStatus();
       setEditingProvider(null);
     } catch (providerError) {
       setError(
@@ -289,6 +303,7 @@ export function App({ client }: AppProps) {
       await client.deleteProvider(kind);
       providerMutationRevision.current += 1;
       setProviderSettings((current) => current.filter((provider) => provider.kind !== kind));
+      if (kind === 'openai') await refreshOpenAiAccountStatus();
       setEditingProvider(null);
     } catch (providerError) {
       setError(

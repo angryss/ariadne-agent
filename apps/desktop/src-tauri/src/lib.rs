@@ -380,6 +380,13 @@ fn configured_codex_home() -> Result<PathBuf, String> {
     }
 }
 
+fn selected_openai_codex_home(
+    credential_selection: &OpenAiCredentialSelection,
+    private_home: &std::path::Path,
+) -> Option<PathBuf> {
+    (!credential_selection.reuses_existing()).then(|| private_home.to_path_buf())
+}
+
 pub(crate) fn secure_codex_home(home: PathBuf) -> Result<PathBuf, String> {
     secure_private_directory(home).map_err(|error| {
         if error.to_string().contains("symbolic link") {
@@ -507,8 +514,14 @@ fn profiles(profiles: State<'_, AgentProfiles>) -> ProfilesResponse {
 }
 
 #[tauri::command]
-async fn openai_account() -> Result<OpenAiAccountResponse, String> {
-    openai_account_with_program_and_home(codex_program(), configured_codex_home()?).await
+async fn openai_account(
+    credential_selection: State<'_, OpenAiCredentialSelection>,
+) -> Result<OpenAiAccountResponse, String> {
+    let private_home = configured_codex_home()?;
+    match selected_openai_codex_home(&credential_selection, &private_home) {
+        Some(home) => openai_account_with_program_and_home(codex_program(), home).await,
+        None => openai_account_with_program(codex_program()).await,
+    }
 }
 
 #[tauri::command]
@@ -519,10 +532,26 @@ async fn existing_openai_account() -> Result<OpenAiAccountResponse, String> {
 #[tauri::command]
 async fn connect_openai(
     authentication_lock: State<'_, OpenAiAuthenticationLock>,
+    credential_selection: State<'_, OpenAiCredentialSelection>,
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     request: OpenAiConnectRequest,
 ) -> Result<OpenAiAccountResponse, String> {
     let _authentication = authentication_lock.acquire().await;
-    connect_openai_with_program_and_home(codex_program(), configured_codex_home()?, request).await
+    let provider_authentication = match &request {
+        OpenAiConnectRequest::Chatgpt => OpenAiAuthentication::Chatgpt,
+        OpenAiConnectRequest::ApiKey { .. } => OpenAiAuthentication::ApiKey,
+    };
+    let account =
+        connect_openai_with_program_and_home(codex_program(), configured_codex_home()?, request)
+            .await?;
+    let mut store = provider_settings.lock().await;
+    store.refresh().map_err(|error| error.to_string())?;
+    synchronize_connected_openai_provider(
+        &mut store,
+        &credential_selection,
+        provider_authentication,
+    )?;
+    Ok(account)
 }
 
 #[tauri::command]
@@ -794,6 +823,23 @@ fn update_openai_credential_selection(
     }
 }
 
+fn synchronize_connected_openai_provider(
+    provider_settings: &mut ProviderSettingsStore,
+    credential_selection: &OpenAiCredentialSelection,
+    authentication: OpenAiAuthentication,
+) -> Result<(), String> {
+    if provider_settings.get("openai").is_some() {
+        provider_settings
+            .update(ConfiguredProvider::OpenAi {
+                authentication,
+                reuse_existing: false,
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    credential_selection.set_reuse_existing(false);
+    Ok(())
+}
+
 fn optional_env(name: &str) -> Result<Option<String>, String> {
     decode_optional_env(name, env::var(name))
 }
@@ -909,6 +955,7 @@ fn configured_tools(profile: &ResolvedProfile) -> Result<Vec<Arc<dyn Tool>>, Str
 mod tests {
     use std::env::VarError;
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     use tokio::io::BufReader;
     use tokio::time::{Duration, Instant};
@@ -918,6 +965,7 @@ mod tests {
     use super::{
         MAX_CODEX_MESSAGE_BYTES, OpenAiAuthenticationLock, OpenAiCredentialSelection,
         decode_optional_env, openai_account_reuses_existing_credentials, read_codex_message,
+        selected_openai_codex_home, synchronize_connected_openai_provider,
         update_openai_credential_selection, verify_existing_openai_credentials_with_program,
         write_codex_message,
     };
@@ -996,6 +1044,20 @@ mod tests {
     }
 
     #[test]
+    fn openai_account_status_uses_the_selected_credential_home() {
+        let selection = OpenAiCredentialSelection::new(false);
+        let private_home = PathBuf::from("/private/ariadne/codex");
+
+        assert_eq!(
+            selected_openai_codex_home(&selection, &private_home),
+            Some(private_home.clone())
+        );
+
+        selection.set_reuse_existing(true);
+        assert_eq!(selected_openai_codex_home(&selection, &private_home), None);
+    }
+
+    #[test]
     fn non_openai_provider_changes_preserve_openai_credential_selection() {
         let selection = OpenAiCredentialSelection::new(true);
 
@@ -1007,6 +1069,36 @@ mod tests {
         );
 
         assert!(selection.reuses_existing());
+    }
+
+    #[test]
+    fn direct_openai_connection_switches_a_reused_provider_to_private_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings =
+            ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+        settings
+            .add(ConfiguredProvider::OpenAi {
+                authentication: OpenAiAuthentication::Chatgpt,
+                reuse_existing: true,
+            })
+            .unwrap();
+        let selection = OpenAiCredentialSelection::new(true);
+
+        synchronize_connected_openai_provider(
+            &mut settings,
+            &selection,
+            OpenAiAuthentication::Chatgpt,
+        )
+        .unwrap();
+
+        assert!(!selection.reuses_existing());
+        assert!(matches!(
+            settings.get("openai"),
+            Some(ConfiguredProvider::OpenAi {
+                authentication: OpenAiAuthentication::Chatgpt,
+                reuse_existing: false,
+            })
+        ));
     }
 
     #[test]
