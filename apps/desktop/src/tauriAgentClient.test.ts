@@ -62,4 +62,46 @@ describe('TauriAgentClient', () => {
     expect(profiles.default_profile).toBe('local');
     expect(profiles.profiles[0]!.mcp_servers).toEqual(['filesystem']);
   });
+
+  it('uses narrow commands for OpenAI account status and login', async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce({ connected: false, method: null })
+      .mockResolvedValueOnce({ connected: true, method: 'api_key' });
+    const client = new TauriAgentClient(invoke);
+
+    await expect(client.getOpenAiAccount()).resolves.toEqual({ connected: false, method: null });
+    await expect(
+      client.connectOpenAi({ method: 'api_key', api_key: 'sk-secret' }),
+    ).resolves.toEqual({ connected: true, method: 'api_key' });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'openai_account', {});
+    expect(invoke).toHaveBeenNthCalledWith(2, 'connect_openai', {
+      request: { method: 'api_key', api_key: 'sk-secret' },
+    });
+  });
+
+  it('uses narrow commands for provider settings CRUD', async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ kind: 'openai', authentication: 'chatgpt' })
+      .mockResolvedValueOnce({ kind: 'openai', authentication: 'api_key' })
+      .mockResolvedValueOnce(undefined);
+    const client = new TauriAgentClient(invoke);
+
+    await client.listProviders();
+    await client.createProvider({ kind: 'openai', authentication: 'chatgpt' });
+    await client.updateProvider({ kind: 'openai', authentication: 'api_key', api_key: 'sk-secret' });
+    await client.deleteProvider('openai');
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'list_providers', {});
+    expect(invoke).toHaveBeenNthCalledWith(2, 'create_provider', {
+      provider: { kind: 'openai', authentication: 'chatgpt' },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, 'update_provider', {
+      provider: { kind: 'openai', authentication: 'api_key', api_key: 'sk-secret' },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, 'delete_provider', { kind: 'openai' });
+  });
 });

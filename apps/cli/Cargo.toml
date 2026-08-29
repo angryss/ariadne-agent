@@ -22,6 +22,7 @@ ariadne-tools-filesystem = { path = "../../crates/ariadne-tools-filesystem" }
 axum.workspace = true
 clap.workspace = true
 crossterm.workspace = true
+dirs.workspace = true
 futures-util.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true

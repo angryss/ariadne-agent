@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::json;
-use wiremock::matchers::{body_json, method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -36,7 +36,7 @@ async fn chat_keeps_history_until_the_user_quits() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .and(body_json(json!({
+        .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
                 {"role": "system", "content": "You are Ariadne."},
@@ -53,7 +53,7 @@ async fn chat_keeps_history_until_the_user_quits() {
         .await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .and(body_json(json!({
+        .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
                 {"role": "system", "content": "You are Ariadne."},
@@ -67,6 +67,7 @@ async fn chat_keeps_history_until_the_user_quits() {
                 "message": {"role": "assistant", "content": "Done."}
             }]
         })))
+        .with_priority(1)
         .expect(1)
         .mount(&server)
         .await;

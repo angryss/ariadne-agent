@@ -124,6 +124,7 @@ dependencies = [
  "axum",
  "clap",
  "crossterm",
+ "dirs",
  "futures-util",
  "predicates",
  "ratatui",
@@ -141,11 +142,14 @@ version = "0.1.0"
 dependencies = [
  "ariadne-core",
  "dirs",
+ "fs2",
+ "libc",
  "serde",
  "tempfile",
  "thiserror 2.0.20",
  "toml 0.9.12+spec-1.1.0",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -169,6 +173,7 @@ dependencies = [
  "ariadne-tools-command",
  "ariadne-tools-filesystem",
  "async-trait",
+ "dirs",
  "serde",
  "serde_json",
  "tauri",
@@ -195,9 +200,11 @@ dependencies = [
 name = "ariadne-server"
 version = "0.1.0"
 dependencies = [
+ "ariadne-config",
  "ariadne-core",
  "async-trait",
  "axum",
+ "dirs",
  "futures-util",
  "serde",
  "serde_json",
@@ -1393,6 +1400,16 @@ dependencies = [
  "io-lifetimes 2.0.4",
  "rustix 1.1.4",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

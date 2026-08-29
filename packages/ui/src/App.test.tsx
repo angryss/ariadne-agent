@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -211,5 +211,252 @@ describe('App', () => {
     expect(screen.getByText('gpt-5')).toBeInTheDocument();
     expect(screen.getByText('github skill')).toBeInTheDocument();
     expect(screen.getByText('github MCP')).toBeInTheDocument();
+  });
+
+  it('connects a ChatGPT subscription or API key without exposing the key', async () => {
+    const connectOpenAi = vi.fn().mockResolvedValue({
+      connected: true,
+      method: 'api_key' as const,
+    });
+    const client: AgentClient = {
+      getOpenAiAccount: vi.fn().mockResolvedValue({ connected: false, method: null }),
+      connectOpenAi,
+      respond: vi.fn(),
+    };
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Connect OpenAI' }));
+    expect(screen.getByRole('button', { name: 'Use ChatGPT subscription' })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('OpenAI API key'), 'sk-secret-value');
+    expect(screen.getByLabelText('OpenAI API key')).toHaveAttribute('type', 'password');
+    await user.click(screen.getByRole('button', { name: 'Save API key' }));
+
+    expect(connectOpenAi).toHaveBeenCalledWith({ method: 'api_key', api_key: 'sk-secret-value' });
+    expect(screen.queryByDisplayValue('sk-secret-value')).not.toBeInTheDocument();
+    expect(await screen.findByText('Connected with API key')).toBeInTheDocument();
+  });
+
+  it('starts ChatGPT browser sign-in and reports the connected plan', async () => {
+    const connectOpenAi = vi.fn().mockResolvedValue({
+      connected: true,
+      method: 'chatgpt' as const,
+      plan: 'plus',
+    });
+    const client: AgentClient = {
+      getOpenAiAccount: vi.fn().mockResolvedValue({ connected: false, method: null }),
+      connectOpenAi,
+      respond: vi.fn(),
+    };
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Connect OpenAI' }));
+    await user.click(screen.getByRole('button', { name: 'Use ChatGPT subscription' }));
+
+    expect(connectOpenAi).toHaveBeenCalledWith({ method: 'chatgpt' });
+    expect(await screen.findByText('Connected with ChatGPT Plus')).toBeInTheDocument();
+  });
+
+  it('does not let stale initial account status overwrite a completed connection', async () => {
+    let resolveInitialAccount!: (account: { connected: false; method: null }) => void;
+    const initialAccount = new Promise<{ connected: false; method: null }>((resolve) => {
+      resolveInitialAccount = resolve;
+    });
+    const client: AgentClient = {
+      getOpenAiAccount: vi.fn().mockReturnValue(initialAccount),
+      connectOpenAi: vi.fn().mockResolvedValue({
+        connected: true,
+        method: 'chatgpt' as const,
+        plan: 'plus',
+      }),
+      respond: vi.fn(),
+    };
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    await user.click(screen.getByRole('button', { name: 'Connect OpenAI' }));
+    await user.click(screen.getByRole('button', { name: 'Use ChatGPT subscription' }));
+    expect(await screen.findByText('Connected with ChatGPT Plus')).toBeInTheDocument();
+
+    resolveInitialAccount({ connected: false, method: null });
+
+    expect(await screen.findByText('Connected with ChatGPT Plus')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Connect OpenAI' })).not.toBeInTheDocument();
+  });
+
+  it('clears a rejected API key from the UI', async () => {
+    const client: AgentClient = {
+      getOpenAiAccount: vi.fn().mockResolvedValue({ connected: false, method: null }),
+      connectOpenAi: vi.fn().mockRejectedValue(new Error('OpenAI rejected the key')),
+      respond: vi.fn(),
+    };
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Connect OpenAI' }));
+    const input = screen.getByLabelText('OpenAI API key');
+    await user.type(input, '«redacted:sk-…»');
+    await user.click(screen.getByRole('button', { name: 'Save API key' }));
+
+    expect(await screen.findByText('OpenAI rejected the key')).toBeInTheDocument();
+    expect(input).toHaveValue('');
+  });
+
+  it('clears an API key when the account panel is dismissed', async () => {
+    const client: AgentClient = {
+      getOpenAiAccount: vi.fn().mockResolvedValue({ connected: false, method: null }),
+      connectOpenAi: vi.fn(),
+      respond: vi.fn(),
+    };
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    const accountButton = await screen.findByRole('button', { name: 'Connect OpenAI' });
+    await user.click(accountButton);
+    await user.type(screen.getByLabelText('OpenAI API key'), '«redacted:sk-…»');
+    await user.click(accountButton);
+    await user.click(accountButton);
+
+    expect(screen.getByLabelText('OpenAI API key')).toHaveValue('');
+  });
+
+  it('clears a typed API key when ChatGPT sign-in succeeds', async () => {
+    const client: AgentClient = {
+      getOpenAiAccount: vi.fn().mockResolvedValue({ connected: false, method: null }),
+      connectOpenAi: vi.fn().mockResolvedValue({
+        connected: true,
+        method: 'chatgpt' as const,
+        plan: 'plus',
+      }),
+      respond: vi.fn(),
+    };
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Connect OpenAI' }));
+    await user.type(screen.getByLabelText('OpenAI API key'), '«redacted:sk-…»');
+    await user.click(screen.getByRole('button', { name: 'Use ChatGPT subscription' }));
+    await user.click(await screen.findByRole('button', { name: 'Connected with ChatGPT Plus' }));
+
+    expect(screen.getByLabelText('OpenAI API key')).toHaveValue('');
+  });
+
+  it('opens provider settings blank and adds updates and deletes Ollama', async () => {
+    const listProviders = vi.fn().mockResolvedValue([]);
+    const createProvider = vi.fn().mockResolvedValue({
+      kind: 'ollama' as const,
+      api_base: 'http://localhost:11434/v1',
+    });
+    const updateProvider = vi.fn().mockResolvedValue({
+      kind: 'ollama' as const,
+      api_base: 'http://localhost:22434/v1',
+    });
+    const deleteProvider = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders,
+          createProvider,
+          updateProvider,
+          deleteProvider,
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(await screen.findByRole('heading', { name: 'Providers' })).toBeInTheDocument();
+    expect(screen.getByText('No providers configured.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Add provider' }));
+    await user.selectOptions(screen.getByLabelText('Provider type'), 'ollama');
+    await user.clear(screen.getByLabelText('Ollama API base URL'));
+    await user.type(screen.getByLabelText('Ollama API base URL'), 'http://localhost:11434/v1');
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+    expect(createProvider).toHaveBeenCalledWith({
+      kind: 'ollama',
+      api_base: 'http://localhost:11434/v1',
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Edit Ollama' }));
+    await user.clear(screen.getByLabelText('Ollama API base URL'));
+    await user.type(screen.getByLabelText('Ollama API base URL'), 'http://localhost:22434/v1');
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+    expect(updateProvider).toHaveBeenCalledWith({
+      kind: 'ollama',
+      api_base: 'http://localhost:22434/v1',
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Delete Ollama' }));
+    expect(deleteProvider).toHaveBeenCalledWith('ollama');
+    expect(await screen.findByText('No providers configured.')).toBeInTheDocument();
+  });
+
+  it('adds OpenAI with either an API key or ChatGPT subscription', async () => {
+    const createProvider = vi.fn().mockImplementation(async (provider) => provider);
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProvider,
+          updateProvider: vi.fn(),
+          deleteProvider: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+    await user.selectOptions(screen.getByLabelText('Provider type'), 'openai');
+    await user.selectOptions(screen.getByLabelText('OpenAI authentication'), 'api_key');
+    await user.type(screen.getByLabelText('OpenAI API key'), 'sk-secret');
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+
+    expect(createProvider).toHaveBeenCalledWith({
+      kind: 'openai',
+      authentication: 'api_key',
+      api_key: 'sk-secret',
+    });
+    expect(screen.queryByDisplayValue('sk-secret')).not.toBeInTheDocument();
+  });
+
+  it('does not let a late initial provider list overwrite a completed mutation', async () => {
+    let resolveProviders: (providers: []) => void = () => {};
+    const listProviders = vi.fn(
+      () =>
+        new Promise<[]>((resolve) => {
+          resolveProviders = resolve;
+        }),
+    );
+    const createProvider = vi.fn().mockResolvedValue({
+      kind: 'ollama' as const,
+      api_base: 'http://localhost:11434/v1',
+    });
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders,
+          createProvider,
+          updateProvider: vi.fn(),
+          deleteProvider: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Add provider' }));
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+    expect(await screen.findByRole('button', { name: 'Edit Ollama' })).toBeInTheDocument();
+
+    await act(async () => resolveProviders([]));
+
+    expect(screen.getByRole('button', { name: 'Edit Ollama' })).toBeInTheDocument();
   });
 });

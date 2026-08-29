@@ -8,8 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ariadne-config = { path = "../ariadne-config" }
 ariadne-core = { path = "../ariadne-core" }
 axum.workspace = true
+dirs.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 tokio.workspace = true

@@ -341,15 +341,22 @@ struct DuplicateToolAfterEmptyProvider {
 
 #[async_trait]
 impl ModelProvider for DuplicateToolAfterEmptyProvider {
-    async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
         match self.requests.fetch_add(1, Ordering::SeqCst) {
-            0 | 2 => Ok(Completion::with_tool_calls(vec![ToolCall::new(
-                "call",
+            0 => Ok(Completion::with_tool_calls(vec![ToolCall::new(
+                "call-1",
                 "count",
                 json!({}),
             )])),
             1 => Ok(Completion::new(Message::assistant(""))),
-            _ => Ok(Completion::new(Message::assistant("done"))),
+            _ => {
+                assert!(request.tools.is_empty());
+                Ok(Completion::with_tool_calls(vec![ToolCall::new(
+                    "call-2",
+                    "count",
+                    json!({}),
+                )]))
+            }
         }
     }
 }
@@ -368,8 +375,12 @@ async fn respond_never_repeats_tool_side_effects_after_an_empty_post_tool_answer
     )
     .unwrap();
 
-    agent.respond(&[], "Perform one action").await.unwrap_err();
+    let error = agent.respond(&[], "Perform one action").await.unwrap_err();
 
+    assert_eq!(
+        error.to_string(),
+        "model provider returned a tool call after tool execution was closed"
+    );
     assert_eq!(executions.load(Ordering::SeqCst), 1);
 }
 

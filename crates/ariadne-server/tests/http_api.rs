@@ -1,15 +1,28 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use ariadne_config::ProviderSettingsStore;
 use ariadne_core::{
     Agent, AgentProfiles, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
     Profile, ProviderError,
 };
-use ariadne_server::{router, router_with_profiles, router_with_web};
+use ariadne_server::{
+    router, router_with_profiles, router_with_profiles_and_provider_runtime,
+    router_with_profiles_and_provider_settings, router_with_web,
+};
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
+
+fn local_provider_request(mut request: Request<Body>) -> Request<Body> {
+    request.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:42000".parse::<SocketAddr>().unwrap(),
+    ));
+    request
+}
 
 struct FixedProvider;
 
@@ -377,6 +390,30 @@ async fn respond_endpoint_hides_invalid_provider_responses() {
 }
 
 #[tokio::test]
+async fn respond_endpoint_maps_exhausted_empty_responses_to_a_safe_provider_error() {
+    let agent = ariadne_core::Agent::new(Arc::new(EmptyProvider), "You are Ariadne.");
+    let response = router(agent)
+        .oneshot(
+            Request::post("/v1/respond")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"prompt":"hello","history":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "error": {"code": "provider_error", "message": "model provider request failed"}
+        })
+    );
+}
+
+#[tokio::test]
 async fn web_router_serves_the_spa_for_browser_routes() {
     let web_dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -423,5 +460,174 @@ async fn web_router_does_not_hide_unknown_api_routes_behind_the_spa() {
         serde_json::json!({
             "error": {"code": "not_found", "message": "API route not found"}
         })
+    );
+}
+
+#[tokio::test]
+async fn provider_settings_endpoints_start_empty_and_persist_crud() {
+    let directory = tempfile::tempdir().unwrap();
+    let settings_path = directory.path().join("providers.toml");
+    let settings = ProviderSettingsStore::load(&settings_path).unwrap();
+    let profiles = AgentProfiles::new("local", vec![profile("local", "Local.")]).unwrap();
+    let app = router_with_profiles_and_provider_settings(profiles, settings);
+
+    let response = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::get("/v1/providers").body(Body::empty()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        serde_json::json!([])
+    );
+
+    let response = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::post("/v1/providers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"ollama","api_base":"http://localhost:11434/v1"}"#,
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::put("/v1/providers/ollama")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"ollama","api_base":"http://localhost:11435/v1"}"#,
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let reloaded = ProviderSettingsStore::load(&settings_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(reloaded.list()).unwrap(),
+        serde_json::json!([{
+            "kind": "ollama",
+            "api_base": "http://localhost:11435/v1"
+        }])
+    );
+
+    let response = app
+        .oneshot(local_provider_request(
+            Request::delete("/v1/providers/ollama")
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        ProviderSettingsStore::load(&settings_path)
+            .unwrap()
+            .list()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn provider_settings_reject_non_loopback_clients() {
+    let directory = tempfile::tempdir().unwrap();
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    let profiles = AgentProfiles::new("local", vec![profile("local", "Local.")]).unwrap();
+    let app = router_with_profiles_and_provider_settings(profiles, settings);
+    let mut request = Request::post("/v1/providers")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"kind":"ollama","api_base":"http://localhost:11434/v1"}"#,
+        ))
+        .unwrap();
+    request.extensions_mut().insert(ConnectInfo(
+        "203.0.113.10:42000".parse::<SocketAddr>().unwrap(),
+    ));
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn provider_settings_report_persistence_failures_as_server_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let settings_path = directory.path().join("providers.toml");
+    let settings = ProviderSettingsStore::load(&settings_path).unwrap();
+    std::fs::create_dir(&settings_path).unwrap();
+    let profiles = AgentProfiles::new("local", vec![profile("local", "Local.")]).unwrap();
+    let app = router_with_profiles_and_provider_settings(profiles, settings);
+    let request = local_provider_request(
+        Request::post("/v1/providers")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"kind":"ollama","api_base":"http://localhost:11434/v1"}"#,
+            ))
+            .unwrap(),
+    );
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn concurrent_openai_creates_authenticate_only_once() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    let login_log = directory.path().join("login.log");
+    let codex = directory.path().join("codex");
+    std::fs::write(
+        &codex,
+        format!(
+            "#!/bin/sh\nread key\nprintf '%s\\n' \"$key\" >> '{}'\nsleep 0.2\n",
+            login_log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profiles = AgentProfiles::new("local", vec![profile("local", "Local.")]).unwrap();
+    let app = router_with_profiles_and_provider_runtime(
+        profiles,
+        settings,
+        codex,
+        directory.path().join("codex-home"),
+    );
+    let request = |key: &'static str| {
+        local_provider_request(
+            Request::post("/v1/providers")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"kind":"openai","authentication":"api_key","api_key":"{key}"}}"#
+                )))
+                .unwrap(),
+        )
+    };
+
+    let (first, second) = tokio::join!(
+        app.clone().oneshot(request("first")),
+        app.oneshot(request("second"))
+    );
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+
+    assert!(statuses.contains(&StatusCode::OK));
+    assert!(statuses.contains(&StatusCode::BAD_REQUEST));
+    assert_eq!(
+        std::fs::read_to_string(login_log).unwrap().lines().count(),
+        1
     );
 }

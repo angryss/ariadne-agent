@@ -1,13 +1,371 @@
 use std::env;
+use std::ffi::OsStr;
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 
-use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedCapability, ResolvedProfile};
+use ariadne_config::{
+    ConfiguredProvider, OpenAiAuthentication, ProfileCatalog, ProviderKind, ProviderSettingsStore,
+    ResolvedCapability, ResolvedProfile, secure_private_directory,
+};
 use ariadne_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile, Tool};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
 use ariadne_tools_command::{CommandConfig, CommandTool};
 use ariadne_tools_filesystem::{FileSystemConfig, FileSystemToolset};
 use serde::{Deserialize, Serialize};
 use tauri::{State, ipc::Channel};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::Mutex;
+use tokio::time::{Duration, Instant, timeout};
+
+mod codex_provider;
+pub use codex_provider::CodexAppServerProvider;
+
+const MAX_CODEX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_API_KEY_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+pub enum OpenAiConnectRequest {
+    Chatgpt,
+    ApiKey { api_key: String },
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OpenAiAccountResponse {
+    pub connected: bool,
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ProviderInput {
+    Ollama {
+        api_base: String,
+    },
+    #[serde(rename = "openai")]
+    OpenAi {
+        authentication: OpenAiAuthentication,
+        #[serde(default)]
+        api_key: Option<String>,
+    },
+}
+
+impl ProviderInput {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Ollama { .. } => "ollama",
+            Self::OpenAi { .. } => "openai",
+        }
+    }
+}
+
+#[derive(Default)]
+struct OpenAiAuthenticationLock(Mutex<()>);
+
+impl OpenAiAuthenticationLock {
+    async fn acquire(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.lock().await
+    }
+}
+
+pub async fn connect_openai_with_program(
+    program: impl AsRef<OsStr>,
+    request: OpenAiConnectRequest,
+) -> Result<OpenAiAccountResponse, String> {
+    connect_openai_with_program_and_optional_home(program.as_ref(), None, request).await
+}
+
+pub async fn connect_openai_with_program_and_home(
+    program: impl AsRef<OsStr>,
+    codex_home: impl AsRef<OsStr>,
+    request: OpenAiConnectRequest,
+) -> Result<OpenAiAccountResponse, String> {
+    connect_openai_with_program_and_optional_home(
+        program.as_ref(),
+        Some(codex_home.as_ref()),
+        request,
+    )
+    .await
+}
+
+async fn connect_openai_with_program_and_optional_home(
+    program: &OsStr,
+    codex_home: Option<&OsStr>,
+    request: OpenAiConnectRequest,
+) -> Result<OpenAiAccountResponse, String> {
+    let mut command = Command::new(program);
+    if let Some(codex_home) = codex_home {
+        command.env("CODEX_HOME", codex_home);
+    }
+    command
+        .arg("login")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match request {
+        OpenAiConnectRequest::Chatgpt => {
+            command.stdin(Stdio::null());
+        }
+        OpenAiConnectRequest::ApiKey { api_key } => {
+            if api_key.trim().is_empty() {
+                return Err("OpenAI API key must not be blank".to_owned());
+            }
+            if api_key.len() > MAX_API_KEY_BYTES {
+                return Err("OpenAI API key is too large".to_owned());
+            }
+            command.arg("--with-api-key").stdin(Stdio::piped());
+            let mut child = command
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|error| format!("failed to start Codex login: {error}"))?;
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or("Codex login stdin is unavailable")?;
+            stdin
+                .write_all(api_key.as_bytes())
+                .await
+                .map_err(|_| "failed to send the API key to Codex".to_owned())?;
+            stdin
+                .write_all(b"\n")
+                .await
+                .map_err(|_| "failed to send the API key to Codex".to_owned())?;
+            drop(stdin);
+            let status = timeout(Duration::from_secs(120), child.wait())
+                .await
+                .map_err(|_| "Codex API-key login timed out".to_owned())?
+                .map_err(|error| format!("failed to wait for Codex login: {error}"))?;
+            if !status.success() {
+                return Err("Codex rejected the OpenAI API key".to_owned());
+            }
+            return match codex_home {
+                Some(codex_home) => openai_account_with_program_and_home(program, codex_home).await,
+                None => openai_account_with_program(program).await,
+            };
+        }
+    }
+
+    let mut child = command
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("failed to start ChatGPT login: {error}"))?;
+    let status = timeout(Duration::from_secs(300), child.wait())
+        .await
+        .map_err(|_| "ChatGPT login timed out".to_owned())?
+        .map_err(|error| format!("failed to wait for ChatGPT login: {error}"))?;
+    if !status.success() {
+        return Err("ChatGPT login did not complete".to_owned());
+    }
+    match codex_home {
+        Some(codex_home) => openai_account_with_program_and_home(program, codex_home).await,
+        None => openai_account_with_program(program).await,
+    }
+}
+
+pub async fn openai_account_with_program(
+    program: impl AsRef<OsStr>,
+) -> Result<OpenAiAccountResponse, String> {
+    openai_account_with_command(Command::new(program)).await
+}
+
+pub async fn openai_account_with_program_and_home(
+    program: impl AsRef<OsStr>,
+    codex_home: impl AsRef<OsStr>,
+) -> Result<OpenAiAccountResponse, String> {
+    let mut command = Command::new(program);
+    command.env("CODEX_HOME", codex_home);
+    openai_account_with_command(command).await
+}
+
+async fn openai_account_with_command(
+    mut command: Command,
+) -> Result<OpenAiAccountResponse, String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut child = command
+        .arg("app-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("failed to start Codex app-server: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or("Codex app-server stdin is unavailable")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("Codex app-server stdout is unavailable")?;
+    let mut stdout = BufReader::new(stdout);
+
+    write_codex_message(
+        &mut stdin,
+        &serde_json::json!({
+            "method": "initialize",
+            "id": 1,
+            "params": {"clientInfo": {"name": "ariadne", "title": "Ariadne", "version": env!("CARGO_PKG_VERSION")}}
+        }),
+        deadline,
+    )
+    .await?;
+    read_codex_response(&mut stdout, 1, deadline).await?;
+    write_codex_message(
+        &mut stdin,
+        &serde_json::json!({"method": "initialized", "params": {}}),
+        deadline,
+    )
+    .await?;
+    write_codex_message(
+        &mut stdin,
+        &serde_json::json!({"method": "account/read", "id": 2, "params": {"refreshToken": false}}),
+        deadline,
+    )
+    .await?;
+    let response = read_codex_response(&mut stdout, 2, deadline).await?;
+    let account = response.pointer("/result/account");
+    let Some(kind) = account
+        .and_then(|account| account.get("type"))
+        .and_then(|kind| kind.as_str())
+    else {
+        return Ok(OpenAiAccountResponse {
+            connected: false,
+            method: None,
+            plan: None,
+        });
+    };
+    let (method, plan) = match kind {
+        "apiKey" => ("api_key", None),
+        "chatgpt" => (
+            "chatgpt",
+            account
+                .and_then(|account| account.get("planType"))
+                .and_then(|plan| plan.as_str())
+                .map(str::to_owned),
+        ),
+        _ => {
+            return Ok(OpenAiAccountResponse {
+                connected: false,
+                method: None,
+                plan: None,
+            });
+        }
+    };
+    Ok(OpenAiAccountResponse {
+        connected: true,
+        method: Some(method.to_owned()),
+        plan,
+    })
+}
+
+async fn write_codex_message(
+    writer: &mut (impl AsyncWriteExt + Unpin),
+    message: &serde_json::Value,
+    deadline: Instant,
+) -> Result<(), String> {
+    let mut encoded = serde_json::to_vec(message).map_err(|error| error.to_string())?;
+    encoded.push(b'\n');
+    if encoded.len() > MAX_CODEX_MESSAGE_BYTES {
+        return Err("Codex app-server request exceeded the size limit".to_owned());
+    }
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| "Codex app-server request timed out".to_owned())?;
+    timeout(remaining, writer.write_all(&encoded))
+        .await
+        .map_err(|_| "Codex app-server request timed out".to_owned())?
+        .map_err(|error| format!("failed to write to Codex app-server: {error}"))
+}
+
+async fn read_codex_response(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    id: u64,
+    deadline: Instant,
+) -> Result<serde_json::Value, String> {
+    loop {
+        let message = read_codex_message(reader, deadline).await?;
+        if message.get("id").and_then(|value| value.as_u64()) == Some(id) {
+            if let Some(error) = message
+                .pointer("/error/message")
+                .and_then(|value| value.as_str())
+            {
+                return Err(format!("Codex app-server request failed: {error}"));
+            }
+            return Ok(message);
+        }
+    }
+}
+
+pub(crate) async fn read_codex_message(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    deadline: Instant,
+) -> Result<serde_json::Value, String> {
+    let mut line = Vec::new();
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| "Codex app-server response timed out".to_owned())?;
+        let available = timeout(remaining, reader.fill_buf())
+            .await
+            .map_err(|_| "Codex app-server response timed out".to_owned())?
+            .map_err(|error| format!("failed to read Codex app-server response: {error}"))?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Err("Codex app-server stopped unexpectedly".to_owned());
+            }
+            break;
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if line.len().saturating_add(take) > MAX_CODEX_MESSAGE_BYTES {
+            return Err("Codex app-server message exceeded the size limit".to_owned());
+        }
+        let complete = available[take - 1] == b'\n';
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if complete {
+            break;
+        }
+    }
+    serde_json::from_slice(&line).map_err(|_| "Codex app-server returned invalid JSON".to_owned())
+}
+
+fn codex_program() -> PathBuf {
+    env::var_os("ARIADNE_CODEX_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("codex"))
+}
+
+pub fn prepare_codex_home(
+    config_directory: impl AsRef<std::path::Path>,
+) -> Result<PathBuf, String> {
+    secure_codex_home(config_directory.as_ref().join("ariadne").join("codex"))
+}
+
+fn configured_codex_home() -> Result<PathBuf, String> {
+    match env::var_os("ARIADNE_CODEX_HOME") {
+        Some(home) => secure_codex_home(PathBuf::from(home)),
+        None => prepare_codex_home(
+            dirs::config_dir().ok_or("Ariadne could not determine its configuration directory")?,
+        ),
+    }
+}
+
+pub(crate) fn secure_codex_home(home: PathBuf) -> Result<PathBuf, String> {
+    secure_private_directory(home).map_err(|error| {
+        if error.to_string().contains("symbolic link") {
+            "Ariadne's Codex directory must not be a symbolic link or contain symbolic links"
+                .to_owned()
+        } else {
+            format!("failed to prepare Ariadne's Codex directory: {error}")
+        }
+    })
+}
 
 #[derive(Deserialize)]
 pub struct RespondRequest {
@@ -124,15 +482,139 @@ fn profiles(profiles: State<'_, AgentProfiles>) -> ProfilesResponse {
     list_profiles(&profiles)
 }
 
+#[tauri::command]
+async fn openai_account() -> Result<OpenAiAccountResponse, String> {
+    openai_account_with_program_and_home(codex_program(), configured_codex_home()?).await
+}
+
+#[tauri::command]
+async fn connect_openai(
+    authentication_lock: State<'_, OpenAiAuthenticationLock>,
+    request: OpenAiConnectRequest,
+) -> Result<OpenAiAccountResponse, String> {
+    let _authentication = authentication_lock.acquire().await;
+    connect_openai_with_program_and_home(codex_program(), configured_codex_home()?, request).await
+}
+
+#[tauri::command]
+async fn list_providers(
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+) -> Result<Vec<ConfiguredProvider>, String> {
+    let mut store = provider_settings.lock().await;
+    store.refresh().map_err(|error| error.to_string())?;
+    Ok(store.list())
+}
+
+async fn configured_provider_from_input(
+    input: ProviderInput,
+) -> Result<ConfiguredProvider, String> {
+    match input {
+        ProviderInput::Ollama { api_base } => Ok(ConfiguredProvider::Ollama { api_base }),
+        ProviderInput::OpenAi {
+            authentication,
+            api_key,
+        } => {
+            let request = match authentication {
+                OpenAiAuthentication::Chatgpt => OpenAiConnectRequest::Chatgpt,
+                OpenAiAuthentication::ApiKey => OpenAiConnectRequest::ApiKey {
+                    api_key: api_key.ok_or("OpenAI API key is required")?,
+                },
+            };
+            connect_openai_with_program_and_home(
+                codex_program(),
+                configured_codex_home()?,
+                request,
+            )
+            .await?;
+            Ok(ConfiguredProvider::OpenAi { authentication })
+        }
+    }
+}
+
+#[tauri::command]
+async fn create_provider(
+    authentication_lock: State<'_, OpenAiAuthenticationLock>,
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    provider: ProviderInput,
+) -> Result<ConfiguredProvider, String> {
+    let _authentication = authentication_lock.acquire().await;
+    let mut store = provider_settings.lock().await;
+    store.refresh().map_err(|error| error.to_string())?;
+    if store.get(provider.kind()).is_some() {
+        return Err(format!(
+            "provider `{}` is already configured",
+            provider.kind()
+        ));
+    }
+    let provider = configured_provider_from_input(provider).await?;
+    store
+        .add(provider.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(provider)
+}
+
+#[tauri::command]
+async fn update_provider(
+    authentication_lock: State<'_, OpenAiAuthenticationLock>,
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    provider: ProviderInput,
+) -> Result<ConfiguredProvider, String> {
+    let _authentication = authentication_lock.acquire().await;
+    let mut store = provider_settings.lock().await;
+    store.refresh().map_err(|error| error.to_string())?;
+    if store.get(provider.kind()).is_none() {
+        return Err(format!("provider `{}` is not configured", provider.kind()));
+    }
+    let provider = configured_provider_from_input(provider).await?;
+    store
+        .update(provider.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(provider)
+}
+
+#[tauri::command]
+async fn delete_provider(
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    kind: String,
+) -> Result<(), String> {
+    provider_settings
+        .lock()
+        .await
+        .delete(&kind)
+        .map_err(|error| error.to_string())
+}
+
 pub fn run() {
     let configured = configured_profiles()
         .unwrap_or_else(|error| panic!("failed to configure Ariadne model provider: {error}"));
+    let provider_settings = configured_provider_settings()
+        .unwrap_or_else(|error| panic!("failed to load Ariadne provider settings: {error}"));
 
     tauri::Builder::default()
         .manage(configured)
-        .invoke_handler(tauri::generate_handler![respond, respond_stream, profiles])
+        .manage(Mutex::new(provider_settings))
+        .manage(OpenAiAuthenticationLock::default())
+        .invoke_handler(tauri::generate_handler![
+            respond,
+            respond_stream,
+            profiles,
+            openai_account,
+            connect_openai,
+            list_providers,
+            create_provider,
+            update_provider,
+            delete_provider
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run Ariadne desktop application");
+}
+
+fn configured_provider_settings() -> Result<ProviderSettingsStore, String> {
+    match env::var_os("ARIADNE_PROVIDER_CONFIG") {
+        Some(path) => ProviderSettingsStore::load(PathBuf::from(path)),
+        None => ProviderSettingsStore::load_default(),
+    }
+    .map_err(|error| error.to_string())
 }
 
 fn configured_profiles() -> Result<AgentProfiles, String> {
@@ -166,6 +648,33 @@ fn configured_profiles() -> Result<AgentProfiles, String> {
         let agent = configured_agent(&profile, api_key_override)?;
         configured.push((profile.profile, agent));
     }
+
+    const OPENAI_ACCOUNT_PROFILE: &str = "openai-account";
+    if configured
+        .iter()
+        .any(|(profile, _)| profile.name == OPENAI_ACCOUNT_PROFILE)
+    {
+        return Err(format!(
+            "profile name `{OPENAI_ACCOUNT_PROFILE}` is reserved for the desktop OpenAI account"
+        ));
+    }
+    let openai_profile = Profile {
+        name: OPENAI_ACCOUNT_PROFILE.to_owned(),
+        provider: "openai".to_owned(),
+        model: "Codex default".to_owned(),
+        active_skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        capabilities: Vec::new(),
+    };
+    let openai_agent = Agent::new(
+        Arc::new(CodexAppServerProvider::with_home(
+            codex_program(),
+            configured_codex_home()?,
+            None,
+        )),
+        "You are Ariadne, a careful and capable AI software agent.",
+    );
+    configured.push((openai_profile, openai_agent));
 
     AgentProfiles::new(default_profile, configured).map_err(|error| error.to_string())
 }
@@ -286,7 +795,30 @@ mod tests {
     use std::env::VarError;
     use std::ffi::OsString;
 
-    use super::decode_optional_env;
+    use tokio::io::BufReader;
+    use tokio::time::{Duration, Instant};
+
+    use super::{
+        MAX_CODEX_MESSAGE_BYTES, OpenAiAuthenticationLock, decode_optional_env, read_codex_message,
+        write_codex_message,
+    };
+
+    #[tokio::test]
+    async fn openai_authentication_lock_serializes_credential_mutations() {
+        let lock = OpenAiAuthenticationLock::default();
+        let first = lock.acquire().await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), lock.acquire())
+                .await
+                .is_err()
+        );
+
+        drop(first);
+        let _released = tokio::time::timeout(Duration::from_millis(50), lock.acquire())
+            .await
+            .expect("the credential lock should be released");
+    }
 
     #[test]
     fn configured_environment_values_must_be_valid_unicode() {
@@ -300,5 +832,61 @@ mod tests {
             error,
             "environment variable `ARIADNE_CONFIG` is not valid Unicode"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_message_reader_rejects_an_oversized_unterminated_line() {
+        let input = vec![b'x'; MAX_CODEX_MESSAGE_BYTES + 1];
+        let mut reader = BufReader::new(input.as_slice());
+
+        let error = read_codex_message(&mut reader, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "Codex app-server message exceeded the size limit");
+    }
+
+    #[tokio::test]
+    async fn codex_message_reader_observes_the_operation_deadline() {
+        let (_writer, reader) = tokio::io::duplex(16);
+        let mut reader = BufReader::new(reader);
+
+        let error = read_codex_message(&mut reader, Instant::now() + Duration::from_millis(1))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "Codex app-server response timed out");
+    }
+
+    #[tokio::test]
+    async fn codex_message_writer_rejects_an_oversized_request() {
+        let (mut writer, _reader) = tokio::io::duplex(16);
+        let message = serde_json::json!({"value": "x".repeat(MAX_CODEX_MESSAGE_BYTES)});
+
+        let error = write_codex_message(
+            &mut writer,
+            &message,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Codex app-server request exceeded the size limit");
+    }
+
+    #[tokio::test]
+    async fn codex_message_writer_observes_the_operation_deadline() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let message = serde_json::json!({"value": "blocked"});
+
+        let error = write_codex_message(
+            &mut writer,
+            &message,
+            Instant::now() + Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "Codex app-server request timed out");
     }
 }
