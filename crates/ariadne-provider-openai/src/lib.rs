@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ariadne_core::{
-    Completion, CompletionDelta, CompletionRequest, Message, ModelProvider, ProviderError, Role,
-    ToolCall, ToolDefinition,
+    CacheOptimizer, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
+    PrefixCacheOptimizer, ProviderError, Role, ToolCall, ToolDefinition,
 };
 use async_trait::async_trait;
 use reqwest::{Client, Url};
@@ -20,6 +21,15 @@ pub struct OpenAiCompatibleProvider {
     completion_url: Url,
     model: String,
     api_key: Option<String>,
+    cache_technology: CacheTechnology,
+    cache_optimizer: Arc<dyn CacheOptimizer>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheTechnology {
+    OpenAi,
+    Ollama,
+    Generic,
 }
 
 impl OpenAiCompatibleProvider {
@@ -27,6 +37,33 @@ impl OpenAiCompatibleProvider {
         base_url: impl AsRef<str>,
         model: impl Into<String>,
         api_key: Option<String>,
+    ) -> Result<Self, ProviderConfigError> {
+        let base_url = base_url.as_ref();
+        let cache_technology = cache_technology_for(base_url);
+        Self::with_cache_technology(base_url, model, api_key, cache_technology)
+    }
+
+    pub fn new_openai(
+        base_url: impl AsRef<str>,
+        model: impl Into<String>,
+        api_key: Option<String>,
+    ) -> Result<Self, ProviderConfigError> {
+        Self::with_cache_technology(base_url, model, api_key, CacheTechnology::OpenAi)
+    }
+
+    pub fn new_ollama(
+        base_url: impl AsRef<str>,
+        model: impl Into<String>,
+        api_key: Option<String>,
+    ) -> Result<Self, ProviderConfigError> {
+        Self::with_cache_technology(base_url, model, api_key, CacheTechnology::Ollama)
+    }
+
+    fn with_cache_technology(
+        base_url: impl AsRef<str>,
+        model: impl Into<String>,
+        api_key: Option<String>,
+        cache_technology: CacheTechnology,
     ) -> Result<Self, ProviderConfigError> {
         let model = model.into();
         if model.trim().is_empty() {
@@ -62,7 +99,27 @@ impl OpenAiCompatibleProvider {
             completion_url,
             model,
             api_key,
+            cache_technology,
+            cache_optimizer: Arc::new(PrefixCacheOptimizer),
         })
+    }
+
+    pub fn with_cache_optimizer(mut self, optimizer: Arc<dyn CacheOptimizer>) -> Self {
+        self.cache_optimizer = optimizer;
+        self
+    }
+}
+
+fn cache_technology_for(base_url: &str) -> CacheTechnology {
+    let Ok(url) = Url::parse(base_url) else {
+        return CacheTechnology::Generic;
+    };
+    if url.host_str() == Some("api.openai.com") {
+        CacheTechnology::OpenAi
+    } else if url.port_or_known_default() == Some(11434) {
+        CacheTechnology::Ollama
+    } else {
+        CacheTechnology::Generic
     }
 }
 
@@ -95,6 +152,8 @@ struct ChatCompletionRequest<'a> {
     messages: Vec<OpenAiRequestMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OpenAiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     stream: bool,
 }
@@ -214,7 +273,11 @@ struct PendingToolCall {
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
-        let payload = chat_completion_request(&self.model, request, false);
+        let cache = self.cache_optimizer.optimize(&request);
+        let cache_key = (self.cache_technology == CacheTechnology::OpenAi
+            && cache.use_server_cache)
+            .then(|| cache.server_cache_key());
+        let payload = chat_completion_request(&self.model, request, false, cache_key);
         let mut request_builder = self.client.post(self.completion_url.clone()).json(&payload);
         if let Some(api_key) = &self.api_key {
             request_builder = request_builder.bearer_auth(api_key);
@@ -259,7 +322,11 @@ impl ModelProvider for OpenAiCompatibleProvider {
         request: CompletionRequest,
         on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
     ) -> Result<Completion, ProviderError> {
-        let payload = chat_completion_request(&self.model, request, true);
+        let cache = self.cache_optimizer.optimize(&request);
+        let cache_key = (self.cache_technology == CacheTechnology::OpenAi
+            && cache.use_server_cache)
+            .then(|| cache.server_cache_key());
+        let payload = chat_completion_request(&self.model, request, true, cache_key);
         let mut request_builder = self.client.post(self.completion_url.clone()).json(&payload);
         if let Some(api_key) = &self.api_key {
             request_builder = request_builder.bearer_auth(api_key);
@@ -327,6 +394,7 @@ fn chat_completion_request(
     model: &str,
     request: CompletionRequest,
     stream: bool,
+    prompt_cache_key: Option<String>,
 ) -> ChatCompletionRequest<'_> {
     ChatCompletionRequest {
         model,
@@ -362,6 +430,7 @@ fn chat_completion_request(
             })
             .collect(),
         tools: request.tools.into_iter().map(openai_tool).collect(),
+        prompt_cache_key,
         stream,
     }
 }
@@ -503,6 +572,7 @@ fn truncate(value: &str, max_chars: usize) -> String {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
@@ -510,6 +580,26 @@ mod tests {
     use reqwest::Url;
 
     use super::{OpenAiCompatibleProvider, build_http_client};
+
+    #[test]
+    fn constructor_selects_openai_server_caching_for_the_official_api() {
+        let provider = OpenAiCompatibleProvider::new(
+            "https://api.openai.com/v1",
+            "gpt-5",
+            Some("test-key".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(provider.cache_technology, super::CacheTechnology::OpenAi);
+    }
+
+    #[test]
+    fn constructor_selects_ollama_prefix_caching_for_the_default_local_api() {
+        let provider =
+            OpenAiCompatibleProvider::new("http://127.0.0.1:11434/v1", "qwen3:8b", None).unwrap();
+
+        assert_eq!(provider.cache_technology, super::CacheTechnology::Ollama);
+    }
 
     #[tokio::test]
     async fn active_stream_can_outlive_the_per_read_timeout() {
@@ -543,6 +633,8 @@ mod tests {
             completion_url: Url::parse(&format!("http://{address}/v1/chat/completions")).unwrap(),
             model: "test-model".to_owned(),
             api_key: None,
+            cache_technology: super::CacheTechnology::Generic,
+            cache_optimizer: Arc::new(super::PrefixCacheOptimizer),
         };
         let mut deltas = Vec::new();
 

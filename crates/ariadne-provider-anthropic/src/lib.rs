@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ariadne_core::{
-    Completion, CompletionDelta, CompletionRequest, Message, ModelProvider, ProviderError, Role,
-    ToolCall,
+    CacheOptimizer, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
+    PrefixCacheOptimizer, ProviderError, Role, ToolCall,
 };
 use async_trait::async_trait;
 use reqwest::{Client, Url};
@@ -123,6 +124,7 @@ pub struct AnthropicMessagesProvider {
     messages_url: Url,
     model: String,
     api_key: String,
+    cache_optimizer: Arc<dyn CacheOptimizer>,
 }
 
 impl AnthropicMessagesProvider {
@@ -175,7 +177,13 @@ impl AnthropicMessagesProvider {
             messages_url,
             model,
             api_key,
+            cache_optimizer: Arc::new(PrefixCacheOptimizer),
         })
+    }
+
+    pub fn with_cache_optimizer(mut self, optimizer: Arc<dyn CacheOptimizer>) -> Self {
+        self.cache_optimizer = optimizer;
+        self
     }
 
     fn request(
@@ -183,7 +191,8 @@ impl AnthropicMessagesProvider {
         request: CompletionRequest,
         stream: bool,
     ) -> Result<MessagesRequest, ProviderError> {
-        build_messages_request(&self.model, request, stream)
+        let cache = self.cache_optimizer.optimize(&request);
+        build_messages_request(&self.model, request, stream, cache.use_server_cache)
     }
 }
 
@@ -210,12 +219,20 @@ struct MessagesRequest {
     model: String,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
     messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
+}
+
+#[derive(Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 #[derive(Serialize)]
 struct ApiMessage {
@@ -249,6 +266,7 @@ fn build_messages_request(
     model: &str,
     request: CompletionRequest,
     stream: bool,
+    use_server_cache: bool,
 ) -> Result<MessagesRequest, ProviderError> {
     let mut system = Vec::new();
     let mut messages = Vec::new();
@@ -300,6 +318,7 @@ fn build_messages_request(
     Ok(MessagesRequest {
         model: model.to_owned(),
         max_tokens: DEFAULT_MAX_TOKENS,
+        cache_control: use_server_cache.then_some(CacheControl { kind: "ephemeral" }),
         system: (!system.is_empty()).then(|| system.join("\n\n")),
         messages,
         tools: request

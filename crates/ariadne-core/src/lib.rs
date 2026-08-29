@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -137,6 +138,61 @@ pub trait Tool: Send + Sync {
 pub struct CompletionRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CacheOptimization {
+    pub use_server_cache: bool,
+    pub scope_key: String,
+}
+
+impl CacheOptimization {
+    pub fn server_cache_key(&self) -> String {
+        format!("{:x}", Sha256::digest(self.scope_key.as_bytes()))
+    }
+}
+
+pub trait CacheOptimizer: Send + Sync {
+    fn optimize(&self, request: &CompletionRequest) -> CacheOptimization;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PrefixCacheOptimizer;
+
+impl CacheOptimizer for PrefixCacheOptimizer {
+    fn optimize(&self, request: &CompletionRequest) -> CacheOptimization {
+        let mut digest = Sha256::new();
+        digest.update(b"ariadne-prefix-cache-v2");
+        for message in request
+            .messages
+            .iter()
+            .take_while(|message| message.role == Role::System)
+        {
+            digest.update(b"system");
+            digest.update((message.content.len() as u64).to_be_bytes());
+            digest.update(message.content.as_bytes());
+        }
+        if let Some(anchor) = request
+            .messages
+            .iter()
+            .find(|message| message.role != Role::System)
+        {
+            let anchor = serde_json::to_vec(anchor).unwrap_or_default();
+            digest.update(b"anchor");
+            digest.update((anchor.len() as u64).to_be_bytes());
+            digest.update(anchor);
+        } else {
+            digest.update(b"no-anchor");
+        }
+        let tools = serde_json::to_vec(&request.tools).unwrap_or_default();
+        digest.update(b"tools");
+        digest.update((tools.len() as u64).to_be_bytes());
+        digest.update(tools);
+        CacheOptimization {
+            use_server_cache: true,
+            scope_key: format!("{:x}", digest.finalize()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
