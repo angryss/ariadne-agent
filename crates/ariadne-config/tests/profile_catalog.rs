@@ -1,4 +1,7 @@
-use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedCapability};
+use ariadne_config::{
+    ConfiguredProvider, OpenAiAuthentication, ProfileCatalog, ProviderKind, ProviderSettingsStore,
+    ResolvedCapability, secure_private_directory,
+};
 
 #[test]
 fn parses_profile_provider_model_skills_and_mcp_servers() {
@@ -429,4 +432,222 @@ model = "model"
             .to_string()
             .contains("provider `remote` base URL must not contain embedded credentials")
     );
+}
+
+#[test]
+fn provider_settings_start_blank_and_support_add_update_and_delete() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.toml");
+    let mut store = ProviderSettingsStore::load(&path).unwrap();
+
+    assert!(store.list().is_empty());
+    assert!(!path.exists());
+
+    store
+        .add(ConfiguredProvider::Ollama {
+            api_base: "http://127.0.0.1:11434/v1".to_owned(),
+        })
+        .unwrap();
+    store
+        .add(ConfiguredProvider::OpenAi {
+            authentication: OpenAiAuthentication::Chatgpt,
+        })
+        .unwrap();
+
+    assert_eq!(
+        ProviderSettingsStore::load(&path).unwrap().list(),
+        vec![
+            ConfiguredProvider::Ollama {
+                api_base: "http://127.0.0.1:11434/v1".to_owned(),
+            },
+            ConfiguredProvider::OpenAi {
+                authentication: OpenAiAuthentication::Chatgpt,
+            },
+        ]
+    );
+
+    store
+        .update(ConfiguredProvider::OpenAi {
+            authentication: OpenAiAuthentication::ApiKey,
+        })
+        .unwrap();
+    assert_eq!(
+        store.get("openai"),
+        Some(&ConfiguredProvider::OpenAi {
+            authentication: OpenAiAuthentication::ApiKey,
+        })
+    );
+
+    store.delete("ollama").unwrap();
+    assert_eq!(
+        ProviderSettingsStore::load(path).unwrap().list(),
+        vec![ConfiguredProvider::OpenAi {
+            authentication: OpenAiAuthentication::ApiKey,
+        }]
+    );
+}
+
+#[test]
+fn provider_settings_reject_duplicates_unknown_updates_and_invalid_ollama_urls() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.toml");
+    let mut store = ProviderSettingsStore::load(path).unwrap();
+    store
+        .add(ConfiguredProvider::Ollama {
+            api_base: "http://localhost:11434/v1".to_owned(),
+        })
+        .unwrap();
+
+    assert!(
+        store
+            .add(ConfiguredProvider::Ollama {
+                api_base: "http://localhost:11434/v1".to_owned(),
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("already configured")
+    );
+    assert!(
+        store
+            .update(ConfiguredProvider::OpenAi {
+                authentication: OpenAiAuthentication::Chatgpt,
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("is not configured")
+    );
+    assert!(
+        ProviderSettingsStore::load(directory.path().join("invalid.toml"))
+            .unwrap()
+            .add(ConfiguredProvider::Ollama {
+                api_base: "not a URL".to_owned(),
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("URL is invalid")
+    );
+}
+
+#[test]
+fn provider_settings_do_not_change_in_memory_when_persistence_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let settings_path = directory.path().join("providers.toml");
+    let mut store = ProviderSettingsStore::load(&settings_path).unwrap();
+    std::fs::create_dir(&settings_path).unwrap();
+
+    assert!(
+        store
+            .add(ConfiguredProvider::Ollama {
+                api_base: "http://localhost:11434/v1".to_owned(),
+            })
+            .is_err()
+    );
+    assert!(store.list().is_empty());
+
+    std::fs::remove_dir(&settings_path).unwrap();
+    store
+        .add(ConfiguredProvider::Ollama {
+            api_base: "http://localhost:11434/v1".to_owned(),
+        })
+        .expect("a failed replacement must not poison future writes");
+    assert_eq!(store.list().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn provider_settings_ignore_stale_temporary_file_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let settings_path = directory.path().join("providers.toml");
+    let temporary_path = settings_path.with_extension("toml.tmp");
+    let victim_path = directory.path().join("victim.txt");
+    std::fs::write(&victim_path, "keep me").unwrap();
+    symlink(&victim_path, temporary_path).unwrap();
+    let mut store = ProviderSettingsStore::load(&settings_path).unwrap();
+
+    store
+        .add(ConfiguredProvider::Ollama {
+            api_base: "http://localhost:11434/v1".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(victim_path).unwrap(), "keep me");
+    assert_eq!(store.list().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_private_directory_rejects_a_symlink_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = directory.path().join("link");
+    symlink(&real, &link).unwrap();
+
+    let error = secure_private_directory(link.join("codex")).unwrap_err();
+
+    assert!(error.to_string().contains("symbolic link"));
+    assert!(!real.join("codex").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn secure_private_directory_rejects_parent_components_and_root() {
+    assert!(secure_private_directory("/").is_err());
+    assert!(secure_private_directory("/tmp/ariadne/../codex").is_err());
+}
+
+#[test]
+fn provider_settings_merge_mutations_from_separate_store_instances() {
+    let directory = tempfile::tempdir().unwrap();
+    let settings_path = directory.path().join("providers.toml");
+    let mut first = ProviderSettingsStore::load(&settings_path).unwrap();
+    let mut second = ProviderSettingsStore::load(&settings_path).unwrap();
+
+    first
+        .add(ConfiguredProvider::Ollama {
+            api_base: "http://localhost:11434/v1".to_owned(),
+        })
+        .unwrap();
+    second
+        .add(ConfiguredProvider::OpenAi {
+            authentication: OpenAiAuthentication::Chatgpt,
+        })
+        .unwrap();
+
+    let reloaded = ProviderSettingsStore::load(settings_path).unwrap();
+    assert_eq!(reloaded.list().len(), 2);
+}
+
+#[test]
+fn provider_settings_support_a_bare_relative_filename() {
+    let file_name = format!(
+        ".ariadne-provider-settings-test-{}.toml",
+        std::process::id()
+    );
+    let lock_name = format!(
+        ".ariadne-provider-settings-test-{}.toml.lock",
+        std::process::id()
+    );
+    let _ = std::fs::remove_file(&file_name);
+    let _ = std::fs::remove_file(&lock_name);
+    let mut store = ProviderSettingsStore::load(&file_name).unwrap();
+
+    store
+        .add(ConfiguredProvider::Ollama {
+            api_base: "http://localhost:11434/v1".to_owned(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        ProviderSettingsStore::load(&file_name)
+            .unwrap()
+            .list()
+            .len(),
+        1
+    );
+    std::fs::remove_file(file_name).unwrap();
+    std::fs::remove_file(lock_name).unwrap();
 }

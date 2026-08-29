@@ -80,4 +80,28 @@ describe('TauriAgentClient', () => {
       request: { method: 'api_key', api_key: 'sk-secret' },
     });
   });
+
+  it('uses narrow commands for provider settings CRUD', async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ kind: 'openai', authentication: 'chatgpt' })
+      .mockResolvedValueOnce({ kind: 'openai', authentication: 'api_key' })
+      .mockResolvedValueOnce(undefined);
+    const client = new TauriAgentClient(invoke);
+
+    await client.listProviders();
+    await client.createProvider({ kind: 'openai', authentication: 'chatgpt' });
+    await client.updateProvider({ kind: 'openai', authentication: 'api_key', api_key: 'sk-secret' });
+    await client.deleteProvider('openai');
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'list_providers', {});
+    expect(invoke).toHaveBeenNthCalledWith(2, 'create_provider', {
+      provider: { kind: 'openai', authentication: 'chatgpt' },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, 'update_provider', {
+      provider: { kind: 'openai', authentication: 'api_key', api_key: 'sk-secret' },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, 'delete_provider', { kind: 'openai' });
+  });
 });

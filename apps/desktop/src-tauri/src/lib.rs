@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedCapability, ResolvedProfile};
+use ariadne_config::{
+    ConfiguredProvider, OpenAiAuthentication, ProfileCatalog, ProviderKind, ProviderSettingsStore,
+    ResolvedCapability, ResolvedProfile, secure_private_directory,
+};
 use ariadne_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile, Tool};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
 use ariadne_tools_command::{CommandConfig, CommandTool};
@@ -13,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{State, ipc::Channel};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant, timeout};
 
 mod codex_provider;
@@ -34,6 +38,38 @@ pub struct OpenAiAccountResponse {
     pub method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ProviderInput {
+    Ollama {
+        api_base: String,
+    },
+    #[serde(rename = "openai")]
+    OpenAi {
+        authentication: OpenAiAuthentication,
+        #[serde(default)]
+        api_key: Option<String>,
+    },
+}
+
+impl ProviderInput {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Ollama { .. } => "ollama",
+            Self::OpenAi { .. } => "openai",
+        }
+    }
+}
+
+#[derive(Default)]
+struct OpenAiAuthenticationLock(Mutex<()>);
+
+impl OpenAiAuthenticationLock {
+    async fn acquire(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.lock().await
+    }
 }
 
 pub async fn connect_openai_with_program(
@@ -321,142 +357,14 @@ fn configured_codex_home() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn secure_codex_home(home: PathBuf) -> Result<PathBuf, String> {
-    #[cfg(unix)]
-    {
-        secure_codex_home_unix(home)
-    }
-    #[cfg(not(unix))]
-    {
-        secure_codex_home_portable(home)
-    }
-}
-
-#[cfg(unix)]
-fn secure_codex_home_unix(home: PathBuf) -> Result<PathBuf, String> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::os::unix::ffi::OsStrExt;
-    use std::path::Component;
-
-    if !home.is_absolute() {
-        return Err("Ariadne's Codex directory must be an absolute path".to_owned());
-    }
-    let root = CString::new("/").expect("the root path has no NUL bytes");
-    // SAFETY: root is a valid NUL-terminated path and the returned descriptor is owned here.
-    let root_fd = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
-    if root_fd < 0 {
-        return Err(format!(
-            "failed to open the filesystem root: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    // SAFETY: open returned a fresh descriptor on success.
-    let mut directory = unsafe { OwnedFd::from_raw_fd(root_fd) };
-    for component in home.components() {
-        let Component::Normal(name) = component else {
-            continue;
-        };
-        let name = CString::new(name.as_bytes())
-            .map_err(|_| "Ariadne's Codex directory path contains a NUL byte".to_owned())?;
-        // SAFETY: directory and name are valid; mkdirat does not follow the final component.
-        let created = unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700) };
-        if created != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(format!(
-                    "failed to create Ariadne's Codex directory: {error}"
-                ));
-            }
+    secure_private_directory(home).map_err(|error| {
+        if error.to_string().contains("symbolic link") {
+            "Ariadne's Codex directory must not be a symbolic link or contain symbolic links"
+                .to_owned()
+        } else {
+            format!("failed to prepare Ariadne's Codex directory: {error}")
         }
-        let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: status points to writable storage and the descriptor/name are valid.
-        if unsafe {
-            libc::fstatat(
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                status.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        } != 0
-        {
-            return Err(format!(
-                "failed to inspect Ariadne's Codex directory: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        // SAFETY: fstatat initialized status after returning success.
-        let status = unsafe { status.assume_init() };
-        if status.st_mode & libc::S_IFMT == libc::S_IFLNK {
-            return Err(
-                "Ariadne's Codex directory must not be a symbolic link or contain symbolic links"
-                    .to_owned(),
-            );
-        }
-        if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
-            return Err("Ariadne's Codex directory path must contain only directories".to_owned());
-        }
-        // SAFETY: directory and name are valid. O_NOFOLLOW rejects a symbolic-link component.
-        let child_fd = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-            )
-        };
-        if child_fd < 0 {
-            let error = std::io::Error::last_os_error();
-            return if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
-                Err("Ariadne's Codex directory must not be a symbolic link or contain symbolic links".to_owned())
-            } else if matches!(error.raw_os_error(), Some(libc::ENOTDIR)) {
-                Err("Ariadne's Codex directory path must contain only directories".to_owned())
-            } else {
-                Err(format!(
-                    "failed to inspect Ariadne's Codex directory: {error}"
-                ))
-            };
-        }
-        // SAFETY: openat returned a fresh descriptor on success.
-        directory = unsafe { OwnedFd::from_raw_fd(child_fd) };
-    }
-    // SAFETY: directory is a valid descriptor opened by this function.
-    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
-        return Err(format!(
-            "failed to secure Ariadne's Codex directory: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(home)
-}
-
-#[cfg(not(unix))]
-fn secure_codex_home_portable(home: PathBuf) -> Result<PathBuf, String> {
-    match std::fs::symlink_metadata(&home) {
-        Ok(metadata) => validate_codex_home_target(&metadata)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(&home)
-                .map_err(|error| format!("failed to create Ariadne's Codex directory: {error}"))?;
-            let metadata = std::fs::symlink_metadata(&home)
-                .map_err(|error| format!("failed to inspect Ariadne's Codex directory: {error}"))?;
-            validate_codex_home_target(&metadata)?;
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to inspect Ariadne's Codex directory: {error}"
-            ));
-        }
-    }
-    Ok(home)
-}
-
-#[cfg(not(unix))]
-fn validate_codex_home_target(metadata: &std::fs::Metadata) -> Result<(), String> {
-    if metadata.file_type().is_symlink() {
-        return Err("Ariadne's Codex directory must not be a symbolic link".into());
-    }
-    if !metadata.is_dir() {
-        return Err("Ariadne's Codex directory must be a directory".into());
-    }
-    Ok(())
+    })
 }
 
 #[derive(Deserialize)]
@@ -580,25 +488,133 @@ async fn openai_account() -> Result<OpenAiAccountResponse, String> {
 }
 
 #[tauri::command]
-async fn connect_openai(request: OpenAiConnectRequest) -> Result<OpenAiAccountResponse, String> {
+async fn connect_openai(
+    authentication_lock: State<'_, OpenAiAuthenticationLock>,
+    request: OpenAiConnectRequest,
+) -> Result<OpenAiAccountResponse, String> {
+    let _authentication = authentication_lock.acquire().await;
     connect_openai_with_program_and_home(codex_program(), configured_codex_home()?, request).await
+}
+
+#[tauri::command]
+async fn list_providers(
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+) -> Result<Vec<ConfiguredProvider>, String> {
+    let mut store = provider_settings.lock().await;
+    store.refresh().map_err(|error| error.to_string())?;
+    Ok(store.list())
+}
+
+async fn configured_provider_from_input(
+    input: ProviderInput,
+) -> Result<ConfiguredProvider, String> {
+    match input {
+        ProviderInput::Ollama { api_base } => Ok(ConfiguredProvider::Ollama { api_base }),
+        ProviderInput::OpenAi {
+            authentication,
+            api_key,
+        } => {
+            let request = match authentication {
+                OpenAiAuthentication::Chatgpt => OpenAiConnectRequest::Chatgpt,
+                OpenAiAuthentication::ApiKey => OpenAiConnectRequest::ApiKey {
+                    api_key: api_key.ok_or("OpenAI API key is required")?,
+                },
+            };
+            connect_openai_with_program_and_home(
+                codex_program(),
+                configured_codex_home()?,
+                request,
+            )
+            .await?;
+            Ok(ConfiguredProvider::OpenAi { authentication })
+        }
+    }
+}
+
+#[tauri::command]
+async fn create_provider(
+    authentication_lock: State<'_, OpenAiAuthenticationLock>,
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    provider: ProviderInput,
+) -> Result<ConfiguredProvider, String> {
+    let _authentication = authentication_lock.acquire().await;
+    let mut store = provider_settings.lock().await;
+    store.refresh().map_err(|error| error.to_string())?;
+    if store.get(provider.kind()).is_some() {
+        return Err(format!(
+            "provider `{}` is already configured",
+            provider.kind()
+        ));
+    }
+    let provider = configured_provider_from_input(provider).await?;
+    store
+        .add(provider.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(provider)
+}
+
+#[tauri::command]
+async fn update_provider(
+    authentication_lock: State<'_, OpenAiAuthenticationLock>,
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    provider: ProviderInput,
+) -> Result<ConfiguredProvider, String> {
+    let _authentication = authentication_lock.acquire().await;
+    let mut store = provider_settings.lock().await;
+    store.refresh().map_err(|error| error.to_string())?;
+    if store.get(provider.kind()).is_none() {
+        return Err(format!("provider `{}` is not configured", provider.kind()));
+    }
+    let provider = configured_provider_from_input(provider).await?;
+    store
+        .update(provider.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(provider)
+}
+
+#[tauri::command]
+async fn delete_provider(
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    kind: String,
+) -> Result<(), String> {
+    provider_settings
+        .lock()
+        .await
+        .delete(&kind)
+        .map_err(|error| error.to_string())
 }
 
 pub fn run() {
     let configured = configured_profiles()
         .unwrap_or_else(|error| panic!("failed to configure Ariadne model provider: {error}"));
+    let provider_settings = configured_provider_settings()
+        .unwrap_or_else(|error| panic!("failed to load Ariadne provider settings: {error}"));
 
     tauri::Builder::default()
         .manage(configured)
+        .manage(Mutex::new(provider_settings))
+        .manage(OpenAiAuthenticationLock::default())
         .invoke_handler(tauri::generate_handler![
             respond,
             respond_stream,
             profiles,
             openai_account,
-            connect_openai
+            connect_openai,
+            list_providers,
+            create_provider,
+            update_provider,
+            delete_provider
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Ariadne desktop application");
+}
+
+fn configured_provider_settings() -> Result<ProviderSettingsStore, String> {
+    match env::var_os("ARIADNE_PROVIDER_CONFIG") {
+        Some(path) => ProviderSettingsStore::load(PathBuf::from(path)),
+        None => ProviderSettingsStore::load_default(),
+    }
+    .map_err(|error| error.to_string())
 }
 
 fn configured_profiles() -> Result<AgentProfiles, String> {
@@ -783,8 +799,26 @@ mod tests {
     use tokio::time::{Duration, Instant};
 
     use super::{
-        MAX_CODEX_MESSAGE_BYTES, decode_optional_env, read_codex_message, write_codex_message,
+        MAX_CODEX_MESSAGE_BYTES, OpenAiAuthenticationLock, decode_optional_env, read_codex_message,
+        write_codex_message,
     };
+
+    #[tokio::test]
+    async fn openai_authentication_lock_serializes_credential_mutations() {
+        let lock = OpenAiAuthenticationLock::default();
+        let first = lock.acquire().await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), lock.acquire())
+                .await
+                .is_err()
+        );
+
+        drop(first);
+        let _released = tokio::time::timeout(Duration::from_millis(50), lock.acquire())
+            .await
+            .expect("the credential lock should be released");
+    }
 
     #[test]
     fn configured_environment_values_must_be_valid_unicode() {

@@ -5,11 +5,13 @@ export type {
   CompletionDelta,
   CompletionDeltaHandler,
   ConnectOpenAiRequest,
+  ConfiguredProvider,
   Message,
   MessageRole,
   OpenAiAccount,
   Profile,
   ProfileCatalog,
+  ProviderInput,
   RespondRequest,
   RespondResponse,
 } from './contracts';

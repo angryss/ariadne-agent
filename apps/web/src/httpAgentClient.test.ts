@@ -104,4 +104,31 @@ describe('HttpAgentClient', () => {
     expect(profiles.default_profile).toBe('local');
     expect(profiles.profiles[0]!.active_skills).toEqual(['rust']);
   });
+
+  it('lists and mutates provider settings through the providers API', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ kind: 'ollama', api_base: 'http://localhost:11434/v1' }))
+      .mockResolvedValueOnce(jsonResponse({ kind: 'ollama', api_base: 'http://localhost:22434/v1' }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new HttpAgentClient('/v1/respond', fetcher);
+
+    await expect(client.listProviders()).resolves.toEqual([]);
+    await client.createProvider({ kind: 'ollama', api_base: 'http://localhost:11434/v1' });
+    await client.updateProvider({ kind: 'ollama', api_base: 'http://localhost:22434/v1' });
+    await client.deleteProvider('ollama');
+
+    expect(fetcher).toHaveBeenNthCalledWith(1, '/v1/providers', expect.objectContaining({ method: 'GET' }));
+    expect(fetcher).toHaveBeenNthCalledWith(2, '/v1/providers', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenNthCalledWith(3, '/v1/providers/ollama', expect.objectContaining({ method: 'PUT' }));
+    expect(fetcher).toHaveBeenNthCalledWith(4, '/v1/providers/ollama', expect.objectContaining({ method: 'DELETE' }));
+  });
 });
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}

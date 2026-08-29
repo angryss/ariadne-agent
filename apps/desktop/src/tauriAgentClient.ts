@@ -4,9 +4,11 @@ import type {
   CompletionDelta,
   CompletionDeltaHandler,
   ConnectOpenAiRequest,
+  ConfiguredProvider,
   OpenAiAccount,
   Profile,
   ProfileCatalog,
+  ProviderInput,
   RespondRequest,
   RespondResponse,
 } from '@ariadne/ui';
@@ -51,6 +53,34 @@ export class TauriAgentClient implements AgentClient {
       throw new Error('Ariadne desktop returned invalid OpenAI account data');
     }
     return account;
+  }
+
+  async listProviders(): Promise<ConfiguredProvider[]> {
+    const providers = await this.invoke('list_providers', {});
+    if (!Array.isArray(providers) || !providers.every(isConfiguredProvider)) {
+      throw new Error('Ariadne desktop returned invalid provider data');
+    }
+    return providers;
+  }
+
+  async createProvider(provider: ProviderInput): Promise<ConfiguredProvider> {
+    return this.saveProvider('create_provider', provider);
+  }
+
+  async updateProvider(provider: ProviderInput): Promise<ConfiguredProvider> {
+    return this.saveProvider('update_provider', provider);
+  }
+
+  async deleteProvider(kind: ConfiguredProvider['kind']): Promise<void> {
+    await this.invoke('delete_provider', { kind });
+  }
+
+  private async saveProvider(command: string, provider: ProviderInput): Promise<ConfiguredProvider> {
+    const saved = await this.invoke(command, { provider });
+    if (!isConfiguredProvider(saved)) {
+      throw new Error('Ariadne desktop returned invalid provider data');
+    }
+    return saved;
   }
 
   async respond(
@@ -160,5 +190,17 @@ function isOpenAiAccount(value: unknown): value is OpenAiAccount {
   return (
     value.method === 'chatgpt' &&
     (!('plan' in value) || value.plan === undefined || typeof value.plan === 'string')
+  );
+}
+
+function isConfiguredProvider(value: unknown): value is ConfiguredProvider {
+  if (!value || typeof value !== 'object' || !('kind' in value)) return false;
+  if (value.kind === 'ollama') {
+    return 'api_base' in value && typeof value.api_base === 'string';
+  }
+  return (
+    value.kind === 'openai' &&
+    'authentication' in value &&
+    (value.authentication === 'api_key' || value.authentication === 'chatgpt')
   );
 }

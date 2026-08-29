@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ariadne_core::Profile;
-use serde::Deserialize;
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
@@ -16,6 +18,507 @@ pub const DEFAULT_PROFILE: &str = "default";
 pub const DEFAULT_PROVIDER: &str = "ollama";
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Ariadne, a careful and capable AI software agent.";
 const CONFIG_VERSION: u32 = 1;
+const PROVIDER_SETTINGS_VERSION: u32 = 1;
+static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiAuthentication {
+    ApiKey,
+    Chatgpt,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfiguredProvider {
+    Ollama {
+        api_base: String,
+    },
+    #[serde(rename = "openai")]
+    OpenAi {
+        authentication: OpenAiAuthentication,
+    },
+}
+
+impl ConfiguredProvider {
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::Ollama { .. } => "ollama",
+            Self::OpenAi { .. } => "openai",
+        }
+    }
+
+    fn validate(&self) -> Result<(), ProviderSettingsError> {
+        if let Self::Ollama { api_base } = self {
+            let url = Url::parse(api_base).map_err(ProviderSettingsError::InvalidOllamaUrl)?;
+            if !matches!(url.scheme(), "http" | "https")
+                || !url.username().is_empty()
+                || url.password().is_some()
+            {
+                return Err(ProviderSettingsError::UnsafeOllamaUrl);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderSettingsFile {
+    version: u32,
+    #[serde(default)]
+    providers: Vec<ConfiguredProvider>,
+}
+
+#[derive(Debug)]
+pub struct ProviderSettingsStore {
+    path: PathBuf,
+    providers: Vec<ConfiguredProvider>,
+}
+
+impl ProviderSettingsStore {
+    pub fn default_path() -> Result<PathBuf, ProviderSettingsError> {
+        dirs::config_dir()
+            .map(|path| path.join("ariadne").join("providers.toml"))
+            .ok_or(ProviderSettingsError::ConfigDirectoryUnavailable)
+    }
+
+    pub fn load_default() -> Result<Self, ProviderSettingsError> {
+        Self::load(Self::default_path()?)
+    }
+
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, ProviderSettingsError> {
+        let path = path.as_ref().to_owned();
+        let providers = read_provider_settings(&path)?;
+        Ok(Self { path, providers })
+    }
+
+    pub fn refresh(&mut self) -> Result<(), ProviderSettingsError> {
+        let _lock = self.lock_exclusive()?;
+        self.providers = read_provider_settings(&self.path)?;
+        Ok(())
+    }
+
+    pub fn list(&self) -> Vec<ConfiguredProvider> {
+        self.providers.clone()
+    }
+
+    pub fn get(&self, id: &str) -> Option<&ConfiguredProvider> {
+        self.providers.iter().find(|provider| provider.id() == id)
+    }
+
+    pub fn add(&mut self, provider: ConfiguredProvider) -> Result<(), ProviderSettingsError> {
+        provider.validate()?;
+        let _lock = self.lock_exclusive()?;
+        let mut providers = read_provider_settings(&self.path)?;
+        let id = provider.id();
+        if providers.iter().any(|candidate| candidate.id() == id) {
+            return Err(ProviderSettingsError::Duplicate(id.to_owned()));
+        }
+        providers.push(provider);
+        self.save(&providers)?;
+        self.providers = providers;
+        Ok(())
+    }
+
+    pub fn update(&mut self, provider: ConfiguredProvider) -> Result<(), ProviderSettingsError> {
+        provider.validate()?;
+        let _lock = self.lock_exclusive()?;
+        let mut providers = read_provider_settings(&self.path)?;
+        let id = provider.id();
+        let existing = providers
+            .iter_mut()
+            .find(|candidate| candidate.id() == id)
+            .ok_or_else(|| ProviderSettingsError::NotConfigured(id.to_owned()))?;
+        *existing = provider;
+        self.save(&providers)?;
+        self.providers = providers;
+        Ok(())
+    }
+
+    pub fn delete(&mut self, id: &str) -> Result<(), ProviderSettingsError> {
+        let _lock = self.lock_exclusive()?;
+        let mut providers = read_provider_settings(&self.path)?;
+        let index = providers
+            .iter()
+            .position(|provider| provider.id() == id)
+            .ok_or_else(|| ProviderSettingsError::NotConfigured(id.to_owned()))?;
+        providers.remove(index);
+        self.save(&providers)?;
+        self.providers = providers;
+        Ok(())
+    }
+
+    fn lock_exclusive(&self) -> Result<fs::File, ProviderSettingsError> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| ProviderSettingsError::Write {
+                path: self.path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "provider settings path has no parent directory",
+                ),
+            })?;
+        fs::create_dir_all(parent).map_err(|source| ProviderSettingsError::Write {
+            path: self.path.clone(),
+            source,
+        })?;
+        let lock_path = self.path.with_extension("toml.lock");
+        let mut options = fs::OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&lock_path)
+            .map_err(|source| ProviderSettingsError::Write {
+                path: lock_path.clone(),
+                source,
+            })?;
+        file.lock_exclusive()
+            .map_err(|source| ProviderSettingsError::Write {
+                path: lock_path,
+                source,
+            })?;
+        Ok(file)
+    }
+
+    fn save(&self, providers: &[ConfiguredProvider]) -> Result<(), ProviderSettingsError> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| ProviderSettingsError::Write {
+                path: self.path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "provider settings path has no parent directory",
+                ),
+            })?;
+        fs::create_dir_all(parent).map_err(|source| ProviderSettingsError::Write {
+            path: self.path.clone(),
+            source,
+        })?;
+        let encoded = toml::to_string_pretty(&ProviderSettingsFile {
+            version: PROVIDER_SETTINGS_VERSION,
+            providers: providers.to_vec(),
+        })?;
+        let temporary =
+            write_private_temporary_file(&self.path, encoded.as_bytes()).map_err(|source| {
+                ProviderSettingsError::Write {
+                    path: self.path.clone(),
+                    source,
+                }
+            })?;
+        let _temporary_cleanup = TemporaryFileCleanup(temporary.clone());
+        replace_file(&temporary, &self.path).map_err(|source| ProviderSettingsError::Write {
+            path: self.path.clone(),
+            source,
+        })
+    }
+}
+
+fn read_provider_settings(path: &Path) -> Result<Vec<ConfiguredProvider>, ProviderSettingsError> {
+    let providers = match path.try_exists() {
+        Ok(false) => Vec::new(),
+        Ok(true) => {
+            let source =
+                fs::read_to_string(path).map_err(|source| ProviderSettingsError::Read {
+                    path: path.to_owned(),
+                    source,
+                })?;
+            let file: ProviderSettingsFile = toml::from_str(&source)?;
+            if file.version != PROVIDER_SETTINGS_VERSION {
+                return Err(ProviderSettingsError::UnsupportedVersion(file.version));
+            }
+            file.providers
+        }
+        Err(source) => {
+            return Err(ProviderSettingsError::Inspect {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    let mut seen = BTreeSet::new();
+    for provider in &providers {
+        provider.validate()?;
+        if !seen.insert(provider.id()) {
+            return Err(ProviderSettingsError::Duplicate(provider.id().to_owned()));
+        }
+    }
+    Ok(providers)
+}
+
+struct TemporaryFileCleanup(PathBuf);
+
+impl Drop for TemporaryFileCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn write_private_temporary_file(destination: &Path, contents: &[u8]) -> std::io::Result<PathBuf> {
+    let parent = destination.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "provider settings path has no parent directory",
+        )
+    })?;
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("providers.toml");
+    for _ in 0..32 {
+        let sequence = TEMPORARY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            sequence
+        ));
+        match write_private_file(&temporary, contents) {
+            Ok(()) => return Ok(temporary),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create a unique provider settings temporary file",
+    ))
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
+}
+
+pub fn secure_private_directory(path: impl Into<PathBuf>) -> std::io::Result<PathBuf> {
+    let path = path.into();
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "private directory must be an absolute path",
+        ));
+    }
+    let mut normal_components = 0;
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "private directory must not contain parent-directory components",
+                ));
+            }
+            Component::Normal(_) => normal_components += 1,
+            _ => {}
+        }
+    }
+    if normal_components == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a filesystem root cannot be used as a private directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        secure_private_directory_unix(path)
+    }
+    #[cfg(not(unix))]
+    {
+        secure_private_directory_portable(path)
+    }
+}
+
+#[cfg(unix)]
+fn secure_private_directory_unix(path: PathBuf) -> std::io::Result<PathBuf> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let root = CString::new("/").expect("the root path has no NUL bytes");
+    // SAFETY: root is a valid NUL-terminated path and the returned descriptor is owned here.
+    let root_fd = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+    if root_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: open returned a fresh descriptor on success.
+    let mut directory = unsafe { OwnedFd::from_raw_fd(root_fd) };
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "private directory path contains a NUL byte",
+            )
+        })?;
+        // SAFETY: directory and name are valid; mkdirat does not follow the final component.
+        if unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
+        let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: status points to writable storage and the descriptor/name are valid.
+        if unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                status.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: fstatat initialized status after returning success.
+        let status = unsafe { status.assume_init() };
+        if status.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            return Err(std::io::Error::other(
+                "private directory must not be a symbolic link or contain symbolic links",
+            ));
+        }
+        if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(std::io::Error::other(
+                "private directory path must contain only directories",
+            ));
+        }
+        // SAFETY: directory and name are valid. O_NOFOLLOW rejects a symbolic-link component.
+        let child_fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+        };
+        if child_fd < 0 {
+            let error = std::io::Error::last_os_error();
+            return if matches!(error.raw_os_error(), Some(libc::ELOOP)) {
+                Err(std::io::Error::other(
+                    "private directory must not be a symbolic link or contain symbolic links",
+                ))
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: openat returned a fresh descriptor on success.
+        directory = unsafe { OwnedFd::from_raw_fd(child_fd) };
+    }
+    // SAFETY: directory is a valid descriptor opened by this function.
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(path)
+}
+
+#[cfg(not(unix))]
+fn secure_private_directory_portable(path: PathBuf) -> std::io::Result<PathBuf> {
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(std::io::Error::other(
+                "private directory must not be a symbolic link",
+            ));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(std::io::Error::other(
+                "private directory must be a directory",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(&path)?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(std::io::Error::other(
+                    "private directory must be a non-symbolic directory",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(path)
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ProviderSettingsError {
+    #[error("provider settings are not valid TOML: {0}")]
+    Parse(#[from] toml::de::Error),
+    #[error("provider settings could not be encoded: {0}")]
+    Encode(#[from] toml::ser::Error),
+    #[error("provider settings version {0} is not supported")]
+    UnsupportedVersion(u32),
+    #[error("provider `{0}` is already configured")]
+    Duplicate(String),
+    #[error("provider `{0}` is not configured")]
+    NotConfigured(String),
+    #[error("Ollama API base URL is invalid: {0}")]
+    InvalidOllamaUrl(url::ParseError),
+    #[error("Ollama API base URL must use HTTP or HTTPS and contain no credentials")]
+    UnsafeOllamaUrl,
+    #[error("failed to read provider settings at {}: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to inspect provider settings at {}: {source}", path.display())]
+    Inspect {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to write provider settings at {}: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("the platform configuration directory is unavailable")]
+    ConfigDirectoryUnavailable,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 pub enum ProviderKind {
