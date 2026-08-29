@@ -1,10 +1,24 @@
+use std::sync::Arc;
+
 use ariadne_core::{
-    CompletionDelta, CompletionRequest, Message, ModelProvider, ToolCall, ToolDefinition,
+    CacheOptimization, CacheOptimizer, CompletionDelta, CompletionRequest, Message, ModelProvider,
+    ToolCall, ToolDefinition,
 };
 use ariadne_provider_anthropic::AnthropicMessagesProvider;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+struct DisabledCacheOptimizer;
+
+impl CacheOptimizer for DisabledCacheOptimizer {
+    fn optimize(&self, _request: &CompletionRequest) -> CacheOptimization {
+        CacheOptimization {
+            use_server_cache: false,
+            scope_key: "unused".to_owned(),
+        }
+    }
+}
 
 async fn malformed_stream_error(body: &str) -> String {
     let server = MockServer::start().await;
@@ -65,6 +79,7 @@ async fn messages_api_uses_anthropic_headers_and_content_blocks() {
         .and(body_json(json!({
             "model": "claude-test",
             "max_tokens": 4096,
+            "cache_control": {"type": "ephemeral"},
             "system": "You are Ariadne.",
             "messages": [{"role":"user","content":[{"type":"text","text":"Hello"}]}]
         })))
@@ -85,6 +100,37 @@ async fn messages_api_uses_anthropic_headers_and_content_blocks() {
 }
 
 #[tokio::test]
+async fn messages_api_cache_optimizer_can_be_substituted() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(body_json(json!({
+            "model": "claude-test",
+            "max_tokens": 4096,
+            "messages": [{"role":"user","content":[{"type":"text","text":"Hello"}]}]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "type":"message","role":"assistant","content":[{"type":"text","text":"Done"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        AnthropicMessagesProvider::with_base_url(server.uri(), "claude-test", "test-key")
+            .unwrap()
+            .with_cache_optimizer(Arc::new(DisabledCacheOptimizer));
+
+    provider
+        .complete(CompletionRequest {
+            messages: vec![Message::user("Hello")],
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn messages_api_omits_empty_assistant_retry_markers() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -92,6 +138,7 @@ async fn messages_api_omits_empty_assistant_retry_markers() {
         .and(body_json(json!({
             "model": "claude-test",
             "max_tokens": 4096,
+            "cache_control": {"type": "ephemeral"},
             "messages": [
                 {"role":"user","content":[{"type":"text","text":"First"}]},
                 {"role":"user","content":[{"type":"text","text":"Retry"}]}
@@ -158,6 +205,7 @@ async fn messages_api_round_trips_ariadne_tools() {
     Mock::given(method("POST")).and(path("/v1/messages"))
         .and(body_json(json!({
             "model":"claude-test","max_tokens":4096,
+            "cache_control":{"type":"ephemeral"},
             "messages":[
                 {"role":"user","content":[{"type":"text","text":"Read it"}]},
                 {"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"read_file","input":{"path":"README.md"}}]},

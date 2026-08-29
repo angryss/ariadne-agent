@@ -1,11 +1,36 @@
+use std::sync::Arc;
+
 use ariadne_core::{
-    CompletionDelta, CompletionRequest, Message, ModelProvider, ToolCall, ToolDefinition,
+    CacheOptimization, CacheOptimizer, CompletionDelta, CompletionRequest, Message, ModelProvider,
+    ToolCall, ToolDefinition,
 };
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use ariadne_provider_openai::OpenAiCompatibleProvider;
+
+struct DisabledCacheOptimizer;
+
+impl CacheOptimizer for DisabledCacheOptimizer {
+    fn optimize(&self, _request: &CompletionRequest) -> CacheOptimization {
+        CacheOptimization {
+            use_server_cache: false,
+            scope_key: "unused".to_owned(),
+        }
+    }
+}
+
+struct ArbitraryScopeCacheOptimizer;
+
+impl CacheOptimizer for ArbitraryScopeCacheOptimizer {
+    fn optimize(&self, _request: &CompletionRequest) -> CacheOptimization {
+        CacheOptimization {
+            use_server_cache: true,
+            scope_key: "x".repeat(200),
+        }
+    }
+}
 
 #[test]
 fn remote_http_endpoint_rejects_api_key() {
@@ -61,7 +86,7 @@ fn loopback_http_endpoints_accept_api_keys() {
 }
 
 #[tokio::test]
-async fn complete_calls_the_openai_compatible_chat_endpoint() {
+async fn ollama_requests_use_the_cache_friendly_openai_compatible_shape() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -82,7 +107,7 @@ async fn complete_calls_the_openai_compatible_chat_endpoint() {
         .mount(&server)
         .await;
 
-    let provider = OpenAiCompatibleProvider::new(
+    let provider = OpenAiCompatibleProvider::new_ollama(
         format!("{}/v1/", server.uri()),
         "test-model",
         Some("test-key".to_owned()),
@@ -101,6 +126,122 @@ async fn complete_calls_the_openai_compatible_chat_endpoint() {
         completion.message,
         Message::assistant("Hello from the model")
     );
+}
+
+#[tokio::test]
+async fn openai_requests_include_a_stable_prompt_cache_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "Hello"}
+            }]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatibleProvider::new_openai(
+        format!("{}/v1", server.uri()),
+        "test-model",
+        Some("test-key".to_owned()),
+    )
+    .unwrap();
+
+    for messages in [
+        vec![Message::system("Stable policy"), Message::user("First")],
+        vec![
+            Message::system("Stable policy"),
+            Message::user("First"),
+            Message::assistant("Answer"),
+            Message::user("Second"),
+        ],
+    ] {
+        provider
+            .complete(CompletionRequest {
+                messages,
+                tools: Vec::new(),
+            })
+            .await
+            .unwrap();
+    }
+
+    let requests = server.received_requests().await.unwrap();
+    let bodies = requests
+        .iter()
+        .map(|request| serde_json::from_slice::<serde_json::Value>(&request.body).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(bodies[0]["prompt_cache_key"], bodies[1]["prompt_cache_key"]);
+    assert_eq!(bodies[0]["prompt_cache_key"].as_str().unwrap().len(), 64);
+}
+
+#[tokio::test]
+async fn openai_cache_optimizer_can_be_substituted() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "content": "Stable policy"},
+                {"role": "user", "content": "Hello"}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "Done"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        OpenAiCompatibleProvider::new_openai(format!("{}/v1", server.uri()), "test-model", None)
+            .unwrap()
+            .with_cache_optimizer(Arc::new(DisabledCacheOptimizer));
+
+    provider
+        .complete(CompletionRequest {
+            messages: vec![Message::system("Stable policy"), Message::user("Hello")],
+            tools: Vec::new(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn openai_normalizes_substituted_cache_scopes_for_the_server() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "Done"}
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider =
+        OpenAiCompatibleProvider::new_openai(format!("{}/v1", server.uri()), "test-model", None)
+            .unwrap()
+            .with_cache_optimizer(Arc::new(ArbitraryScopeCacheOptimizer));
+
+    provider
+        .complete(CompletionRequest {
+            messages: vec![Message::user("Hello")],
+            tools: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let cache_key = body["prompt_cache_key"].as_str().unwrap();
+    assert_eq!(cache_key.len(), 64);
+    assert_ne!(cache_key, "x".repeat(200));
 }
 
 #[tokio::test]

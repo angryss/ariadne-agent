@@ -11,6 +11,7 @@ Ariadne is an open-source, local-first AI agent built with Rust, React, and Taur
 - **VPS ready:** `ariadne serve` is stateless, handles graceful shutdown, and can serve the web build from the same binary.
 - **One core, several surfaces:** HTTP, terminal, and Tauri code remain thin adapters around `ariadne-core`.
 - **Provider portable:** use Ollama locally or set environment variables for another OpenAI-compatible API.
+- **Cache aware:** stable prompt prefixes are routed through a replaceable cache optimizer and translated to each provider's supported server-side cache controls.
 - **Profile scoped:** local, work, automation, and hosted profiles can select different providers, models, system prompts, native capabilities, active skills, and MCP servers.
 
 ## Repository layout
@@ -136,6 +137,8 @@ The desktop app also exposes **Connect OpenAI**. Choose **Use ChatGPT subscripti
 Copy `.env.example` as a reference, but load secrets through your shell, service manager, or secret store. Ariadne does not automatically read `.env` files. CLI flags and the legacy provider environment variables override only the selected default profile, in this order: explicit flag/environment override, selected profile, built-in local Ollama default.
 
 When `ARIADNE_API_KEY` is set, Ariadne requires HTTPS except for loopback development endpoints (`localhost`, `127.0.0.1`, and `::1`). Unsupported URL schemes and provider URLs containing embedded credentials are rejected. Interactive terminal responses use OpenAI-compatible SSE streaming so output appears incrementally while the composer remains editable. Provider response bodies are capped at 1 MiB.
+
+Provider requests use server-side prompt caches without storing prompt content locally. Anthropic Messages requests enable automatic five-minute ephemeral caching. Requests to the official OpenAI API include a stable SHA-256 `prompt_cache_key` derived from the system prompt, first conversation message, and ordered tool definitions; this keeps routing stable as one conversation grows while separating conversations with different initial anchors. Byte-identical conversation prefixes intentionally share a routing scope because Ariadne's stateless request model has no conversation identifier. OpenAI still determines cache eligibility and lifetime. Ollama requests retain stable system/tool/message ordering and rely on Ollama's automatic in-memory prefix cache, while avoiding OpenAI-only cache fields that Ollama's compatibility API does not support. Claude subscription requests delegate caching to the pinned Claude Code client. The `CacheOptimizer` core port can be replaced when another agent or cache technology needs a different scope or policy.
 
 ### Profile catalog
 
