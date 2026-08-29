@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -341,5 +341,122 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: 'Connected with ChatGPT Plus' }));
 
     expect(screen.getByLabelText('OpenAI API key')).toHaveValue('');
+  });
+
+  it('opens provider settings blank and adds updates and deletes Ollama', async () => {
+    const listProviders = vi.fn().mockResolvedValue([]);
+    const createProvider = vi.fn().mockResolvedValue({
+      kind: 'ollama' as const,
+      api_base: 'http://localhost:11434/v1',
+    });
+    const updateProvider = vi.fn().mockResolvedValue({
+      kind: 'ollama' as const,
+      api_base: 'http://localhost:22434/v1',
+    });
+    const deleteProvider = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders,
+          createProvider,
+          updateProvider,
+          deleteProvider,
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(await screen.findByRole('heading', { name: 'Providers' })).toBeInTheDocument();
+    expect(screen.getByText('No providers configured.')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Add provider' }));
+    await user.selectOptions(screen.getByLabelText('Provider type'), 'ollama');
+    await user.clear(screen.getByLabelText('Ollama API base URL'));
+    await user.type(screen.getByLabelText('Ollama API base URL'), 'http://localhost:11434/v1');
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+    expect(createProvider).toHaveBeenCalledWith({
+      kind: 'ollama',
+      api_base: 'http://localhost:11434/v1',
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Edit Ollama' }));
+    await user.clear(screen.getByLabelText('Ollama API base URL'));
+    await user.type(screen.getByLabelText('Ollama API base URL'), 'http://localhost:22434/v1');
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+    expect(updateProvider).toHaveBeenCalledWith({
+      kind: 'ollama',
+      api_base: 'http://localhost:22434/v1',
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Delete Ollama' }));
+    expect(deleteProvider).toHaveBeenCalledWith('ollama');
+    expect(await screen.findByText('No providers configured.')).toBeInTheDocument();
+  });
+
+  it('adds OpenAI with either an API key or ChatGPT subscription', async () => {
+    const createProvider = vi.fn().mockImplementation(async (provider) => provider);
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProvider,
+          updateProvider: vi.fn(),
+          deleteProvider: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+    await user.selectOptions(screen.getByLabelText('Provider type'), 'openai');
+    await user.selectOptions(screen.getByLabelText('OpenAI authentication'), 'api_key');
+    await user.type(screen.getByLabelText('OpenAI API key'), 'sk-secret');
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+
+    expect(createProvider).toHaveBeenCalledWith({
+      kind: 'openai',
+      authentication: 'api_key',
+      api_key: 'sk-secret',
+    });
+    expect(screen.queryByDisplayValue('sk-secret')).not.toBeInTheDocument();
+  });
+
+  it('does not let a late initial provider list overwrite a completed mutation', async () => {
+    let resolveProviders: (providers: []) => void = () => {};
+    const listProviders = vi.fn(
+      () =>
+        new Promise<[]>((resolve) => {
+          resolveProviders = resolve;
+        }),
+    );
+    const createProvider = vi.fn().mockResolvedValue({
+      kind: 'ollama' as const,
+      api_base: 'http://localhost:11434/v1',
+    });
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders,
+          createProvider,
+          updateProvider: vi.fn(),
+          deleteProvider: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('button', { name: 'Add provider' }));
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+    expect(await screen.findByRole('button', { name: 'Edit Ollama' })).toBeInTheDocument();
+
+    await act(async () => resolveProviders([]));
+
+    expect(screen.getByRole('button', { name: 'Edit Ollama' })).toBeInTheDocument();
   });
 });

@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::{io, io::BufRead, io::IsTerminal, io::Read, io::Write};
 
 use anyhow::{Context, Result, ensure};
-use ariadne_config::{ProfileCatalog, ProviderKind, ResolvedCapability, ResolvedProfile};
+use ariadne_config::{
+    ProfileCatalog, ProviderKind, ProviderSettingsStore, ResolvedCapability, ResolvedProfile,
+};
 use ariadne_core::{Agent, AgentProfiles, ModelProvider, Tool};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
 use ariadne_tools_command::{CommandConfig, CommandTool};
@@ -14,6 +16,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 mod chat_ui;
+mod provider_ui;
 
 #[derive(Parser)]
 #[command(name = "ariadne", version, about = "A local-first AI agent")]
@@ -21,6 +24,12 @@ struct Cli {
     /// TOML configuration file. Uses the platform default when omitted.
     #[arg(long, env = "ARIADNE_CONFIG", global = true)]
     config: Option<PathBuf>,
+    /// Provider settings file. Uses the platform default when omitted.
+    #[arg(long, env = "ARIADNE_PROVIDER_CONFIG", global = true)]
+    provider_config: Option<PathBuf>,
+    /// Open the interactive provider settings interface.
+    #[arg(long, global = true)]
+    configure_providers: bool,
     /// Profile to use as the process default.
     #[arg(long, env = "ARIADNE_PROFILE", global = true)]
     profile: Option<String>,
@@ -88,6 +97,14 @@ struct ProfileOverrides {
 async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
+    let provider_config = match cli.provider_config.clone() {
+        Some(path) => path,
+        None => ProviderSettingsStore::default_path()
+            .context("failed to locate Ariadne provider settings")?,
+    };
+    if cli.configure_providers {
+        return provider_ui::run(provider_config);
+    }
     let catalog = match &cli.config {
         Some(path) => ProfileCatalog::load(path)
             .with_context(|| format!("failed to load configuration from {}", path.display()))?,
@@ -119,7 +136,7 @@ async fn main() -> Result<()> {
             run_once(&profiles, &default_profile, prompt, output).await
         }
         Command::Chat => chat(&profiles, &default_profile).await,
-        Command::Serve { bind, web_dir } => serve(profiles, bind, web_dir).await,
+        Command::Serve { bind, web_dir } => serve(profiles, bind, web_dir, provider_config).await,
         Command::Profiles { .. } => unreachable!("profiles returned before provider configuration"),
     }
 }
@@ -350,7 +367,14 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
     Ok(())
 }
 
-async fn serve(profiles: AgentProfiles, bind: SocketAddr, web_dir: Option<PathBuf>) -> Result<()> {
+async fn serve(
+    profiles: AgentProfiles,
+    bind: SocketAddr,
+    web_dir: Option<PathBuf>,
+    provider_config: PathBuf,
+) -> Result<()> {
+    let provider_settings = ProviderSettingsStore::load(provider_config)
+        .context("failed to load Ariadne provider settings")?;
     let app = match web_dir {
         Some(web_dir) => {
             ensure!(
@@ -358,18 +382,27 @@ async fn serve(profiles: AgentProfiles, bind: SocketAddr, web_dir: Option<PathBu
                 "web directory does not contain index.html: {}",
                 web_dir.display()
             );
-            ariadne_server::router_with_profiles_and_web(profiles, web_dir)
+            ariadne_server::router_with_profiles_provider_settings_and_web(
+                profiles,
+                provider_settings,
+                web_dir,
+            )
         }
-        None => ariadne_server::router_with_profiles(profiles),
+        None => {
+            ariadne_server::router_with_profiles_and_provider_settings(profiles, provider_settings)
+        }
     };
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind Ariadne server to {bind}"))?;
     tracing::info!(address = %bind, "Ariadne server started");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("Ariadne server failed")
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("Ariadne server failed")
 }
 
 async fn shutdown_signal() {

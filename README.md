@@ -39,7 +39,7 @@ See [the architecture guide](docs/architecture.md) for dependency boundaries and
 - Rust 1.88 or newer
 - Node.js 22 or newer and npm
 - [Ollama](https://ollama.com/) for the default local provider, or another OpenAI-compatible endpoint
-- [OpenAI Codex CLI 0.149.1](https://developers.openai.com/codex/cli/) to use a ChatGPT subscription or an OpenAI API key from the desktop app; Ariadne rejects unreviewed Codex versions fail-closed
+- [OpenAI Codex CLI 0.149.1](https://developers.openai.com/codex/cli/) to configure OpenAI with a ChatGPT subscription or API key; the desktop account-backed chat provider rejects unreviewed Codex versions fail-closed
 - Tauri 2 platform prerequisites when building the desktop app
 
 ## Local quick start
@@ -74,6 +74,14 @@ cargo run -p ariadne-cli -- --config ariadne.example.toml --profile local chat
 cargo run -p ariadne-cli -- --config ariadne.example.toml --profile work run --prompt "Review this change"
 ```
 
+Open the terminal provider settings interface with:
+
+```bash
+cargo run -p ariadne-cli -- --configure-providers
+```
+
+The TUI starts with an empty provider list and supports adding, editing, and deleting Ollama and OpenAI settings. Use `--provider-config <path>` to select a non-default provider settings file. OpenAI can authenticate through an API key sent directly to Codex over stdin or through Codex's ChatGPT browser sign-in.
+
 ## Web application
 
 For frontend hot reload, run the API and Vite separately:
@@ -83,7 +91,7 @@ cargo run -p ariadne-cli -- serve
 npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Vite proxies API requests to port 3000. Press Enter in the composer to submit; use Shift-Enter or Alt-Enter to insert a newline. The browser streams typed thinking and content events from the server, keeps the active thinking section open, and collapses it when the user-facing answer begins. Select the Thinking summary to expand or collapse it later.
+Open <http://127.0.0.1:5173>. Vite proxies API requests to port 3000. Open **Settings**, then **Providers**, to manage Ollama and OpenAI provider settings. Press Enter in the composer to submit; use Shift-Enter or Alt-Enter to insert a newline. The browser streams typed thinking and content events from the server, keeps the active thinking section open, and collapses it when the user-facing answer begins. Select the Thinking summary to expand or collapse it later.
 
 To exercise the production topology, build the SPA and serve it from the Rust process:
 
@@ -101,7 +109,7 @@ npm install
 npm run desktop:dev
 ```
 
-The desktop frontend uses narrow Tauri commands and a typed IPC channel instead of opening the HTTP server. Its shared composer submits with Enter and inserts newlines with Shift-Enter or Alt-Enter. It provides the same streaming, collapsible thinking display as the browser, loads the same configured profile catalog as the CLI plus the reserved `openai-account` desktop profile, and shows the selected model, provider, active skills, and MCP servers.
+The desktop frontend uses narrow Tauri commands and a typed IPC channel instead of opening the HTTP server. Its shared **Settings** → **Providers** page provides the same blank-by-default provider CRUD as the browser and CLI. Its shared composer submits with Enter and inserts newlines with Shift-Enter or Alt-Enter. It provides the same streaming, collapsible thinking display as the browser, loads the same configured profile catalog as the CLI plus the reserved `openai-account` desktop profile, and shows the selected model, provider, active skills, and MCP servers.
 
 The desktop app also exposes **Connect OpenAI**. Choose **Use ChatGPT subscription** to complete Codex's supported browser sign-in, or enter an OpenAI API key for usage-based API billing. Ariadne passes API keys to Codex over stdin, never returns credentials through Tauri IPC, and keeps Codex-managed credentials in an Ariadne-specific private configuration directory rather than reusing or replacing the user's normal Codex CLI account. After connecting, select the `openai-account` profile to send prompts through that account. This account-backed profile does not receive Ariadne tools. Its ephemeral Codex thread has no execution environment; shell, image, planning, and web-search tools are disabled, any tool lifecycle item aborts the response, and the model is instructed to answer only from the supplied conversation. The provider is pinned to the reviewed `codex-cli 0.149.1` protocol/tool surface; upgrading Codex requires an Ariadne compatibility review and release.
 
@@ -110,6 +118,7 @@ The desktop app also exposes **Connect OpenAI**. Choose **Use ChatGPT subscripti
 | Variable | Default | Purpose |
 |---|---|---|
 | `ARIADNE_CONFIG` | platform config path | Explicit profile-catalog path; equivalent to `--config` |
+| `ARIADNE_PROVIDER_CONFIG` | `<config-dir>/ariadne/providers.toml` | Provider settings path; equivalent to `--provider-config` |
 | `ARIADNE_PROFILE` | catalog `default_profile` | Process default profile; equivalent to `--profile` |
 | `ARIADNE_API_BASE` | `http://127.0.0.1:11434/v1` | OpenAI-compatible API base URL |
 | `ARIADNE_MODEL` | `qwen3:8b` | Provider model identifier |
@@ -148,6 +157,8 @@ Profile-scoped skill and MCP activation is represented and exposed consistently,
 
 `GET /v1/profiles` returns the process default and safe profile metadata. It never returns API keys, API-key environment-variable names, provider base URLs, system prompts, or MCP command definitions.
 
+`GET /v1/providers`, `POST /v1/providers`, and `PUT`/`DELETE /v1/providers/{kind}` provide provider settings CRUD for the browser. The persisted TOML contains only Ollama's API base URL or OpenAI's authentication method. OpenAI API keys are piped to Codex and are never stored in this file or returned by the API.
+
 `POST /v1/respond` accepts caller-owned user/assistant history, an optional profile name, and a new prompt. Omit `profile` to use the process default:
 
 ```json
@@ -175,7 +186,7 @@ The response is:
 
 ## VPS deployment
 
-The server binds to `127.0.0.1:3000` by default. Keep that default and expose Ariadne through an authenticated TLS reverse proxy, VPN, or private network. Ariadne does **not** yet provide public-edge authentication, rate limiting, or load shedding, so configure those controls at the proxy for shared deployments. The built-in server is same-origin by default and does not enable CORS; configure that explicitly at a trusted reverse proxy if the web UI and API use different origins.
+The server binds to `127.0.0.1:3000` by default. Keep that default and expose Ariadne through an authenticated TLS reverse proxy, VPN, or private network. Ariadne does **not** yet provide public-edge authentication, rate limiting, or load shedding, so configure those controls at the proxy for shared deployments. Administrative provider endpoints additionally require the direct TCP peer to be loopback; direct non-loopback requests are rejected. A same-host authenticated TLS reverse proxy can therefore administer providers, while a remotely bound Ariadne listener cannot expose those operations directly. This requirement is especially important because provider operations modify local settings and OpenAI API keys transit the authenticated request to Codex. Never expose them over unauthenticated or plaintext transport. The built-in server is same-origin by default and does not enable CORS; configure that explicitly at a trusted reverse proxy if the web UI and API use different origins.
 
 The Compose configuration publishes only to host loopback by default and restarts the stateless service automatically. Its default provider URL is `http://host.docker.internal:11434/v1`; Docker Desktop provides that host name, while Compose maps it through Docker's `host-gateway` on Linux.
 

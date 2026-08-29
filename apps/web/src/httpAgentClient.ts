@@ -2,8 +2,10 @@ import type {
   AgentClient,
   CompletionDelta,
   CompletionDeltaHandler,
+  ConfiguredProvider,
   Profile,
   ProfileCatalog,
+  ProviderInput,
   RespondRequest,
   RespondResponse,
 } from '@ariadne/ui';
@@ -13,6 +15,7 @@ type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respons
 export class HttpAgentClient implements AgentClient {
   private readonly endpoint: string;
   private readonly profilesEndpoint: string;
+  private readonly providersEndpoint: string;
   private readonly fetcher: Fetcher;
 
   constructor(
@@ -22,7 +25,60 @@ export class HttpAgentClient implements AgentClient {
   ) {
     this.endpoint = endpoint;
     this.profilesEndpoint = profilesEndpoint;
+    this.providersEndpoint = endpoint.replace(/\/respond$/, '/providers');
     this.fetcher = fetcher;
+  }
+
+  async listProviders(): Promise<ConfiguredProvider[]> {
+    const body = await this.providerRequest(this.providersEndpoint, 'GET');
+    if (!Array.isArray(body) || !body.every(isConfiguredProvider)) {
+      throw new Error('Ariadne API returned invalid provider data');
+    }
+    return body;
+  }
+
+  async createProvider(provider: ProviderInput): Promise<ConfiguredProvider> {
+    return this.savedProvider(this.providersEndpoint, 'POST', provider);
+  }
+
+  async updateProvider(provider: ProviderInput): Promise<ConfiguredProvider> {
+    return this.savedProvider(`${this.providersEndpoint}/${provider.kind}`, 'PUT', provider);
+  }
+
+  async deleteProvider(kind: ConfiguredProvider['kind']): Promise<void> {
+    const response = await this.fetcher(`${this.providersEndpoint}/${kind}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error(`Ariadne API returned ${response.status}`);
+  }
+
+  private async savedProvider(
+    endpoint: string,
+    method: 'POST' | 'PUT',
+    provider: ProviderInput,
+  ): Promise<ConfiguredProvider> {
+    const body = await this.providerRequest(endpoint, method, provider);
+    if (!isConfiguredProvider(body)) {
+      throw new Error('Ariadne API returned invalid provider data');
+    }
+    return body;
+  }
+
+  private async providerRequest(endpoint: string, method: string, body?: ProviderInput): Promise<unknown> {
+    const response = await this.fetcher(endpoint, {
+      method,
+      ...(body
+        ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+        : { headers: { accept: 'application/json' } }),
+    });
+    let decoded: unknown;
+    try {
+      decoded = await response.json();
+    } catch {
+      throw new Error(`Ariadne API returned ${response.status}`);
+    }
+    if (!response.ok) {
+      throw new Error(readApiError(decoded) ?? `Ariadne API returned ${response.status}`);
+    }
+    return decoded;
   }
 
   async listProfiles(): Promise<ProfileCatalog> {
@@ -257,6 +313,18 @@ function isProfile(value: unknown): value is Profile {
       'capabilities' in value &&
       Array.isArray(value.capabilities) &&
       value.capabilities.every((capability) => typeof capability === 'string'),
+  );
+}
+
+function isConfiguredProvider(value: unknown): value is ConfiguredProvider {
+  if (!value || typeof value !== 'object' || !('kind' in value)) return false;
+  if (value.kind === 'ollama') {
+    return 'api_base' in value && typeof value.api_base === 'string';
+  }
+  return (
+    value.kind === 'openai' &&
+    'authentication' in value &&
+    (value.authentication === 'api_key' || value.authentication === 'chatgpt')
   );
 }
 
