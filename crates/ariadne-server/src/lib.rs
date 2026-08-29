@@ -96,6 +96,10 @@ fn router_with_runtime(
 ) -> Router {
     let provider_routes = Router::new()
         .route(
+            "/v1/providers/openai/existing-account",
+            get(existing_openai_account).fallback(api_method_not_allowed),
+        )
+        .route(
             "/v1/providers",
             get(list_provider_settings)
                 .post(create_provider)
@@ -208,6 +212,22 @@ async fn list_profiles(State(state): State<AppState>) -> Json<ProfilesResponse> 
     })
 }
 
+#[derive(Serialize)]
+struct OpenAiAccountResponse {
+    connected: bool,
+    method: Option<&'static str>,
+}
+
+async fn existing_openai_account(
+    State(state): State<AppState>,
+) -> Result<Json<OpenAiAccountResponse>, ApiError> {
+    let connected = existing_chatgpt_credentials_available(&state).await?;
+    Ok(Json(OpenAiAccountResponse {
+        connected,
+        method: connected.then_some("chatgpt"),
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ProviderInput {
@@ -219,6 +239,8 @@ enum ProviderInput {
         authentication: OpenAiAuthentication,
         #[serde(default)]
         api_key: Option<String>,
+        #[serde(default)]
+        reuse_existing: bool,
     },
 }
 
@@ -311,9 +333,13 @@ async fn configured_provider(
         ProviderInput::OpenAi {
             authentication,
             api_key,
+            reuse_existing,
         } => {
-            authenticate_openai(state, authentication, api_key).await?;
-            Ok(ConfiguredProvider::OpenAi { authentication })
+            authenticate_openai(state, authentication, api_key, reuse_existing).await?;
+            Ok(ConfiguredProvider::OpenAi {
+                authentication,
+                reuse_existing,
+            })
         }
     }
 }
@@ -322,7 +348,21 @@ async fn authenticate_openai(
     state: &AppState,
     authentication: OpenAiAuthentication,
     api_key: Option<String>,
+    reuse_existing: bool,
 ) -> Result<(), ApiError> {
+    if reuse_existing {
+        if authentication != OpenAiAuthentication::Chatgpt {
+            return Err(provider_settings_error(
+                "only ChatGPT subscriptions can reuse existing credentials",
+            ));
+        }
+        if !existing_chatgpt_credentials_available(state).await? {
+            return Err(provider_settings_error(
+                "existing ChatGPT credentials are unavailable",
+            ));
+        }
+        return Ok(());
+    }
     secure_private_directory(state.codex_home.clone())
         .map_err(|_| provider_settings_error("failed to prepare secure OpenAI credentials"))?;
     let mut command = Command::new(&state.codex_program);
@@ -376,6 +416,25 @@ async fn authenticate_openai(
         return Err(provider_settings_error("OpenAI sign-in did not complete"));
     }
     Ok(())
+}
+
+async fn existing_chatgpt_credentials_available(state: &AppState) -> Result<bool, ApiError> {
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new(&state.codex_program)
+            .args(["login", "status"])
+            .env_remove("CODEX_HOME")
+            .env_remove("ARIADNE_CODEX_HOME")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| provider_settings_error("OpenAI credential check timed out"))?
+    .map_err(|_| provider_settings_error("failed to check existing ChatGPT credentials"))?;
+    Ok(output.status.success()
+        && String::from_utf8_lossy(&output.stdout).contains("Logged in using ChatGPT"))
 }
 
 fn provider_settings_error(message: impl Into<String>) -> ApiError {

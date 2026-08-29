@@ -103,7 +103,7 @@ impl ProviderUi {
                 self.choice = ProviderChoice::Ollama;
                 self.input = api_base.clone();
             }
-            ConfiguredProvider::OpenAi { authentication } => {
+            ConfiguredProvider::OpenAi { authentication, .. } => {
                 self.choice = ProviderChoice::OpenAi;
                 self.authentication = *authentication;
                 self.input.clear();
@@ -249,6 +249,7 @@ fn save_provider(ui: &mut ProviderUi, store: &mut ProviderSettingsStore) {
             }
             ConfiguredProvider::OpenAi {
                 authentication: ui.authentication,
+                reuse_existing: false,
             }
         }
     };
@@ -393,9 +394,11 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
                 ConfiguredProvider::Ollama { api_base } => api_base.as_str(),
                 ConfiguredProvider::OpenAi {
                     authentication: OpenAiAuthentication::ApiKey,
+                    ..
                 } => "API key",
                 ConfiguredProvider::OpenAi {
                     authentication: OpenAiAuthentication::Chatgpt,
+                    ..
                 } => "ChatGPT subscription",
             };
             ListItem::new(format!("{}  {detail}", provider_title(provider)))

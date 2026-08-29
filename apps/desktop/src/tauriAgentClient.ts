@@ -47,6 +47,14 @@ export class TauriAgentClient implements AgentClient {
     return account;
   }
 
+  async getExistingOpenAiAccount(): Promise<OpenAiAccount> {
+    const account = await this.invoke('existing_openai_account', {});
+    if (!isOpenAiAccount(account)) {
+      throw new Error('Ariadne desktop returned invalid existing OpenAI account data');
+    }
+    return account;
+  }
+
   async connectOpenAi(request: ConnectOpenAiRequest): Promise<OpenAiAccount> {
     const account = await this.invoke('connect_openai', { request });
     if (!isOpenAiAccount(account)) {

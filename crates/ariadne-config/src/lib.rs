@@ -37,6 +37,8 @@ pub enum ConfiguredProvider {
     #[serde(rename = "openai")]
     OpenAi {
         authentication: OpenAiAuthentication,
+        #[serde(default)]
+        reuse_existing: bool,
     },
 }
 

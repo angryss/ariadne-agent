@@ -46,17 +46,18 @@ export type ConnectOpenAiRequest =
 
 export type ConfiguredProvider =
   | { kind: 'ollama'; api_base: string }
-  | { kind: 'openai'; authentication: 'api_key' | 'chatgpt' };
+  | { kind: 'openai'; authentication: 'api_key' | 'chatgpt'; reuse_existing?: boolean };
 
 export type ProviderInput =
   | { kind: 'ollama'; api_base: string }
-  | { kind: 'openai'; authentication: 'chatgpt' }
+  | { kind: 'openai'; authentication: 'chatgpt'; reuse_existing?: boolean }
   | { kind: 'openai'; authentication: 'api_key'; api_key: string };
 
 export interface AgentClient {
   respond(request: RespondRequest, onDelta?: CompletionDeltaHandler): Promise<RespondResponse>;
   listProfiles?(): Promise<ProfileCatalog>;
   getOpenAiAccount?(): Promise<OpenAiAccount>;
+  getExistingOpenAiAccount?(): Promise<OpenAiAccount>;
   connectOpenAi?(request: ConnectOpenAiRequest): Promise<OpenAiAccount>;
   listProviders?(): Promise<ConfiguredProvider[]>;
   createProvider?(provider: ProviderInput): Promise<ConfiguredProvider>;

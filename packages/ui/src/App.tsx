@@ -77,6 +77,10 @@ export function App({ client }: AppProps) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [selectedProfile, setSelectedProfile] = useState<string | null>(null);
   const [openAiAccount, setOpenAiAccount] = useState<OpenAiAccount | null>(null);
+  const [existingOpenAiAccount, setExistingOpenAiAccount] = useState<OpenAiAccount | null>(null);
+  const [discoveringExistingOpenAiAccount, setDiscoveringExistingOpenAiAccount] = useState(
+    Boolean(client.getExistingOpenAiAccount),
+  );
   const [showOpenAi, setShowOpenAi] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [connectingOpenAi, setConnectingOpenAi] = useState(false);
@@ -86,6 +90,7 @@ export function App({ client }: AppProps) {
   const [providerKind, setProviderKind] = useState<ConfiguredProvider['kind']>('ollama');
   const [ollamaApiBase, setOllamaApiBase] = useState('http://127.0.0.1:11434/v1');
   const [openAiAuthentication, setOpenAiAuthentication] = useState<'api_key' | 'chatgpt'>('chatgpt');
+  const [reuseExistingChatgpt, setReuseExistingChatgpt] = useState<boolean | null>(null);
   const [providerApiKey, setProviderApiKey] = useState('');
   const [savingProvider, setSavingProvider] = useState(false);
   const openAiAccountRequest = useRef(0);
@@ -137,6 +142,29 @@ export function App({ client }: AppProps) {
             setOpenAiAccount({ connected: false, method: null });
           }
         });
+    }
+    return () => {
+      active = false;
+    };
+  }, [client]);
+
+  useEffect(() => {
+    let active = true;
+    if (client.getExistingOpenAiAccount) {
+      setDiscoveringExistingOpenAiAccount(true);
+      void client
+        .getExistingOpenAiAccount()
+        .then((account) => {
+          if (active) setExistingOpenAiAccount(account);
+        })
+        .catch(() => {
+          if (active) setExistingOpenAiAccount({ connected: false, method: null });
+        })
+        .finally(() => {
+          if (active) setDiscoveringExistingOpenAiAccount(false);
+        });
+    } else {
+      setDiscoveringExistingOpenAiAccount(false);
     }
     return () => {
       active = false;
@@ -202,6 +230,7 @@ export function App({ client }: AppProps) {
     setProviderKind(availableKind);
     setOllamaApiBase('http://127.0.0.1:11434/v1');
     setOpenAiAuthentication('chatgpt');
+    setReuseExistingChatgpt(null);
     setProviderApiKey('');
   }
 
@@ -210,6 +239,7 @@ export function App({ client }: AppProps) {
     setProviderKind(provider.kind);
     if (provider.kind === 'ollama') setOllamaApiBase(provider.api_base);
     else setOpenAiAuthentication(provider.authentication);
+    setReuseExistingChatgpt(null);
     setProviderApiKey('');
   }
 
@@ -221,7 +251,11 @@ export function App({ client }: AppProps) {
       providerKind === 'ollama'
         ? { kind: 'ollama', api_base: ollamaApiBase.trim() }
         : openAiAuthentication === 'chatgpt'
-          ? { kind: 'openai', authentication: 'chatgpt' }
+          ? {
+              kind: 'openai',
+              authentication: 'chatgpt',
+              ...(reuseExistingChatgpt === true ? { reuse_existing: true } : {}),
+            }
           : { kind: 'openai', authentication: 'api_key', api_key: providerApiKey };
     const save = existing ? client.updateProvider : client.createProvider;
     if (!save) return;
@@ -499,9 +533,10 @@ export function App({ client }: AppProps) {
                   <label htmlFor="openai-authentication">OpenAI authentication</label>
                   <select
                     id="openai-authentication"
-                    onChange={(event) =>
-                      setOpenAiAuthentication(event.target.value as 'api_key' | 'chatgpt')
-                    }
+                    onChange={(event) => {
+                      setOpenAiAuthentication(event.target.value as 'api_key' | 'chatgpt');
+                      setReuseExistingChatgpt(null);
+                    }}
                     value={openAiAuthentication}
                   >
                     <option value="chatgpt">ChatGPT subscription</option>
@@ -519,16 +554,59 @@ export function App({ client }: AppProps) {
                         value={providerApiKey}
                       />
                     </>
+                  ) : existingOpenAiAccount?.connected && existingOpenAiAccount.method === 'chatgpt' ? (
+                    <div className="credential-choice">
+                      <strong>Existing ChatGPT credentials found</strong>
+                      <p>
+                        {existingOpenAiAccount.plan
+                          ? `ChatGPT ${formatPlan(existingOpenAiAccount.plan)}`
+                          : 'A ChatGPT subscription'} is already connected. Use it or sign in with a
+                        different account for Ariadne.
+                      </p>
+                      <div className="provider-actions">
+                        <button
+                          aria-pressed={reuseExistingChatgpt === true}
+                          onClick={() => setReuseExistingChatgpt(true)}
+                          type="button"
+                        >
+                          Use existing credentials
+                        </button>
+                        <button
+                          aria-pressed={reuseExistingChatgpt === false}
+                          onClick={() => setReuseExistingChatgpt(false)}
+                          type="button"
+                        >
+                          Register new credentials
+                        </button>
+                      </div>
+                      {reuseExistingChatgpt === false ? (
+                        <p>A browser window will open so you can sign in to ChatGPT.</p>
+                      ) : null}
+                    </div>
                   ) : (
                     <p>A browser window will open so you can sign in to ChatGPT.</p>
                   )}
                 </>
               )}
               <div className="provider-actions">
-                <button disabled={savingProvider} type="submit">Save provider</button>
+                <button
+                  disabled={
+                    savingProvider ||
+                    (providerKind === 'openai' &&
+                      openAiAuthentication === 'chatgpt' &&
+                      (discoveringExistingOpenAiAccount ||
+                        (existingOpenAiAccount?.connected === true &&
+                          existingOpenAiAccount.method === 'chatgpt' &&
+                          reuseExistingChatgpt === null)))
+                  }
+                  type="submit"
+                >
+                  Save provider
+                </button>
                 <button
                   onClick={() => {
                     setEditingProvider(null);
+                    setReuseExistingChatgpt(null);
                     setProviderApiKey('');
                   }}
                   type="button"

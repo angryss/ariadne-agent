@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ariadne_config::{
     ConfiguredProvider, OpenAiAuthentication, ProfileCatalog, ProviderKind, ProviderSettingsStore,
@@ -51,6 +52,8 @@ enum ProviderInput {
         authentication: OpenAiAuthentication,
         #[serde(default)]
         api_key: Option<String>,
+        #[serde(default)]
+        reuse_existing: bool,
     },
 }
 
@@ -69,6 +72,23 @@ struct OpenAiAuthenticationLock(Mutex<()>);
 impl OpenAiAuthenticationLock {
     async fn acquire(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.0.lock().await
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct OpenAiCredentialSelection(Arc<AtomicBool>);
+
+impl OpenAiCredentialSelection {
+    fn new(reuse_existing: bool) -> Self {
+        Self(Arc::new(AtomicBool::new(reuse_existing)))
+    }
+
+    pub(crate) fn reuses_existing(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    fn set_reuse_existing(&self, reuse_existing: bool) {
+        self.0.store(reuse_existing, Ordering::Release);
     }
 }
 
@@ -168,7 +188,11 @@ async fn connect_openai_with_program_and_optional_home(
 pub async fn openai_account_with_program(
     program: impl AsRef<OsStr>,
 ) -> Result<OpenAiAccountResponse, String> {
-    openai_account_with_command(Command::new(program)).await
+    let mut command = Command::new(program);
+    command
+        .env_remove("CODEX_HOME")
+        .env_remove("ARIADNE_CODEX_HOME");
+    openai_account_with_command(command).await
 }
 
 pub async fn openai_account_with_program_and_home(
@@ -488,6 +512,11 @@ async fn openai_account() -> Result<OpenAiAccountResponse, String> {
 }
 
 #[tauri::command]
+async fn existing_openai_account() -> Result<OpenAiAccountResponse, String> {
+    openai_account_with_program(codex_program()).await
+}
+
+#[tauri::command]
 async fn connect_openai(
     authentication_lock: State<'_, OpenAiAuthenticationLock>,
     request: OpenAiConnectRequest,
@@ -513,7 +542,20 @@ async fn configured_provider_from_input(
         ProviderInput::OpenAi {
             authentication,
             api_key,
+            reuse_existing,
         } => {
+            if reuse_existing {
+                if authentication != OpenAiAuthentication::Chatgpt {
+                    return Err(
+                        "only ChatGPT subscriptions can reuse existing credentials".to_owned()
+                    );
+                }
+                verify_existing_openai_credentials_with_program(codex_program()).await?;
+                return Ok(ConfiguredProvider::OpenAi {
+                    authentication,
+                    reuse_existing: true,
+                });
+            }
             let request = match authentication {
                 OpenAiAuthentication::Chatgpt => OpenAiConnectRequest::Chatgpt,
                 OpenAiAuthentication::ApiKey => OpenAiConnectRequest::ApiKey {
@@ -526,14 +568,43 @@ async fn configured_provider_from_input(
                 request,
             )
             .await?;
-            Ok(ConfiguredProvider::OpenAi { authentication })
+            Ok(ConfiguredProvider::OpenAi {
+                authentication,
+                reuse_existing: false,
+            })
         }
     }
+}
+
+async fn verify_existing_openai_credentials_with_program(
+    program: impl AsRef<OsStr>,
+) -> Result<(), String> {
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new(program)
+            .args(["login", "status"])
+            .env_remove("CODEX_HOME")
+            .env_remove("ARIADNE_CODEX_HOME")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "OpenAI credential check timed out".to_owned())?
+    .map_err(|error| format!("failed to check existing ChatGPT credentials: {error}"))?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout).contains("Logged in using ChatGPT")
+    {
+        return Err("existing ChatGPT credentials are unavailable".to_owned());
+    }
+    Ok(())
 }
 
 #[tauri::command]
 async fn create_provider(
     authentication_lock: State<'_, OpenAiAuthenticationLock>,
+    credential_selection: State<'_, OpenAiCredentialSelection>,
     provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     provider: ProviderInput,
 ) -> Result<ConfiguredProvider, String> {
@@ -550,12 +621,14 @@ async fn create_provider(
     store
         .add(provider.clone())
         .map_err(|error| error.to_string())?;
+    update_openai_credential_selection(&credential_selection, &provider);
     Ok(provider)
 }
 
 #[tauri::command]
 async fn update_provider(
     authentication_lock: State<'_, OpenAiAuthenticationLock>,
+    credential_selection: State<'_, OpenAiCredentialSelection>,
     provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     provider: ProviderInput,
 ) -> Result<ConfiguredProvider, String> {
@@ -569,11 +642,13 @@ async fn update_provider(
     store
         .update(provider.clone())
         .map_err(|error| error.to_string())?;
+    update_openai_credential_selection(&credential_selection, &provider);
     Ok(provider)
 }
 
 #[tauri::command]
 async fn delete_provider(
+    credential_selection: State<'_, OpenAiCredentialSelection>,
     provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     kind: String,
 ) -> Result<(), String> {
@@ -581,17 +656,25 @@ async fn delete_provider(
         .lock()
         .await
         .delete(&kind)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if kind == "openai" {
+        credential_selection.set_reuse_existing(false);
+    }
+    Ok(())
 }
 
 pub fn run() {
-    let configured = configured_profiles()
-        .unwrap_or_else(|error| panic!("failed to configure Ariadne model provider: {error}"));
     let provider_settings = configured_provider_settings()
         .unwrap_or_else(|error| panic!("failed to load Ariadne provider settings: {error}"));
+    let credential_selection = OpenAiCredentialSelection::new(
+        openai_account_reuses_existing_credentials(&provider_settings),
+    );
+    let configured = configured_profiles(credential_selection.clone())
+        .unwrap_or_else(|error| panic!("failed to configure Ariadne model provider: {error}"));
 
     tauri::Builder::default()
         .manage(configured)
+        .manage(credential_selection)
         .manage(Mutex::new(provider_settings))
         .manage(OpenAiAuthenticationLock::default())
         .invoke_handler(tauri::generate_handler![
@@ -599,6 +682,7 @@ pub fn run() {
             respond_stream,
             profiles,
             openai_account,
+            existing_openai_account,
             connect_openai,
             list_providers,
             create_provider,
@@ -617,7 +701,9 @@ fn configured_provider_settings() -> Result<ProviderSettingsStore, String> {
     .map_err(|error| error.to_string())
 }
 
-fn configured_profiles() -> Result<AgentProfiles, String> {
+fn configured_profiles(
+    credential_selection: OpenAiCredentialSelection,
+) -> Result<AgentProfiles, String> {
     let catalog = match optional_env("ARIADNE_CONFIG")? {
         Some(path) => ProfileCatalog::load(path),
         None => ProfileCatalog::load_default(),
@@ -666,17 +752,46 @@ fn configured_profiles() -> Result<AgentProfiles, String> {
         mcp_servers: Vec::new(),
         capabilities: Vec::new(),
     };
-    let openai_agent = Agent::new(
-        Arc::new(CodexAppServerProvider::with_home(
+    let openai_provider: Arc<dyn ModelProvider> =
+        Arc::new(CodexAppServerProvider::with_selectable_home(
             codex_program(),
             configured_codex_home()?,
+            credential_selection,
             None,
-        )),
+        ));
+    let openai_agent = Agent::new(
+        openai_provider,
         "You are Ariadne, a careful and capable AI software agent.",
     );
     configured.push((openai_profile, openai_agent));
 
     AgentProfiles::new(default_profile, configured).map_err(|error| error.to_string())
+}
+
+fn openai_account_reuses_existing_credentials(provider_settings: &ProviderSettingsStore) -> bool {
+    provider_settings
+        .get("openai")
+        .is_some_and(configured_provider_reuses_existing_credentials)
+}
+
+fn configured_provider_reuses_existing_credentials(provider: &ConfiguredProvider) -> bool {
+    matches!(
+        provider,
+        ConfiguredProvider::OpenAi {
+            authentication: OpenAiAuthentication::Chatgpt,
+            reuse_existing: true,
+        }
+    )
+}
+
+fn update_openai_credential_selection(
+    credential_selection: &OpenAiCredentialSelection,
+    provider: &ConfiguredProvider,
+) {
+    if matches!(provider, ConfiguredProvider::OpenAi { .. }) {
+        credential_selection
+            .set_reuse_existing(configured_provider_reuses_existing_credentials(provider));
+    }
 }
 
 fn optional_env(name: &str) -> Result<Option<String>, String> {
@@ -798,8 +913,12 @@ mod tests {
     use tokio::io::BufReader;
     use tokio::time::{Duration, Instant};
 
+    use ariadne_config::{ConfiguredProvider, OpenAiAuthentication, ProviderSettingsStore};
+
     use super::{
-        MAX_CODEX_MESSAGE_BYTES, OpenAiAuthenticationLock, decode_optional_env, read_codex_message,
+        MAX_CODEX_MESSAGE_BYTES, OpenAiAuthenticationLock, OpenAiCredentialSelection,
+        decode_optional_env, openai_account_reuses_existing_credentials, read_codex_message,
+        update_openai_credential_selection, verify_existing_openai_credentials_with_program,
         write_codex_message,
     };
 
@@ -818,6 +937,76 @@ mod tests {
         let _released = tokio::time::timeout(Duration::from_millis(50), lock.acquire())
             .await
             .expect("the credential lock should be released");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_chatgpt_reuse_rejects_an_api_key_login() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("codex");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf '%s\\n' 'Logged in using an API key'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = verify_existing_openai_credentials_with_program(&program)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "existing ChatGPT credentials are unavailable");
+
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf '%s\\n' 'Logged in using ChatGPT'\n",
+        )
+        .unwrap();
+        verify_existing_openai_credentials_with_program(&program)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn configured_openai_reuse_selects_the_normal_codex_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings =
+            ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+        settings
+            .add(ConfiguredProvider::OpenAi {
+                authentication: OpenAiAuthentication::Chatgpt,
+                reuse_existing: true,
+            })
+            .unwrap();
+
+        assert!(openai_account_reuses_existing_credentials(&settings));
+    }
+
+    #[test]
+    fn openai_credential_selection_updates_without_restarting() {
+        let selection = OpenAiCredentialSelection::new(false);
+
+        assert!(!selection.reuses_existing());
+        selection.set_reuse_existing(true);
+        assert!(selection.reuses_existing());
+        selection.set_reuse_existing(false);
+        assert!(!selection.reuses_existing());
+    }
+
+    #[test]
+    fn non_openai_provider_changes_preserve_openai_credential_selection() {
+        let selection = OpenAiCredentialSelection::new(true);
+
+        update_openai_credential_selection(
+            &selection,
+            &ConfiguredProvider::Ollama {
+                api_base: "http://127.0.0.1:11434/v1".to_owned(),
+            },
+        );
+
+        assert!(selection.reuses_existing());
     }
 
     #[test]

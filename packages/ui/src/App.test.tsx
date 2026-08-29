@@ -425,6 +425,106 @@ describe('App', () => {
     expect(screen.queryByDisplayValue('sk-secret')).not.toBeInTheDocument();
   });
 
+  it('asks before reusing existing ChatGPT credentials for a provider', async () => {
+    const createProvider = vi.fn().mockResolvedValue({
+      kind: 'openai' as const,
+      authentication: 'chatgpt' as const,
+    });
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          getExistingOpenAiAccount: vi.fn().mockResolvedValue({
+            connected: true,
+            method: 'chatgpt' as const,
+            plan: 'plus',
+          }),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProvider,
+          updateProvider: vi.fn(),
+          deleteProvider: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+    await user.selectOptions(screen.getByLabelText('Provider type'), 'openai');
+
+    expect(await screen.findByText('Existing ChatGPT credentials found')).toBeInTheDocument();
+    expect(screen.getByText(/ChatGPT Plus is already connected/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Use existing credentials' }));
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+
+    expect(createProvider).toHaveBeenCalledWith({
+      kind: 'openai',
+      authentication: 'chatgpt',
+      reuse_existing: true,
+    });
+  });
+
+  it('waits for existing ChatGPT credential discovery before allowing provider creation', async () => {
+    let resolveExistingAccount!: (account: { connected: false; method: null }) => void;
+    const existingAccount = new Promise<{ connected: false; method: null }>((resolve) => {
+      resolveExistingAccount = resolve;
+    });
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          getExistingOpenAiAccount: vi.fn().mockReturnValue(existingAccount),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProvider: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+    await user.selectOptions(screen.getByLabelText('Provider type'), 'openai');
+
+    expect(screen.getByRole('button', { name: 'Save provider' })).toBeDisabled();
+    await act(async () => resolveExistingAccount({ connected: false, method: null }));
+    expect(screen.getByRole('button', { name: 'Save provider' })).toBeEnabled();
+  });
+
+  it('lets the user choose a new ChatGPT sign-in instead of existing credentials', async () => {
+    const createProvider = vi.fn().mockResolvedValue({
+      kind: 'openai' as const,
+      authentication: 'chatgpt' as const,
+    });
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          getExistingOpenAiAccount: vi.fn().mockResolvedValue({
+            connected: true,
+            method: 'chatgpt' as const,
+          }),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProvider,
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+    await user.selectOptions(screen.getByLabelText('Provider type'), 'openai');
+    expect(screen.getByRole('button', { name: 'Save provider' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'Register new credentials' }));
+    expect(screen.getByText('A browser window will open so you can sign in to ChatGPT.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+
+    expect(createProvider).toHaveBeenCalledWith({
+      kind: 'openai',
+      authentication: 'chatgpt',
+    });
+  });
+
   it('does not let a late initial provider list overwrite a completed mutation', async () => {
     let resolveProviders: (providers: []) => void = () => {};
     const listProviders = vi.fn(

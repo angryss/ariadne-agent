@@ -451,6 +451,7 @@ fn provider_settings_start_blank_and_support_add_update_and_delete() {
     store
         .add(ConfiguredProvider::OpenAi {
             authentication: OpenAiAuthentication::Chatgpt,
+            reuse_existing: true,
         })
         .unwrap();
 
@@ -462,6 +463,7 @@ fn provider_settings_start_blank_and_support_add_update_and_delete() {
             },
             ConfiguredProvider::OpenAi {
                 authentication: OpenAiAuthentication::Chatgpt,
+                reuse_existing: true,
             },
         ]
     );
@@ -469,12 +471,14 @@ fn provider_settings_start_blank_and_support_add_update_and_delete() {
     store
         .update(ConfiguredProvider::OpenAi {
             authentication: OpenAiAuthentication::ApiKey,
+            reuse_existing: false,
         })
         .unwrap();
     assert_eq!(
         store.get("openai"),
         Some(&ConfiguredProvider::OpenAi {
             authentication: OpenAiAuthentication::ApiKey,
+            reuse_existing: false,
         })
     );
 
@@ -483,6 +487,7 @@ fn provider_settings_start_blank_and_support_add_update_and_delete() {
         ProviderSettingsStore::load(path).unwrap().list(),
         vec![ConfiguredProvider::OpenAi {
             authentication: OpenAiAuthentication::ApiKey,
+            reuse_existing: false,
         }]
     );
 }
@@ -511,6 +516,7 @@ fn provider_settings_reject_duplicates_unknown_updates_and_invalid_ollama_urls()
         store
             .update(ConfiguredProvider::OpenAi {
                 authentication: OpenAiAuthentication::Chatgpt,
+                reuse_existing: false,
             })
             .unwrap_err()
             .to_string()
@@ -614,6 +620,7 @@ fn provider_settings_merge_mutations_from_separate_store_instances() {
     second
         .add(ConfiguredProvider::OpenAi {
             authentication: OpenAiAuthentication::Chatgpt,
+            reuse_existing: false,
         })
         .unwrap();
 
