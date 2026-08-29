@@ -116,6 +116,7 @@ dependencies = [
  "anyhow",
  "ariadne-config",
  "ariadne-core",
+ "ariadne-provider-anthropic",
  "ariadne-provider-openai",
  "ariadne-server",
  "ariadne-tools-command",
@@ -169,6 +170,7 @@ version = "0.1.0"
 dependencies = [
  "ariadne-config",
  "ariadne-core",
+ "ariadne-provider-anthropic",
  "ariadne-provider-openai",
  "ariadne-tools-command",
  "ariadne-tools-filesystem",
@@ -180,6 +182,21 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "ariadne-provider-anthropic"
+version = "0.1.0"
+dependencies = [
+ "ariadne-core",
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]
@@ -202,6 +219,7 @@ version = "0.1.0"
 dependencies = [
  "ariadne-config",
  "ariadne-core",
+ "ariadne-provider-anthropic",
  "async-trait",
  "axum",
  "dirs",

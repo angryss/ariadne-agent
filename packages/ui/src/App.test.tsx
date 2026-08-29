@@ -369,6 +369,9 @@ describe('App', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     expect(await screen.findByRole('heading', { name: 'Providers' })).toBeInTheDocument();
+    expect(
+      screen.getByText(/Provider credentials are stored here; runtime profiles and models load from ariadne.toml/),
+    ).toBeInTheDocument();
     expect(screen.getByText('No providers configured.')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Add provider' }));
@@ -532,6 +535,34 @@ describe('App', () => {
       kind: 'openai',
       authentication: 'chatgpt',
     });
+  });
+
+  it('adds Anthropic subscription and API-key markers without collecting credentials', async () => {
+    const createProvider = vi.fn().mockImplementation(async (provider) => provider);
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProvider,
+          updateProvider: vi.fn(),
+          deleteProvider: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+    await user.selectOptions(screen.getByLabelText('Provider type'), 'anthropic');
+    expect(screen.getByText(/Ariadne tools are disabled/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+
+    expect(createProvider).toHaveBeenCalledWith({
+      kind: 'anthropic',
+      authentication: 'subscription',
+    });
+    expect(screen.queryByLabelText(/Anthropic API key/i)).not.toBeInTheDocument();
   });
 
   it('does not let a late initial provider list overwrite a completed mutation', async () => {

@@ -90,6 +90,7 @@ export function App({ client }: AppProps) {
   const [providerKind, setProviderKind] = useState<ConfiguredProvider['kind']>('ollama');
   const [ollamaApiBase, setOllamaApiBase] = useState('http://127.0.0.1:11434/v1');
   const [openAiAuthentication, setOpenAiAuthentication] = useState<'api_key' | 'chatgpt'>('chatgpt');
+  const [anthropicAuthentication, setAnthropicAuthentication] = useState<'api_key' | 'subscription'>('subscription');
   const [reuseExistingChatgpt, setReuseExistingChatgpt] = useState<boolean | null>(null);
   const [providerApiKey, setProviderApiKey] = useState('');
   const [savingProvider, setSavingProvider] = useState(false);
@@ -223,13 +224,14 @@ export function App({ client }: AppProps) {
   }
 
   function beginAddProvider() {
-    const availableKind = providerSettings.some((provider) => provider.kind === 'ollama')
-      ? 'openai'
-      : 'ollama';
+    const availableKind = (['ollama', 'openai', 'anthropic'] as const).find(
+      (kind) => !providerSettings.some((provider) => provider.kind === kind),
+    ) ?? 'ollama';
     setEditingProvider(availableKind);
     setProviderKind(availableKind);
     setOllamaApiBase('http://127.0.0.1:11434/v1');
     setOpenAiAuthentication('chatgpt');
+    setAnthropicAuthentication('subscription');
     setReuseExistingChatgpt(null);
     setProviderApiKey('');
   }
@@ -238,7 +240,8 @@ export function App({ client }: AppProps) {
     setEditingProvider(provider.kind);
     setProviderKind(provider.kind);
     if (provider.kind === 'ollama') setOllamaApiBase(provider.api_base);
-    else setOpenAiAuthentication(provider.authentication);
+    else if (provider.kind === 'openai') setOpenAiAuthentication(provider.authentication);
+    else setAnthropicAuthentication(provider.authentication);
     setReuseExistingChatgpt(null);
     setProviderApiKey('');
   }
@@ -263,7 +266,9 @@ export function App({ client }: AppProps) {
     const input: ProviderInput =
       providerKind === 'ollama'
         ? { kind: 'ollama', api_base: ollamaApiBase.trim() }
-        : openAiAuthentication === 'chatgpt'
+        : providerKind === 'anthropic'
+          ? { kind: 'anthropic', authentication: anthropicAuthentication }
+          : openAiAuthentication === 'chatgpt'
           ? {
               kind: 'openai',
               authentication: 'chatgpt',
@@ -461,10 +466,14 @@ export function App({ client }: AppProps) {
               <p className="eyebrow">Settings</p>
               <h2>Providers</h2>
             </div>
-            <button disabled={providerSettings.length >= 2} onClick={beginAddProvider} type="button">
+            <button disabled={providerSettings.length >= 3} onClick={beginAddProvider} type="button">
               Add provider
             </button>
           </div>
+          <p>
+            Provider credentials are stored here; runtime profiles and models load from ariadne.toml
+            at startup.
+          </p>
           {providerSettings.length === 0 ? (
             <p className="settings-empty">No providers configured.</p>
           ) : (
@@ -476,9 +485,13 @@ export function App({ client }: AppProps) {
                     <p>
                       {provider.kind === 'ollama'
                         ? provider.api_base
-                        : provider.authentication === 'chatgpt'
-                          ? 'ChatGPT subscription'
-                          : 'API key'}
+                        : provider.kind === 'anthropic'
+                          ? provider.authentication === 'subscription'
+                            ? 'Claude subscription / usage bundle'
+                            : 'API key via environment variable'
+                          : provider.authentication === 'chatgpt'
+                            ? 'ChatGPT subscription'
+                            : 'API key'}
                     </p>
                   </div>
                   <div className="provider-actions">
@@ -531,6 +544,12 @@ export function App({ client }: AppProps) {
                 >
                   OpenAI
                 </option>
+                <option
+                  disabled={providerSettings.some((provider) => provider.kind === 'anthropic')}
+                  value="anthropic"
+                >
+                  Anthropic
+                </option>
               </select>
               {providerKind === 'ollama' ? (
                 <>
@@ -543,7 +562,7 @@ export function App({ client }: AppProps) {
                     value={ollamaApiBase}
                   />
                 </>
-              ) : (
+              ) : providerKind === 'openai' ? (
                 <>
                   <label htmlFor="openai-authentication">OpenAI authentication</label>
                   <select
@@ -601,6 +620,25 @@ export function App({ client }: AppProps) {
                   ) : (
                     <p>A browser window will open so you can sign in to ChatGPT.</p>
                   )}
+                </>
+              ) : (
+                <>
+                  <label htmlFor="anthropic-authentication">Anthropic authentication</label>
+                  <select
+                    id="anthropic-authentication"
+                    onChange={(event) =>
+                      setAnthropicAuthentication(event.target.value as 'api_key' | 'subscription')
+                    }
+                    value={anthropicAuthentication}
+                  >
+                    <option value="subscription">Claude subscription / usage bundle</option>
+                    <option value="api_key">API key from ANTHROPIC_API_KEY</option>
+                  </select>
+                  <p>
+                    {anthropicAuthentication === 'subscription'
+                      ? 'A browser window will open for Claude login. Ariadne tools are disabled for this mode.'
+                      : 'Set ANTHROPIC_API_KEY in the Ariadne process environment; the key is never saved in provider settings.'}
+                  </p>
                 </>
               )}
               <div className="provider-actions">
@@ -714,5 +752,5 @@ function formatPlan(plan: string): string {
 }
 
 function providerTitle(kind: ConfiguredProvider['kind']): string {
-  return kind === 'ollama' ? 'Ollama' : 'OpenAI';
+  return kind === 'ollama' ? 'Ollama' : kind === 'openai' ? 'OpenAI' : 'Anthropic';
 }

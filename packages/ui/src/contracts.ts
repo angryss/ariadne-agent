@@ -46,12 +46,14 @@ export type ConnectOpenAiRequest =
 
 export type ConfiguredProvider =
   | { kind: 'ollama'; api_base: string }
-  | { kind: 'openai'; authentication: 'api_key' | 'chatgpt'; reuse_existing?: boolean };
+  | { kind: 'openai'; authentication: 'api_key' | 'chatgpt'; reuse_existing?: boolean }
+  | { kind: 'anthropic'; authentication: 'api_key' | 'subscription' };
 
 export type ProviderInput =
   | { kind: 'ollama'; api_base: string }
   | { kind: 'openai'; authentication: 'chatgpt'; reuse_existing?: boolean }
-  | { kind: 'openai'; authentication: 'api_key'; api_key: string };
+  | { kind: 'openai'; authentication: 'api_key'; api_key: string }
+  | { kind: 'anthropic'; authentication: 'api_key' | 'subscription' };
 
 export interface AgentClient {
   respond(request: RespondRequest, onDelta?: CompletionDeltaHandler): Promise<RespondResponse>;

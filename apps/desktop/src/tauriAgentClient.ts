@@ -206,6 +206,12 @@ function isConfiguredProvider(value: unknown): value is ConfiguredProvider {
   if (value.kind === 'ollama') {
     return 'api_base' in value && typeof value.api_base === 'string';
   }
+  if (value.kind === 'anthropic') {
+    return (
+      'authentication' in value &&
+      (value.authentication === 'api_key' || value.authentication === 'subscription')
+    );
+  }
   return (
     value.kind === 'openai' &&
     'authentication' in value &&

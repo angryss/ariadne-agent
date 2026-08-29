@@ -1,7 +1,109 @@
 use ariadne_config::{
-    ConfiguredProvider, OpenAiAuthentication, ProfileCatalog, ProviderKind, ProviderSettingsStore,
-    ResolvedCapability, secure_private_directory,
+    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
+    ProviderKind, ProviderSettingsStore, ResolvedCapability, secure_private_directory,
 };
+
+#[test]
+fn parses_anthropic_api_and_subscription_profiles() {
+    let catalog = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "api"
+[providers.anthropic_api]
+kind = "anthropic-messages"
+api_base = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+[providers.claude_subscription]
+kind = "claude-subscription"
+claude_program = "/usr/local/bin/claude"
+[profiles.api]
+provider = "anthropic_api"
+model = "claude-sonnet-4-5"
+[profiles.subscription]
+provider = "claude_subscription"
+model = "sonnet"
+"#,
+    )
+    .unwrap();
+
+    let api = catalog.resolve("api").unwrap();
+    assert_eq!(api.provider_kind, ProviderKind::AnthropicMessages);
+    assert_eq!(api.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+    let subscription = catalog.resolve("subscription").unwrap();
+    assert_eq!(subscription.provider_kind, ProviderKind::ClaudeSubscription);
+    assert_eq!(
+        subscription.claude_program.to_string_lossy(),
+        "/usr/local/bin/claude"
+    );
+}
+
+#[test]
+fn anthropic_provider_settings_never_serialize_credentials() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.toml");
+    let mut store = ProviderSettingsStore::load(&path).unwrap();
+    store
+        .add(ConfiguredProvider::Anthropic {
+            authentication: AnthropicAuthentication::Subscription,
+        })
+        .unwrap();
+    let encoded = std::fs::read_to_string(path).unwrap();
+    assert!(encoded.contains("kind = \"anthropic\""));
+    assert!(!encoded.contains("token"));
+    assert!(!encoded.contains("api_key"));
+}
+
+#[test]
+fn claude_subscription_profiles_reject_ariadne_context() {
+    let error = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "subscription"
+
+[providers.claude_subscription]
+kind = "claude-subscription"
+
+[profiles.subscription]
+provider = "claude_subscription"
+model = "sonnet"
+active_skills = ["rust"]
+"#,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("cannot declare skills, MCP servers, or capabilities")
+    );
+}
+
+#[test]
+fn claude_subscription_provider_rejects_api_credentials_and_endpoint() {
+    let error = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "claude"
+
+[providers.claude]
+kind = "claude-subscription"
+api_base = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[profiles.claude]
+provider = "claude"
+model = "sonnet"
+"#,
+    )
+    .expect_err("subscription and direct API configuration must remain separate");
+
+    assert!(
+        error
+            .to_string()
+            .contains("cannot declare an API base URL or API key"),
+        "unexpected error: {error}"
+    );
+}
 
 #[test]
 fn parses_profile_provider_model_skills_and_mcp_servers() {
