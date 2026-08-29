@@ -67,16 +67,23 @@ describe('TauriAgentClient', () => {
     const invoke = vi
       .fn()
       .mockResolvedValueOnce({ connected: false, method: null })
+      .mockResolvedValueOnce({ connected: true, method: 'chatgpt', plan: 'plus' })
       .mockResolvedValueOnce({ connected: true, method: 'api_key' });
     const client = new TauriAgentClient(invoke);
 
     await expect(client.getOpenAiAccount()).resolves.toEqual({ connected: false, method: null });
+    await expect(client.getExistingOpenAiAccount()).resolves.toEqual({
+      connected: true,
+      method: 'chatgpt',
+      plan: 'plus',
+    });
     await expect(
       client.connectOpenAi({ method: 'api_key', api_key: 'sk-secret' }),
     ).resolves.toEqual({ connected: true, method: 'api_key' });
 
     expect(invoke).toHaveBeenNthCalledWith(1, 'openai_account', {});
-    expect(invoke).toHaveBeenNthCalledWith(2, 'connect_openai', {
+    expect(invoke).toHaveBeenNthCalledWith(2, 'existing_openai_account', {});
+    expect(invoke).toHaveBeenNthCalledWith(3, 'connect_openai', {
       request: { method: 'api_key', api_key: 'sk-secret' },
     });
   });

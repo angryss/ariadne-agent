@@ -631,3 +631,73 @@ async fn concurrent_openai_creates_authenticate_only_once() {
         1
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn openai_provider_can_reuse_existing_chatgpt_credentials_without_starting_login() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    let invocation_log = directory.path().join("invocation.log");
+    let codex = directory.path().join("codex");
+    std::fs::write(
+        &codex,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n%s\\n' \"$*\" \"${{CODEX_HOME-unset}}\" >> '{}'\n[ \"$1 $2\" = 'login status' ] || exit 1\nprintf '%s\\n' 'Logged in using ChatGPT'\n",
+            invocation_log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profiles = AgentProfiles::new("local", vec![profile("local", "Local.")]).unwrap();
+    let app = router_with_profiles_and_provider_runtime(
+        profiles,
+        settings,
+        codex,
+        directory.path().join("codex-home"),
+    );
+
+    let discovery = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::get("/v1/providers/openai/existing-account")
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(discovery.status(), StatusCode::OK);
+    let discovery_body = to_bytes(discovery.into_body(), 1024).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&discovery_body).unwrap(),
+        serde_json::json!({"connected": true, "method": "chatgpt"})
+    );
+
+    let response = app
+        .oneshot(local_provider_request(
+            Request::post("/v1/providers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"openai","authentication":"chatgpt","reuse_existing":true}"#,
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_body = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response_body).unwrap(),
+        serde_json::json!({
+            "kind": "openai",
+            "authentication": "chatgpt",
+            "reuse_existing": true
+        })
+    );
+    assert_eq!(
+        std::fs::read_to_string(invocation_log).unwrap(),
+        "login status\nunset\nlogin status\nunset\n"
+    );
+}

@@ -10,7 +10,10 @@ use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::time::{Duration, Instant};
 
-use crate::{read_codex_message, read_codex_response, secure_codex_home, write_codex_message};
+use crate::{
+    OpenAiCredentialSelection, read_codex_message, read_codex_response, secure_codex_home,
+    write_codex_message,
+};
 
 const CODEX_OPERATION_TIMEOUT: Duration = Duration::from_secs(180);
 const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.149.1";
@@ -20,6 +23,7 @@ const MAX_CODEX_TURN_MESSAGES: usize = 4096;
 pub struct CodexAppServerProvider {
     program: PathBuf,
     codex_home: Option<PathBuf>,
+    credential_selection: Option<OpenAiCredentialSelection>,
     model: Option<String>,
 }
 
@@ -28,6 +32,7 @@ impl CodexAppServerProvider {
         Self {
             program: program.into(),
             codex_home: None,
+            credential_selection: None,
             model,
         }
     }
@@ -40,6 +45,21 @@ impl CodexAppServerProvider {
         Self {
             program: program.into(),
             codex_home: Some(codex_home.into()),
+            credential_selection: None,
+            model,
+        }
+    }
+
+    pub(crate) fn with_selectable_home(
+        program: impl Into<PathBuf>,
+        codex_home: impl Into<PathBuf>,
+        credential_selection: OpenAiCredentialSelection,
+        model: Option<String>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            codex_home: Some(codex_home.into()),
+            credential_selection: Some(credential_selection),
             model,
         }
     }
@@ -80,11 +100,23 @@ impl CodexAppServerProvider {
             .collect::<Vec<_>>();
         let workspace = tempfile::tempdir().map_err(provider_error)?;
         let mut command = Command::new(&self.program);
-        if let Some(codex_home) = &self.codex_home {
+        let reuse_existing = self
+            .credential_selection
+            .as_ref()
+            .is_some_and(OpenAiCredentialSelection::reuses_existing);
+        if reuse_existing {
+            command
+                .env_remove("CODEX_HOME")
+                .env_remove("ARIADNE_CODEX_HOME");
+        } else if let Some(codex_home) = &self.codex_home {
             command.env(
                 "CODEX_HOME",
                 secure_codex_home(codex_home.clone()).map_err(ProviderError::new)?,
             );
+        } else {
+            command
+                .env_remove("CODEX_HOME")
+                .env_remove("ARIADNE_CODEX_HOME");
         }
         let mut child = command
             .arg("app-server")

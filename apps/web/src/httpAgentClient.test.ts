@@ -124,6 +124,22 @@ describe('HttpAgentClient', () => {
     expect(fetcher).toHaveBeenNthCalledWith(3, '/v1/providers/ollama', expect.objectContaining({ method: 'PUT' }));
     expect(fetcher).toHaveBeenNthCalledWith(4, '/v1/providers/ollama', expect.objectContaining({ method: 'DELETE' }));
   });
+
+  it('discovers an existing ChatGPT subscription through the providers API', async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      jsonResponse({ connected: true, method: 'chatgpt' }),
+    );
+    const client = new HttpAgentClient('/v1/respond', fetcher);
+
+    await expect(client.getExistingOpenAiAccount()).resolves.toEqual({
+      connected: true,
+      method: 'chatgpt',
+    });
+    expect(fetcher).toHaveBeenCalledWith('/v1/providers/openai/existing-account', {
+      method: 'GET',
+      headers: { accept: 'application/json' },
+    });
+  });
 });
 
 function jsonResponse(body: unknown): Response {

@@ -44,6 +44,9 @@ button, textarea { font: inherit; }
 .provider-form h3 { margin: 0 0 .35rem; }
 .provider-form label { color: #aab2c0; font-size: .8rem; font-weight: 650; }
 .provider-form input, .provider-form select { width: 100%; padding: .6rem .7rem; border: 1px solid #343b49; border-radius: .55rem; color: #edf0f6; background: #151a23; }
+.credential-choice { display: grid; gap: .65rem; margin: .25rem 0; padding: .85rem; border: 1px solid #343b49; border-radius: .7rem; background: #0f1218; }
+.credential-choice p { margin: 0; color: #aab2c0; font-size: .86rem; }
+.credential-choice button[aria-pressed="true"] { border-color: #8d7cf7; background: #29234d; }
 
 .conversation { width: min(900px, 100%); margin: 0 auto; display: grid; grid-template-rows: 1fr auto; padding: clamp(1rem, 4vw, 2.5rem); }
 .messages { display: flex; flex-direction: column; justify-content: flex-end; gap: 1rem; padding-bottom: 2rem; }

@@ -3,6 +3,7 @@ import type {
   CompletionDelta,
   CompletionDeltaHandler,
   ConfiguredProvider,
+  OpenAiAccount,
   Profile,
   ProfileCatalog,
   ProviderInput,
@@ -33,6 +34,17 @@ export class HttpAgentClient implements AgentClient {
     const body = await this.providerRequest(this.providersEndpoint, 'GET');
     if (!Array.isArray(body) || !body.every(isConfiguredProvider)) {
       throw new Error('Ariadne API returned invalid provider data');
+    }
+    return body;
+  }
+
+  async getExistingOpenAiAccount(): Promise<OpenAiAccount> {
+    const body = await this.providerRequest(
+      `${this.providersEndpoint}/openai/existing-account`,
+      'GET',
+    );
+    if (!isOpenAiAccount(body)) {
+      throw new Error('Ariadne API returned invalid OpenAI account data');
     }
     return body;
   }
@@ -221,6 +233,18 @@ export class HttpAgentClient implements AgentClient {
 function defaultEndpoint(): string {
   const baseUrl = import.meta.env.VITE_ARIADNE_API_URL?.replace(/\/$/, '') ?? '';
   return `${baseUrl}/v1/respond`;
+}
+
+function isOpenAiAccount(value: unknown): value is OpenAiAccount {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      'connected' in value &&
+      typeof value.connected === 'boolean' &&
+      'method' in value &&
+      (value.method === null || value.method === 'chatgpt' || value.method === 'api_key') &&
+      (!('plan' in value) || value.plan === undefined || typeof value.plan === 'string'),
+  );
 }
 
 function isRespondResponse(value: unknown): value is RespondResponse {
