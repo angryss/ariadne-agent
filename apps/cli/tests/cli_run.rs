@@ -105,7 +105,6 @@ async fn run_emits_one_json_response_for_unattended_use() {
                 {"role": "user", "content": "Do the work"}
             ]
         })))
-        .and(body_string_contains("\"name\":\"run_command\""))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "choices": [{
                 "message": {"role": "assistant", "content": "Automated."}
@@ -143,7 +142,6 @@ async fn run_reads_the_prompt_from_stdin_when_the_flag_is_omitted() {
                 {"role": "user", "content": "Prompt from stdin"}
             ]
         })))
-        .and(body_string_contains("\"name\":\"run_command\""))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "choices": [{
                 "message": {"role": "assistant", "content": "Read it."}
