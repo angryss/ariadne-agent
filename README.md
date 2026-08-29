@@ -39,6 +39,7 @@ See [the architecture guide](docs/architecture.md) for dependency boundaries and
 - Rust 1.88 or newer
 - Node.js 22 or newer and npm
 - [Ollama](https://ollama.com/) for the default local provider, or another OpenAI-compatible endpoint
+- [OpenAI Codex CLI 0.149.1](https://developers.openai.com/codex/cli/) to use a ChatGPT subscription or an OpenAI API key from the desktop app; Ariadne rejects unreviewed Codex versions fail-closed
 - Tauri 2 platform prerequisites when building the desktop app
 
 ## Local quick start
@@ -100,7 +101,9 @@ npm install
 npm run desktop:dev
 ```
 
-The desktop frontend uses narrow Tauri commands and a typed IPC channel instead of opening the HTTP server. Its shared composer submits with Enter and inserts newlines with Shift-Enter or Alt-Enter. It provides the same streaming, collapsible thinking display as the browser, loads the same profile catalog as the CLI, and shows the selected model, provider, active skills, and MCP servers.
+The desktop frontend uses narrow Tauri commands and a typed IPC channel instead of opening the HTTP server. Its shared composer submits with Enter and inserts newlines with Shift-Enter or Alt-Enter. It provides the same streaming, collapsible thinking display as the browser, loads the same configured profile catalog as the CLI plus the reserved `openai-account` desktop profile, and shows the selected model, provider, active skills, and MCP servers.
+
+The desktop app also exposes **Connect OpenAI**. Choose **Use ChatGPT subscription** to complete Codex's supported browser sign-in, or enter an OpenAI API key for usage-based API billing. Ariadne passes API keys to Codex over stdin, never returns credentials through Tauri IPC, and keeps Codex-managed credentials in an Ariadne-specific private configuration directory rather than reusing or replacing the user's normal Codex CLI account. After connecting, select the `openai-account` profile to send prompts through that account. This account-backed profile does not receive Ariadne tools. Its ephemeral Codex thread has no execution environment; shell, image, planning, and web-search tools are disabled, any tool lifecycle item aborts the response, and the model is instructed to answer only from the supplied conversation. The provider is pinned to the reviewed `codex-cli 0.149.1` protocol/tool surface; upgrading Codex requires an Ariadne compatibility review and release.
 
 ## Configuration
 
@@ -111,6 +114,8 @@ The desktop frontend uses narrow Tauri commands and a typed IPC channel instead 
 | `ARIADNE_API_BASE` | `http://127.0.0.1:11434/v1` | OpenAI-compatible API base URL |
 | `ARIADNE_MODEL` | `qwen3:8b` | Provider model identifier |
 | `ARIADNE_API_KEY` | unset | Optional bearer token; never place it in source control |
+| `ARIADNE_CODEX_PATH` | `codex` on `PATH` | Codex CLI executable used by desktop OpenAI account support |
+| `ARIADNE_CODEX_HOME` | `<config-dir>/ariadne/codex` | Private Codex credential/config directory owned by Ariadne desktop |
 | `ARIADNE_SYSTEM_PROMPT` | Ariadne's built-in policy | Trusted instruction prepended by the core |
 | `RUST_LOG` | `warn` | Rust tracing filter, such as `ariadne=info` |
 | `VITE_ARIADNE_API_URL` | same origin | Optional API origin when an external reverse proxy supplies an appropriate CORS policy |

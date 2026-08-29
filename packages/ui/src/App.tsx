@@ -1,6 +1,6 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 
-import type { AgentClient, CompletionDelta, Message, Profile } from './contracts';
+import type { AgentClient, CompletionDelta, Message, OpenAiAccount, Profile } from './contracts';
 
 export interface AppProps {
   client: AgentClient;
@@ -68,6 +68,11 @@ export function App({ client }: AppProps) {
   const [error, setError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [selectedProfile, setSelectedProfile] = useState<string | null>(null);
+  const [openAiAccount, setOpenAiAccount] = useState<OpenAiAccount | null>(null);
+  const [showOpenAi, setShowOpenAi] = useState(false);
+  const [apiKey, setApiKey] = useState('');
+  const [connectingOpenAi, setConnectingOpenAi] = useState(false);
+  const openAiAccountRequest = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -101,7 +106,50 @@ export function App({ client }: AppProps) {
     };
   }, [client]);
 
+  useEffect(() => {
+    let active = true;
+    const request = ++openAiAccountRequest.current;
+    if (client.getOpenAiAccount) {
+      void client
+        .getOpenAiAccount()
+        .then((account) => {
+          if (active && request === openAiAccountRequest.current) setOpenAiAccount(account);
+        })
+        .catch(() => {
+          if (active && request === openAiAccountRequest.current) {
+            setOpenAiAccount({ connected: false, method: null });
+          }
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [client]);
+
   const activeProfile = profiles.find((profile) => profile.name === selectedProfile);
+
+  async function connectOpenAi(method: 'chatgpt' | 'api_key') {
+    if (!client.connectOpenAi || connectingOpenAi) return;
+    openAiAccountRequest.current += 1;
+    setConnectingOpenAi(true);
+    setError(null);
+    try {
+      const account = await client.connectOpenAi(
+        method === 'chatgpt' ? { method } : { method, api_key: apiKey },
+      );
+      setOpenAiAccount(account);
+      setShowOpenAi(false);
+    } catch (connectError) {
+      setError(
+        connectError instanceof Error
+          ? connectError.message
+          : 'Ariadne could not connect OpenAI',
+      );
+    } finally {
+      setApiKey('');
+      setConnectingOpenAi(false);
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -164,9 +212,53 @@ export function App({ client }: AppProps) {
               </select>
             </label>
           ) : null}
+          {client.connectOpenAi ? (
+            <button
+              className="account-button"
+              onClick={() => {
+                if (showOpenAi) setApiKey('');
+                setShowOpenAi(!showOpenAi);
+              }}
+              type="button"
+            >
+              {openAiAccount?.connected
+                ? openAiAccount.method === 'chatgpt'
+                  ? `Connected with ChatGPT${openAiAccount.plan ? ` ${formatPlan(openAiAccount.plan)}` : ''}`
+                  : 'Connected with API key'
+                : 'Connect OpenAI'}
+            </button>
+          ) : null}
           <span className="status"><span aria-hidden="true" /> Ready</span>
         </div>
       </header>
+
+      {showOpenAi && client.connectOpenAi ? (
+        <section className="account-panel" aria-label="Connect OpenAI">
+          <button
+            disabled={connectingOpenAi}
+            onClick={() => void connectOpenAi('chatgpt')}
+            type="button"
+          >
+            {connectingOpenAi ? 'Connecting…' : 'Use ChatGPT subscription'}
+          </button>
+          <span>or</span>
+          <label htmlFor="openai-api-key">OpenAI API key</label>
+          <input
+            autoComplete="off"
+            id="openai-api-key"
+            onChange={(event) => setApiKey(event.target.value)}
+            type="password"
+            value={apiKey}
+          />
+          <button
+            disabled={connectingOpenAi || !apiKey.trim()}
+            onClick={() => void connectOpenAi('api_key')}
+            type="button"
+          >
+            Save API key
+          </button>
+        </section>
+      ) : null}
 
       {activeProfile ? (
         <aside className="profile-summary" aria-label="Active profile">
@@ -256,4 +348,8 @@ export function App({ client }: AppProps) {
       </section>
     </main>
   );
+}
+
+function formatPlan(plan: string): string {
+  return plan.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 }

@@ -169,6 +169,8 @@ dependencies = [
  "ariadne-tools-command",
  "ariadne-tools-filesystem",
  "async-trait",
+ "dirs",
+ "libc",
  "serde",
  "serde_json",
  "tauri",

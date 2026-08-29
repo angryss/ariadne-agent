@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::json;
-use wiremock::matchers::{body_json, method, path};
+use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -36,13 +36,14 @@ async fn chat_keeps_history_until_the_user_quits() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .and(body_json(json!({
+        .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
                 {"role": "system", "content": "You are Ariadne."},
                 {"role": "user", "content": "Hello"}
             ]
         })))
+        .and(body_string_contains("\"name\":\"run_command\""))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "choices": [{
                 "message": {"role": "assistant", "content": "Ready."}
@@ -53,7 +54,7 @@ async fn chat_keeps_history_until_the_user_quits() {
         .await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .and(body_json(json!({
+        .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
                 {"role": "system", "content": "You are Ariadne."},
@@ -62,11 +63,13 @@ async fn chat_keeps_history_until_the_user_quits() {
                 {"role": "user", "content": "Next"}
             ]
         })))
+        .and(body_string_contains("\"name\":\"run_command\""))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "choices": [{
                 "message": {"role": "assistant", "content": "Done."}
             }]
         })))
+        .with_priority(1)
         .expect(1)
         .mount(&server)
         .await;

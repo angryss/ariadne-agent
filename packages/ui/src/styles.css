@@ -21,6 +21,9 @@ button, textarea { font: inherit; }
 .profile-picker select { min-width: 8rem; padding: .45rem 1.8rem .45rem .6rem; border: 1px solid #343b49; border-radius: .55rem; color: #edf0f6; background: #151a23; text-transform: none; letter-spacing: normal; }
 .profile-picker select:focus-visible { outline: 2px solid #9d91f5; outline-offset: 2px; }
 .profile-picker select:disabled { opacity: .55; }
+.account-button, .account-panel button { padding: .5rem .75rem; border: 1px solid #343b49; border-radius: .55rem; color: #edf0f6; background: #151a23; cursor: pointer; }
+.account-panel { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .6rem; padding: .65rem clamp(1rem, 4vw, 3rem); border-bottom: 1px solid #202530; color: #9da6b6; background: #0f1218; font-size: .8rem; }
+.account-panel input { min-width: 15rem; padding: .5rem .65rem; border: 1px solid #343b49; border-radius: .55rem; color: #edf0f6; background: #151a23; }
 .profile-summary { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .65rem clamp(1rem, 4vw, 3rem); border-bottom: 1px solid #202530; color: #9da6b6; background: #0f1218; font-size: .76rem; }
 .profile-summary strong { color: #d9d4ff; }
 .profile-summary span { padding: .2rem .45rem; border: 1px solid #2c3240; border-radius: 999px; background: #151a23; }

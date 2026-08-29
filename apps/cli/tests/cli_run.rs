@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::json;
-use wiremock::matchers::{body_json, body_string_contains, method, path};
+use wiremock::matchers::{body_json, body_partial_json, body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -98,13 +98,14 @@ async fn run_emits_one_json_response_for_unattended_use() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .and(body_json(json!({
+        .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
                 {"role": "system", "content": "You are Ariadne."},
                 {"role": "user", "content": "Do the work"}
             ]
         })))
+        .and(body_string_contains("\"name\":\"run_command\""))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "choices": [{
                 "message": {"role": "assistant", "content": "Automated."}
@@ -135,13 +136,14 @@ async fn run_reads_the_prompt_from_stdin_when_the_flag_is_omitted() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .and(body_json(json!({
+        .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
                 {"role": "system", "content": "You are Ariadne."},
                 {"role": "user", "content": "Prompt from stdin"}
             ]
         })))
+        .and(body_string_contains("\"name\":\"run_command\""))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "choices": [{
                 "message": {"role": "assistant", "content": "Read it."}

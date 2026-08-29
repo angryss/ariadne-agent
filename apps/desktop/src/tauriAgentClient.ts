@@ -3,6 +3,8 @@ import type {
   AgentClient,
   CompletionDelta,
   CompletionDeltaHandler,
+  ConnectOpenAiRequest,
+  OpenAiAccount,
   Profile,
   ProfileCatalog,
   RespondRequest,
@@ -33,6 +35,22 @@ export class TauriAgentClient implements AgentClient {
       throw new Error('Ariadne desktop returned invalid profile data');
     }
     return profiles;
+  }
+
+  async getOpenAiAccount(): Promise<OpenAiAccount> {
+    const account = await this.invoke('openai_account', {});
+    if (!isOpenAiAccount(account)) {
+      throw new Error('Ariadne desktop returned invalid OpenAI account data');
+    }
+    return account;
+  }
+
+  async connectOpenAi(request: ConnectOpenAiRequest): Promise<OpenAiAccount> {
+    const account = await this.invoke('connect_openai', { request });
+    if (!isOpenAiAccount(account)) {
+      throw new Error('Ariadne desktop returned invalid OpenAI account data');
+    }
+    return account;
   }
 
   async respond(
@@ -123,5 +141,24 @@ function isProfile(value: unknown): value is Profile {
       'capabilities' in value &&
       Array.isArray(value.capabilities) &&
       value.capabilities.every((capability) => typeof capability === 'string'),
+  );
+}
+
+function isOpenAiAccount(value: unknown): value is OpenAiAccount {
+  if (!value || typeof value !== 'object' || !('connected' in value)) {
+    return false;
+  }
+  if (value.connected === false) {
+    return 'method' in value && value.method === null;
+  }
+  if (value.connected !== true || !('method' in value)) {
+    return false;
+  }
+  if (value.method === 'api_key') {
+    return true;
+  }
+  return (
+    value.method === 'chatgpt' &&
+    (!('plan' in value) || value.plan === undefined || typeof value.plan === 'string')
   );
 }

@@ -19,16 +19,18 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+async-trait.workspace = true
 ariadne-config = { path = "../../../crates/ariadne-config" }
 ariadne-core = { path = "../../../crates/ariadne-core" }
 ariadne-provider-openai = { path = "../../../crates/ariadne-provider-openai" }
 ariadne-tools-command = { path = "../../../crates/ariadne-tools-command" }
 ariadne-tools-filesystem = { path = "../../../crates/ariadne-tools-filesystem" }
+dirs.workspace = true
+libc.workspace = true
 serde.workspace = true
-tauri = { version = "2", features = [] }
-
-[dev-dependencies]
-async-trait.workspace = true
 serde_json.workspace = true
+tauri = { version = "2", features = [] }
 tempfile.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
