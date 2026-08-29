@@ -15,6 +15,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 ariadne-config = { path = "../../crates/ariadne-config" }
 ariadne-core = { path = "../../crates/ariadne-core" }
+ariadne-provider-anthropic = { path = "../../crates/ariadne-provider-anthropic" }
 ariadne-provider-openai = { path = "../../crates/ariadne-provider-openai" }
 ariadne-server = { path = "../../crates/ariadne-server" }
 ariadne-tools-command = { path = "../../crates/ariadne-tools-command" }

@@ -18,7 +18,7 @@ CLI interactive / run / serve ----------------------------+
 
 1. **Core** owns messages, requests, provider ports, profile metadata, profile dispatch, and agent orchestration. It performs no network, terminal, web, desktop, or configuration-file I/O.
 2. **Configuration** parses and validates the versioned TOML provider/profile catalog. It resolves safe profile metadata, provider inputs, and native capability settings but never reads provider credentials itself.
-3. **Adapters** implement model-provider, transport, and tool concerns. The initial provider targets OpenAI-compatible APIs, including local Ollama. Native adapters implement the core tool port for a canonical workspace filesystem and for bounded, explicitly mapped host programs.
+3. **Adapters** implement model-provider, transport, and tool concerns. Providers target OpenAI-compatible APIs, Anthropic's Messages API (SSE plus provider-neutral tool translation), and Claude Code's supported headless account interface for Claude subscription / usage bundle access. The account-backed path disables internal tools and rejects Ariadne tools. Native adapters implement the core tool port for a canonical workspace filesystem and for bounded, explicitly mapped host programs.
 4. **Composition roots** choose concrete adapters for CLI, HTTP server, and Tauri desktop execution. They read the environment variables named by providers and apply legacy CLI/environment overrides to the selected default profile.
 5. **UI** depends on a small TypeScript client port. The web app implements it with HTTP; the desktop app implements it with Tauri IPC. Both fetch safe profile metadata and clear caller-owned history when a user switches profiles.
 

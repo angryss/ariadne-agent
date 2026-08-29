@@ -23,6 +23,7 @@ apps/
 crates/
   ariadne-config/      Versioned TOML profile catalog and validation
   ariadne-core/        Domain types, model-provider port, and agent orchestration
+  ariadne-provider-anthropic/ Anthropic Messages API and Claude subscription adapters
   ariadne-provider-openai/  OpenAI-compatible HTTP adapter
   ariadne-server/      Axum API and static SPA hosting
   ariadne-tools-filesystem/ Native workspace-scoped filesystem tool adapter
@@ -40,6 +41,7 @@ See [the architecture guide](docs/architecture.md) for dependency boundaries and
 - Node.js 22 or newer and npm
 - [Ollama](https://ollama.com/) for the default local provider, or another OpenAI-compatible endpoint
 - [OpenAI Codex CLI 0.149.1](https://developers.openai.com/codex/cli/) to configure OpenAI with a ChatGPT subscription or API key; the desktop account-backed chat provider rejects unreviewed Codex versions fail-closed
+- [Claude Code 2.1.223](https://docs.anthropic.com/en/docs/claude-code) for Claude subscription / usage bundle profiles
 - Tauri 2 platform prerequisites when building the desktop app
 
 ## Local quick start
@@ -80,7 +82,7 @@ Open the terminal provider settings interface with:
 cargo run -p ariadne-cli -- --configure-providers
 ```
 
-The TUI starts with an empty provider list and supports adding, editing, and deleting Ollama and OpenAI settings. Use `--provider-config <path>` to select a non-default provider settings file. OpenAI can authenticate through an API key sent directly to Codex over stdin or through Codex's ChatGPT browser sign-in.
+The TUI starts with an empty provider list and supports adding, editing, and deleting Ollama, OpenAI, and Anthropic settings. Use `--provider-config <path>` to select a non-default provider settings file. OpenAI can authenticate through an API key sent directly to Codex over stdin or through Codex's ChatGPT browser sign-in.
 
 ## Web application
 
@@ -123,8 +125,10 @@ The desktop app also exposes **Connect OpenAI**. Choose **Use ChatGPT subscripti
 | `ARIADNE_API_BASE` | `http://127.0.0.1:11434/v1` | OpenAI-compatible API base URL |
 | `ARIADNE_MODEL` | `qwen3:8b` | Provider model identifier |
 | `ARIADNE_API_KEY` | unset | Optional bearer token; never place it in source control |
+| `ANTHROPIC_API_KEY` | unset | Example direct Messages API credential referenced by an Anthropic provider's `api_key_env` |
 | `ARIADNE_CODEX_PATH` | `codex` on `PATH` | Codex CLI executable used by desktop OpenAI account support |
 | `ARIADNE_CODEX_HOME` | `<config-dir>/ariadne/codex` | Private Codex credential/config directory owned by Ariadne desktop |
+| `ARIADNE_CLAUDE_PATH` | `claude` on `PATH` | Claude Code executable used by CLI/web/desktop provider sign-in; profile execution uses `providers.<name>.claude_program` |
 | `ARIADNE_SYSTEM_PROMPT` | Ariadne's built-in policy | Trusted instruction prepended by the core |
 | `RUST_LOG` | `warn` | Rust tracing filter, such as `ariadne=info` |
 | `VITE_ARIADNE_API_URL` | same origin | Optional API origin when an external reverse proxy supplies an appropriate CORS policy |
@@ -139,7 +143,9 @@ Ariadne reads TOML from the platform configuration directory at `<config-dir>/ar
 
 See [`ariadne.example.toml`](ariadne.example.toml) for the complete version 1 schema. The catalog separates reusable provider connections from profiles:
 
-- `providers.<name>` defines `kind = "openai-compatible"`, `api_base`, and optional `api_key_env`. Store the secret in the named environment variable, never in TOML.
+- `providers.<name>` may use `openai-compatible`, `anthropic-messages`, or `claude-subscription`. Direct Anthropic profiles use `api_key_env` (normally `ANTHROPIC_API_KEY`); store the secret only in that environment variable, never in TOML.
+- `claude-subscription` uses Claude Code's supported headless interface after `claude auth login --claudeai` (or an explicit `CLAUDE_CODE_OAUTH_TOKEN` created by `claude setup-token`). Claude subscription / usage bundle billing is handled by Claude. Ariadne removes competing API, profile, gateway, and cloud-provider environment overrides; disables Claude Code tools, MCP, customizations, and persistence; and rejects profiles that declare Ariadne capabilities, skills, or MCP servers.
+- Provider settings in the CLI, web app, and desktop app store credential readiness only. Runtime provider, model, and profile routing remains authoritative in `ariadne.toml` and is loaded at process startup.
 - `profiles.<name>` selects a provider and model and may define `system_prompt`, `capabilities`, `active_skills`, and `mcp_servers`.
 - `capabilities.<name>` defines an in-process native capability. `kind = "filesystem"` supplies eight workspace-scoped tools: read, write, exact edit, list, find, search, create directory, and file metadata. `kind = "command"` supplies one bounded `run_command` tool over an explicit alias-to-executable map.
 - `mcp_servers.<name>` stores a structured MCP server definition. Every profile reference is validated when the catalog loads.
@@ -157,7 +163,7 @@ Profile-scoped skill and MCP activation is represented and exposed consistently,
 
 `GET /v1/profiles` returns the process default and safe profile metadata. It never returns API keys, API-key environment-variable names, provider base URLs, system prompts, or MCP command definitions.
 
-`GET /v1/providers`, `POST /v1/providers`, and `PUT`/`DELETE /v1/providers/{kind}` provide provider settings CRUD for the browser. The persisted TOML contains only Ollama's API base URL or OpenAI's authentication method. OpenAI API keys are piped to Codex and are never stored in this file or returned by the API.
+`GET /v1/providers`, `POST /v1/providers`, and `PUT`/`DELETE /v1/providers/{kind}` provide provider settings CRUD for the browser. The persisted TOML contains only Ollama's API base URL or the selected OpenAI/Anthropic authentication method. OpenAI API keys are piped to Codex and are never stored in this file or returned by the API.
 
 `POST /v1/respond` accepts caller-owned user/assistant history, an optional profile name, and a new prompt. Omit `profile` to use the process default:
 

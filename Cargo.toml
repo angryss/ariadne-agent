@@ -4,6 +4,7 @@ members = [
   "apps/desktop/src-tauri",
   "crates/ariadne-config",
   "crates/ariadne-core",
+  "crates/ariadne-provider-anthropic",
   "crates/ariadne-provider-openai",
   "crates/ariadne-server",
   "crates/ariadne-tools-command",

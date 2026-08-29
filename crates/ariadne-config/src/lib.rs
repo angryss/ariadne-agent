@@ -28,6 +28,13 @@ pub enum OpenAiAuthentication {
     Chatgpt,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicAuthentication {
+    ApiKey,
+    Subscription,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConfiguredProvider {
@@ -40,6 +47,9 @@ pub enum ConfiguredProvider {
         #[serde(default)]
         reuse_existing: bool,
     },
+    Anthropic {
+        authentication: AnthropicAuthentication,
+    },
 }
 
 impl ConfiguredProvider {
@@ -47,6 +57,7 @@ impl ConfiguredProvider {
         match self {
             Self::Ollama { .. } => "ollama",
             Self::OpenAi { .. } => "openai",
+            Self::Anthropic { .. } => "anthropic",
         }
     }
 
@@ -526,6 +537,10 @@ pub enum ProviderSettingsError {
 pub enum ProviderKind {
     #[serde(rename = "openai-compatible")]
     OpenAiCompatible,
+    #[serde(rename = "anthropic-messages")]
+    AnthropicMessages,
+    #[serde(rename = "claude-subscription")]
+    ClaudeSubscription,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -534,6 +549,7 @@ pub struct ResolvedProfile {
     pub provider_kind: ProviderKind,
     pub api_base: String,
     pub api_key_env: Option<String>,
+    pub claude_program: PathBuf,
     pub system_prompt: String,
     pub capabilities: Vec<ResolvedCapability>,
 }
@@ -585,6 +601,7 @@ impl ProfileCatalog {
                     kind: ProviderKind::OpenAiCompatible,
                     api_base: DEFAULT_API_BASE.to_owned(),
                     api_key_env: None,
+                    claude_program: default_claude_program(),
                 },
             )]),
             profiles: BTreeMap::from([(
@@ -679,6 +696,7 @@ impl ProfileCatalog {
             provider_kind: provider.kind,
             api_base: provider.api_base.clone(),
             api_key_env: provider.api_key_env.clone(),
+            claude_program: provider.claude_program.clone(),
             system_prompt: profile
                 .system_prompt
                 .clone()
@@ -708,17 +726,29 @@ impl ProfileCatalog {
 
         for (name, provider) in &file.providers {
             ensure_not_blank("provider name", name)?;
-            ensure_not_blank("provider API base URL", &provider.api_base)?;
-            let api_base = Url::parse(&provider.api_base).map_err(|source| {
-                ConfigError::InvalidProviderUrl {
-                    provider: name.clone(),
-                    source,
+            if provider.kind == ProviderKind::ClaudeSubscription {
+                if !provider.api_base.is_empty() || provider.api_key_env.is_some() {
+                    return Err(ConfigError::ClaudeSubscriptionApiConfiguration {
+                        provider: name.clone(),
+                    });
                 }
-            })?;
-            if !api_base.username().is_empty() || api_base.password().is_some() {
-                return Err(ConfigError::EmbeddedProviderCredentials {
-                    provider: name.clone(),
-                });
+                ensure_not_blank(
+                    "Claude program",
+                    provider.claude_program.to_string_lossy().as_ref(),
+                )?;
+            } else {
+                ensure_not_blank("provider API base URL", &provider.api_base)?;
+                let api_base = Url::parse(&provider.api_base).map_err(|source| {
+                    ConfigError::InvalidProviderUrl {
+                        provider: name.clone(),
+                        source,
+                    }
+                })?;
+                if !api_base.username().is_empty() || api_base.password().is_some() {
+                    return Err(ConfigError::EmbeddedProviderCredentials {
+                        provider: name.clone(),
+                    });
+                }
             }
             if let Some(api_key_env) = &provider.api_key_env {
                 ensure_not_blank("provider API key environment variable", api_key_env)?;
@@ -762,6 +792,15 @@ impl ProfileCatalog {
                 return Err(ConfigError::UnknownProvider {
                     profile: name.clone(),
                     provider: profile.provider.clone(),
+                });
+            }
+            if file.providers[&profile.provider].kind == ProviderKind::ClaudeSubscription
+                && (!profile.active_skills.is_empty()
+                    || !profile.mcp_servers.is_empty()
+                    || !profile.capabilities.is_empty())
+            {
+                return Err(ConfigError::ClaudeSubscriptionContext {
+                    profile: name.clone(),
                 });
             }
             ensure_unique("active skill", &profile.active_skills)?;
@@ -842,8 +881,15 @@ struct ConfigFile {
 #[serde(deny_unknown_fields)]
 struct ProviderConfig {
     kind: ProviderKind,
+    #[serde(default)]
     api_base: String,
     api_key_env: Option<String>,
+    #[serde(default = "default_claude_program")]
+    claude_program: PathBuf,
+}
+
+fn default_claude_program() -> PathBuf {
+    PathBuf::from("claude")
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -954,6 +1000,14 @@ pub enum ConfigError {
         "profile `{profile}` activates multiple command capabilities, whose tool names would conflict"
     )]
     ConflictingCommandCapabilities { profile: String },
+    #[error(
+        "Claude subscription profile `{profile}` cannot declare skills, MCP servers, or capabilities"
+    )]
+    ClaudeSubscriptionContext { profile: String },
+    #[error(
+        "Claude subscription provider `{provider}` cannot declare an API base URL or API key environment variable"
+    )]
+    ClaudeSubscriptionApiConfiguration { provider: String },
     #[error("command capability `{capability}` must configure at least one program")]
     CommandProgramsEmpty { capability: String },
     #[error(

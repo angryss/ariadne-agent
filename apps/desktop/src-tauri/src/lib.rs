@@ -6,10 +6,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ariadne_config::{
-    ConfiguredProvider, OpenAiAuthentication, ProfileCatalog, ProviderKind, ProviderSettingsStore,
-    ResolvedCapability, ResolvedProfile, secure_private_directory,
+    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
+    ProviderKind, ProviderSettingsStore, ResolvedCapability, ResolvedProfile,
+    secure_private_directory,
 };
 use ariadne_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile, Tool};
+use ariadne_provider_anthropic::{
+    AnthropicMessagesProvider, CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, ClaudeCodeProvider,
+    isolate_claude_subscription_environment, terminate_child,
+};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
 use ariadne_tools_command::{CommandConfig, CommandTool};
 use ariadne_tools_filesystem::{FileSystemConfig, FileSystemToolset};
@@ -55,6 +60,9 @@ enum ProviderInput {
         #[serde(default)]
         reuse_existing: bool,
     },
+    Anthropic {
+        authentication: AnthropicAuthentication,
+    },
 }
 
 impl ProviderInput {
@@ -62,6 +70,7 @@ impl ProviderInput {
         match self {
             Self::Ollama { .. } => "ollama",
             Self::OpenAi { .. } => "openai",
+            Self::Anthropic { .. } => "anthropic",
         }
     }
 }
@@ -365,6 +374,12 @@ fn codex_program() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("codex"))
 }
 
+fn claude_program() -> PathBuf {
+    env::var_os("ARIADNE_CLAUDE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("claude"))
+}
+
 pub fn prepare_codex_home(
     config_directory: impl AsRef<std::path::Path>,
 ) -> Result<PathBuf, String> {
@@ -602,7 +617,54 @@ async fn configured_provider_from_input(
                 reuse_existing: false,
             })
         }
+        ProviderInput::Anthropic { authentication } => {
+            if authentication == AnthropicAuthentication::Subscription {
+                authenticate_anthropic_subscription_with_program(
+                    claude_program(),
+                    Duration::from_secs(300),
+                )
+                .await?;
+            }
+            Ok(ConfiguredProvider::Anthropic { authentication })
+        }
     }
+}
+
+async fn authenticate_anthropic_subscription_with_program(
+    program: PathBuf,
+    login_timeout: Duration,
+) -> Result<(), String> {
+    let mut command = Command::new(program);
+    isolate_claude_subscription_environment(&mut command);
+    command
+        .args(["auth", "login", "--claudeai"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    for name in CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS {
+        command.env_remove(name);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start Claude subscription sign-in: {error}"))?;
+    let status = match timeout(login_timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            terminate_child(&mut child).await;
+            return Err(format!(
+                "failed to wait for Claude subscription sign-in: {error}"
+            ));
+        }
+        Err(_) => {
+            terminate_child(&mut child).await;
+            return Err("Claude subscription sign-in timed out".to_owned());
+        }
+    };
+    if !status.success() {
+        return Err("Claude subscription sign-in did not complete".to_owned());
+    }
+    Ok(())
 }
 
 async fn verify_existing_openai_credentials_with_program(
@@ -881,7 +943,24 @@ fn configured_agent(
             OpenAiCompatibleProvider::new(&profile.api_base, &profile.profile.model, api_key)
                 .map_err(|error| error.to_string())?,
         ),
+        ProviderKind::AnthropicMessages => Arc::new(
+            AnthropicMessagesProvider::with_base_url(
+                &profile.api_base,
+                &profile.profile.model,
+                api_key.ok_or_else(|| "Anthropic API key is required".to_owned())?,
+            )
+            .map_err(|error| error.to_string())?,
+        ),
+        ProviderKind::ClaudeSubscription => Arc::new(ClaudeCodeProvider::new(
+            &profile.claude_program,
+            &profile.profile.model,
+        )),
     };
+
+    if profile.provider_kind == ProviderKind::ClaudeSubscription && !profile.capabilities.is_empty()
+    {
+        return Err("Claude subscription profiles do not support Ariadne capabilities".to_owned());
+    }
 
     compose_agent(profile, provider)
 }
@@ -964,11 +1043,42 @@ mod tests {
 
     use super::{
         MAX_CODEX_MESSAGE_BYTES, OpenAiAuthenticationLock, OpenAiCredentialSelection,
-        decode_optional_env, openai_account_reuses_existing_credentials, read_codex_message,
-        selected_openai_codex_home, synchronize_connected_openai_provider,
-        update_openai_credential_selection, verify_existing_openai_credentials_with_program,
-        write_codex_message,
+        authenticate_anthropic_subscription_with_program, decode_optional_env,
+        openai_account_reuses_existing_credentials, read_codex_message, selected_openai_codex_home,
+        synchronize_connected_openai_provider, update_openai_credential_selection,
+        verify_existing_openai_credentials_with_program, write_codex_message,
     };
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_login_timeout_kills_and_reaps_the_child() {
+        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/hanging_claude_login.sh");
+        let pid_file = PathBuf::from(format!("{}.pid", program.display()));
+        let _ = std::fs::remove_file(&pid_file);
+
+        let error =
+            authenticate_anthropic_subscription_with_program(program, Duration::from_millis(25))
+                .await
+                .unwrap_err();
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let running = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if running {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid.trim()])
+                .status();
+        }
+        let _ = std::fs::remove_file(pid_file);
+
+        assert!(error.contains("timed out"));
+        assert!(!running, "timed-out Claude login child {pid} remained");
+    }
 
     #[tokio::test]
     async fn openai_authentication_lock_serializes_credential_mutations() {

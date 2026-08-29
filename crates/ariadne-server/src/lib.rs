@@ -5,11 +5,15 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use ariadne_config::{
-    ConfiguredProvider, OpenAiAuthentication, ProviderSettingsError, ProviderSettingsStore,
-    secure_private_directory,
+    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProviderSettingsError,
+    ProviderSettingsStore, secure_private_directory,
 };
 use ariadne_core::{
     Agent, AgentError, AgentProfiles, CompletionDelta, Message, Profile, ProfileAgentError,
+};
+use ariadne_provider_anthropic::{
+    CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, isolate_claude_subscription_environment,
+    terminate_child,
 };
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path as AxumPath, State};
@@ -33,6 +37,7 @@ struct AppState {
     provider_settings: Option<Arc<Mutex<ProviderSettingsStore>>>,
     codex_program: PathBuf,
     codex_home: PathBuf,
+    claude_program: PathBuf,
 }
 
 pub fn router(agent: Agent) -> Router {
@@ -94,6 +99,9 @@ fn router_with_runtime(
     codex_program: PathBuf,
     codex_home: PathBuf,
 ) -> Router {
+    let claude_program = std::env::var_os("ARIADNE_CLAUDE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("claude"));
     let provider_routes = Router::new()
         .route(
             "/v1/providers/openai/existing-account",
@@ -135,6 +143,7 @@ fn router_with_runtime(
             provider_settings: provider_settings.map(|store| Arc::new(Mutex::new(store))),
             codex_program,
             codex_home,
+            claude_program,
         })
 }
 
@@ -242,6 +251,9 @@ enum ProviderInput {
         #[serde(default)]
         reuse_existing: bool,
     },
+    Anthropic {
+        authentication: AnthropicAuthentication,
+    },
 }
 
 impl ProviderInput {
@@ -249,6 +261,7 @@ impl ProviderInput {
         match self {
             Self::Ollama { .. } => "ollama",
             Self::OpenAi { .. } => "openai",
+            Self::Anthropic { .. } => "anthropic",
         }
     }
 }
@@ -341,7 +354,62 @@ async fn configured_provider(
                 reuse_existing,
             })
         }
+        ProviderInput::Anthropic { authentication } => {
+            if authentication == AnthropicAuthentication::Subscription {
+                authenticate_anthropic_subscription(state).await?;
+            }
+            Ok(ConfiguredProvider::Anthropic { authentication })
+        }
     }
+}
+
+async fn authenticate_anthropic_subscription(state: &AppState) -> Result<(), ApiError> {
+    authenticate_anthropic_subscription_with_program(
+        &state.claude_program,
+        Duration::from_secs(300),
+    )
+    .await
+}
+
+async fn authenticate_anthropic_subscription_with_program(
+    program: &Path,
+    login_timeout: Duration,
+) -> Result<(), ApiError> {
+    let mut command = Command::new(program);
+    isolate_claude_subscription_environment(&mut command);
+    command
+        .args(["auth", "login", "--claudeai"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    for name in CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS {
+        command.env_remove(name);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| provider_settings_error("failed to start Claude subscription sign-in"))?;
+    let status = match timeout(login_timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) => {
+            terminate_child(&mut child).await;
+            return Err(provider_settings_error(
+                "failed to wait for Claude subscription sign-in",
+            ));
+        }
+        Err(_) => {
+            terminate_child(&mut child).await;
+            return Err(provider_settings_error(
+                "Claude subscription sign-in timed out",
+            ));
+        }
+    };
+    if !status.success() {
+        return Err(provider_settings_error(
+            "Claude subscription sign-in did not complete",
+        ));
+    }
+    Ok(())
 }
 
 async fn authenticate_openai(
@@ -671,5 +739,42 @@ impl IntoResponse for ApiError {
             }),
         )
             .into_response()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::authenticate_anthropic_subscription_with_program;
+    use std::path::PathBuf;
+    use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn claude_login_timeout_kills_and_reaps_the_child() {
+        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/hanging_claude_login.sh");
+        let pid_file = PathBuf::from(format!("{}.pid", program.display()));
+        let _ = std::fs::remove_file(&pid_file);
+
+        let error =
+            authenticate_anthropic_subscription_with_program(&program, Duration::from_millis(25))
+                .await
+                .unwrap_err();
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let running = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if running {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid.trim()])
+                .status();
+        }
+        let _ = std::fs::remove_file(pid_file);
+
+        assert!(error.message.contains("timed out"));
+        assert!(!running, "timed-out Claude login child {pid} remained");
     }
 }

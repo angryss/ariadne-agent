@@ -5,7 +5,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ariadne_config::{
-    ConfiguredProvider, OpenAiAuthentication, ProviderSettingsStore, secure_private_directory,
+    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProviderSettingsStore,
+    secure_private_directory,
+};
+use ariadne_provider_anthropic::{
+    CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, claude_subscription_environment,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -25,6 +29,7 @@ use ratatui::{
 enum ProviderChoice {
     Ollama,
     OpenAi,
+    Anthropic,
 }
 
 impl ProviderChoice {
@@ -32,6 +37,7 @@ impl ProviderChoice {
         match self {
             Self::Ollama => "ollama",
             Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
         }
     }
 
@@ -39,13 +45,15 @@ impl ProviderChoice {
         match self {
             Self::Ollama => "Ollama",
             Self::OpenAi => "OpenAI",
+            Self::Anthropic => "Anthropic",
         }
     }
 
     fn toggle(self) -> Self {
         match self {
             Self::Ollama => Self::OpenAi,
-            Self::OpenAi => Self::Ollama,
+            Self::OpenAi => Self::Anthropic,
+            Self::Anthropic => Self::Ollama,
         }
     }
 }
@@ -77,11 +85,14 @@ impl ProviderUi {
 
     fn begin_add(&mut self) {
         self.existing = false;
-        self.choice = if self.has("ollama") {
-            ProviderChoice::OpenAi
-        } else {
-            ProviderChoice::Ollama
-        };
+        self.choice = [
+            ProviderChoice::Ollama,
+            ProviderChoice::OpenAi,
+            ProviderChoice::Anthropic,
+        ]
+        .into_iter()
+        .find(|choice| !self.has(choice.id()))
+        .unwrap_or(ProviderChoice::Ollama);
         self.authentication = OpenAiAuthentication::Chatgpt;
         self.input = if self.choice == ProviderChoice::Ollama {
             "http://127.0.0.1:11434/v1".to_owned()
@@ -106,6 +117,14 @@ impl ProviderUi {
             ConfiguredProvider::OpenAi { authentication, .. } => {
                 self.choice = ProviderChoice::OpenAi;
                 self.authentication = *authentication;
+                self.input.clear();
+            }
+            ConfiguredProvider::Anthropic { authentication } => {
+                self.choice = ProviderChoice::Anthropic;
+                self.authentication = match authentication {
+                    AnthropicAuthentication::ApiKey => OpenAiAuthentication::ApiKey,
+                    AnthropicAuthentication::Subscription => OpenAiAuthentication::Chatgpt,
+                };
                 self.input.clear();
             }
         }
@@ -167,17 +186,21 @@ fn run_loop(
                     ui.error = None;
                 }
                 KeyCode::Left | KeyCode::Right if !ui.existing => {
-                    let next = ui.choice.toggle();
-                    if !ui.has(next.id()) {
-                        ui.choice = next;
-                        ui.input = if next == ProviderChoice::Ollama {
-                            "http://127.0.0.1:11434/v1".to_owned()
-                        } else {
-                            String::new()
-                        };
+                    let mut next = ui.choice.toggle();
+                    for _ in 0..3 {
+                        if !ui.has(next.id()) {
+                            ui.choice = next;
+                            ui.input = if next == ProviderChoice::Ollama {
+                                "http://127.0.0.1:11434/v1".to_owned()
+                            } else {
+                                String::new()
+                            };
+                            break;
+                        }
+                        next = next.toggle();
                     }
                 }
-                KeyCode::Tab if ui.choice == ProviderChoice::OpenAi => {
+                KeyCode::Tab if ui.choice != ProviderChoice::Ollama => {
                     ui.authentication = match ui.authentication {
                         OpenAiAuthentication::ApiKey => OpenAiAuthentication::Chatgpt,
                         OpenAiAuthentication::Chatgpt => OpenAiAuthentication::ApiKey,
@@ -195,7 +218,7 @@ fn run_loop(
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
-            KeyCode::Char('a') if ui.providers.len() < 2 => ui.begin_add(),
+            KeyCode::Char('a') if ui.providers.len() < 3 => ui.begin_add(),
             KeyCode::Char('e') | KeyCode::Enter => ui.begin_edit(),
             KeyCode::Char('d') => {
                 if let Some(provider) = ui.providers.get(ui.selected) {
@@ -251,6 +274,19 @@ fn save_provider(ui: &mut ProviderUi, store: &mut ProviderSettingsStore) {
                 authentication: ui.authentication,
                 reuse_existing: false,
             }
+        }
+        ProviderChoice::Anthropic => {
+            let authentication = match ui.authentication {
+                OpenAiAuthentication::ApiKey => AnthropicAuthentication::ApiKey,
+                OpenAiAuthentication::Chatgpt => AnthropicAuthentication::Subscription,
+            };
+            if authentication == AnthropicAuthentication::Subscription
+                && let Err(error) = authenticate_anthropic()
+            {
+                ui.error = Some(error.to_string());
+                return;
+            }
+            ConfiguredProvider::Anthropic { authentication }
         }
     };
     let result = if ui.existing {
@@ -316,19 +352,70 @@ fn authenticate_openai(authentication: OpenAiAuthentication, api_key: &str) -> R
     Ok(())
 }
 
+fn authenticate_anthropic() -> Result<()> {
+    let program = std::env::var_os("ARIADNE_CLAUDE_PATH").unwrap_or_else(|| "claude".into());
+    let mut command = Command::new(program);
+    command.env_clear().envs(claude_subscription_environment());
+    command
+        .args(["auth", "login", "--claudeai"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for name in CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS {
+        command.env_remove(name);
+    }
+    let status = wait_for_child(
+        command
+            .spawn()
+            .context("failed to start Claude subscription sign-in")?,
+        Duration::from_secs(300),
+    )?;
+    if !status.success() {
+        bail!("Claude subscription sign-in did not complete");
+    }
+    Ok(())
+}
+
+trait ChildProcess {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<ExitStatus>;
+}
+
+impl ChildProcess for Child {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        Child::try_wait(self)
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        Child::kill(self)
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        Child::wait(self)
+    }
+}
+
 fn wait_for_child(mut child: Child, timeout: Duration) -> Result<ExitStatus> {
+    wait_for_child_process(&mut child, timeout)
+}
+
+fn wait_for_child_process(child: &mut impl ChildProcess, timeout: Duration) -> Result<ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .context("failed to wait for OpenAI sign-in")?
-        {
-            return Ok(status);
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("failed to wait for provider sign-in");
+            }
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("OpenAI sign-in timed out");
+            bail!("provider sign-in timed out");
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -338,13 +425,17 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Min(4),
             Constraint::Length(2),
         ])
         .split(frame.area());
     frame.render_widget(
-        Paragraph::new("Ariadne Settings — Providers")
+        Paragraph::new(concat!(
+            "Ariadne Settings — Providers\n",
+            "Provider settings record credential readiness only.\n",
+            "Runtime provider/profile/model routing remains authoritative in ariadne.toml and loads at startup."
+        ))
             .style(
                 Style::default()
                     .fg(Color::LightMagenta)
@@ -354,9 +445,12 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
         chunks[0],
     );
     if ui.editing {
-        let authentication = match ui.authentication {
-            OpenAiAuthentication::ApiKey => "API key",
-            OpenAiAuthentication::Chatgpt => "ChatGPT subscription",
+        let authentication = match (ui.choice, ui.authentication) {
+            (_, OpenAiAuthentication::ApiKey) => "API key",
+            (ProviderChoice::Anthropic, OpenAiAuthentication::Chatgpt) => {
+                "Claude subscription / usage bundle"
+            }
+            (_, OpenAiAuthentication::Chatgpt) => "ChatGPT subscription",
         };
         let displayed = if ui.choice == ProviderChoice::OpenAi
             && ui.authentication == OpenAiAuthentication::ApiKey
@@ -367,7 +461,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
         };
         let text = Text::from(vec![
             Line::from(format!("Provider: {}  (←/→ to change)", ui.choice.title())),
-            Line::from(if ui.choice == ProviderChoice::OpenAi {
+            Line::from(if ui.choice != ProviderChoice::Ollama {
                 format!("Authentication: {authentication}  (Tab to change)")
             } else {
                 "Ollama API base URL:".to_owned()
@@ -400,6 +494,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
                     authentication: OpenAiAuthentication::Chatgpt,
                     ..
                 } => "ChatGPT subscription",
+                ConfiguredProvider::Anthropic { authentication } => match authentication {
+                    ariadne_config::AnthropicAuthentication::ApiKey => {
+                        "API key (configure via environment)"
+                    }
+                    ariadne_config::AnthropicAuthentication::Subscription => {
+                        "Claude subscription / usage bundle"
+                    }
+                },
             };
             ListItem::new(format!("{}  {detail}", provider_title(provider)))
         });
@@ -434,18 +536,22 @@ fn provider_title(provider: &ConfiguredProvider) -> &'static str {
     match provider {
         ConfiguredProvider::Ollama { .. } => "Ollama",
         ConfiguredProvider::OpenAi { .. } => "OpenAI",
+        ConfiguredProvider::Anthropic { .. } => "Anthropic",
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::process::ExitStatus;
     #[cfg(unix)]
     use std::process::{Command, Stdio};
     #[cfg(unix)]
     use std::time::{Duration, Instant};
 
-    use super::{ProviderUi, wait_for_child};
+    use super::{ChildProcess, ProviderUi, draw, wait_for_child, wait_for_child_process};
     use ariadne_config::ConfiguredProvider;
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[cfg(unix)]
     #[test]
@@ -465,6 +571,42 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
+    struct FailingChild {
+        kill_called: bool,
+        wait_called: bool,
+    }
+
+    impl ChildProcess for FailingChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Err(io::Error::other("synthetic wait failure"))
+        }
+
+        fn kill(&mut self) -> io::Result<()> {
+            self.kill_called = true;
+            Ok(())
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            self.wait_called = true;
+            Err(io::Error::other("synthetic reap failure"))
+        }
+    }
+
+    #[test]
+    fn provider_child_wait_error_kills_and_reaps_before_returning() {
+        let mut child = FailingChild {
+            kill_called: false,
+            wait_called: false,
+        };
+
+        let error = wait_for_child_process(&mut child, Duration::from_secs(1)).unwrap_err();
+
+        assert!(child.kill_called);
+        assert!(child.wait_called);
+        assert!(error.to_string().contains("provider sign-in"));
+        assert!(!error.to_string().contains("OpenAI"));
+    }
+
     #[test]
     fn provider_ui_starts_with_an_empty_list_and_can_prepare_both_provider_forms() {
         let mut ui = ProviderUi::new(Vec::new());
@@ -477,5 +619,23 @@ mod tests {
         });
         ui.begin_add();
         assert_eq!(ui.choice.id(), "openai");
+    }
+
+    #[test]
+    fn provider_ui_discloses_that_runtime_routing_comes_from_ariadne_config() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        let ui = ProviderUi::new(Vec::new());
+
+        terminal.draw(|frame| draw(frame, &ui)).unwrap();
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("credential readiness only"), "{screen}");
+        assert!(
+            screen.contains(
+                "Runtime provider/profile/model routing remains authoritative in ariadne.toml"
+            ),
+            "{screen}"
+        );
+        assert!(screen.contains("loads at startup"), "{screen}");
     }
 }

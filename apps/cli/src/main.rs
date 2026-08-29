@@ -9,6 +9,7 @@ use ariadne_config::{
     ProfileCatalog, ProviderKind, ProviderSettingsStore, ResolvedCapability, ResolvedProfile,
 };
 use ariadne_core::{Agent, AgentProfiles, ModelProvider, Tool};
+use ariadne_provider_anthropic::{AnthropicMessagesProvider, ClaudeCodeProvider};
 use ariadne_provider_openai::OpenAiCompatibleProvider;
 use ariadne_tools_command::{CommandConfig, CommandTool};
 use ariadne_tools_filesystem::{FileSystemConfig, FileSystemToolset};
@@ -260,8 +261,34 @@ fn configured_agent(profile: &ResolvedProfile, api_key_override: Option<String>)
                     )
                 })?,
         ),
+        ProviderKind::AnthropicMessages => Arc::new(
+            AnthropicMessagesProvider::with_base_url(
+                &profile.api_base,
+                &profile.profile.model,
+                api_key.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "profile `{}` requires an Anthropic API key",
+                        profile.profile.name
+                    )
+                })?,
+            )
+            .with_context(|| {
+                format!(
+                    "invalid Anthropic provider configuration for profile `{}`",
+                    profile.profile.name
+                )
+            })?,
+        ),
+        ProviderKind::ClaudeSubscription => Arc::new(ClaudeCodeProvider::new(
+            &profile.claude_program,
+            &profile.profile.model,
+        )),
     };
 
+    if profile.provider_kind == ProviderKind::ClaudeSubscription && !profile.capabilities.is_empty()
+    {
+        anyhow::bail!("Claude subscription profiles do not support Ariadne capabilities");
+    }
     let tools = configured_tools(profile)?;
     if tools.is_empty() {
         Ok(Agent::new(provider, profile.system_prompt.clone()))

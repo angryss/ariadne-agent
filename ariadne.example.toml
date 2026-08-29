@@ -12,6 +12,17 @@ kind = "openai-compatible"
 api_base = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
+[providers.anthropic-api]
+kind = "anthropic-messages"
+api_base = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+
+# Uses Claude Code's supported account-backed headless interface. Enable extra
+# usage / a usage bundle in Claude so work can continue after plan limits.
+[providers.claude-subscription]
+kind = "claude-subscription"
+claude_program = "claude"
+
 # Profiles select a provider and model and scope capability activation.
 [profiles.local]
 provider = "ollama"
@@ -27,6 +38,17 @@ system_prompt = "You are Ariadne, a careful AI software agent working in a profe
 active_skills = ["github", "code-review"]
 mcp_servers = ["github"]
 capabilities = ["workspace"]
+
+[profiles.anthropic]
+provider = "anthropic-api"
+model = "claude-sonnet-4-5"
+capabilities = ["workspace"]
+
+# Account-backed profiles intentionally cannot declare capabilities, skills,
+# or MCP servers; Claude Code runs headlessly with all internal tools disabled.
+[profiles.claude-account]
+provider = "claude-subscription"
+model = "sonnet"
 
 # Native capabilities execute in-process and are separate from skills and MCP servers.
 # Relative roots are resolved from Ariadne's process working directory.
