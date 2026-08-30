@@ -27,6 +27,12 @@ interface ThinkingMessage {
 
 type DisplayMessage = Message | ThinkingMessage;
 
+const PROVIDER_KINDS: readonly ConfiguredProvider['kind'][] = [
+  'anthropic',
+  'ollama',
+  'openai',
+];
+
 function conversationHistory(messages: DisplayMessage[]): Message[] {
   return messages.filter((message): message is Message => message.role !== 'thinking');
 }
@@ -487,7 +493,11 @@ export function App({ client }: AppProps) {
             <p className="settings-empty">No providers configured.</p>
           ) : (
             <div className="provider-list">
-              {providerSettings.map((provider) => (
+              {[...providerSettings]
+                .sort((left, right) =>
+                  providerTitle(left.kind).localeCompare(providerTitle(right.kind)),
+                )
+                .map((provider) => (
                 <article className="provider-card" key={provider.kind}>
                   <div>
                     <h3>{providerTitle(provider.kind)}</h3>
@@ -524,7 +534,7 @@ export function App({ client }: AppProps) {
                     </Button>
                   </div>
                 </article>
-              ))}
+                ))}
             </div>
           )}
           {editingProvider ? (
@@ -545,24 +555,15 @@ export function App({ client }: AppProps) {
                 }}
                 value={providerKind}
               >
-                <option
-                  disabled={providerSettings.some((provider) => provider.kind === 'ollama')}
-                  value="ollama"
-                >
-                  Ollama
-                </option>
-                <option
-                  disabled={providerSettings.some((provider) => provider.kind === 'openai')}
-                  value="openai"
-                >
-                  OpenAI
-                </option>
-                <option
-                  disabled={providerSettings.some((provider) => provider.kind === 'anthropic')}
-                  value="anthropic"
-                >
-                  Anthropic
-                </option>
+                {PROVIDER_KINDS.map((kind) => (
+                  <option
+                    disabled={providerSettings.some((provider) => provider.kind === kind)}
+                    key={kind}
+                    value={kind}
+                  >
+                    {providerTitle(kind)}
+                  </option>
+                ))}
               </select>
               {providerKind === 'ollama' ? (
                 <>

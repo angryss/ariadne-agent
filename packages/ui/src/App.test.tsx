@@ -420,6 +420,52 @@ describe('App', () => {
     expect(await screen.findByText('No providers configured.')).toBeInTheDocument();
   });
 
+  it('sorts configured providers alphabetically in settings', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders: vi.fn().mockResolvedValue([
+            { kind: 'openai' as const, authentication: 'chatgpt' as const },
+            { kind: 'ollama' as const, api_base: 'http://localhost:11434/v1' },
+            { kind: 'anthropic' as const, authentication: 'subscription' as const },
+          ]),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+
+    expect((await screen.findAllByRole('heading', { level: 3 })).map((heading) => heading.textContent)).toEqual([
+      'Anthropic',
+      'Ollama',
+      'OpenAI',
+    ]);
+  });
+
+  it('sorts provider types alphabetically in the add-provider dropdown', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders: vi.fn().mockResolvedValue([]),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+
+    const providerType = screen.getByLabelText('Provider type') as HTMLSelectElement;
+    expect(Array.from(providerType.options, (option) => option.text)).toEqual([
+      'Anthropic',
+      'Ollama',
+      'OpenAI',
+    ]);
+  });
+
   it('adds OpenAI with either an API key or ChatGPT subscription', async () => {
     const createProvider = vi.fn().mockImplementation(async (provider) => provider);
     const user = userEvent.setup();
