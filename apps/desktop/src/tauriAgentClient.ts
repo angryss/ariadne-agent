@@ -39,6 +39,26 @@ export class TauriAgentClient implements AgentClient {
     return profiles;
   }
 
+  async createProfile(profile: Profile): Promise<Profile> {
+    const saved = await this.invoke('create_profile', { profile });
+    if (!isProfile(saved)) {
+      throw new Error('Rynna desktop returned invalid profile data');
+    }
+    return saved;
+  }
+
+  async updateProfile(name: string, profile: Profile): Promise<Profile> {
+    const saved = await this.invoke('update_profile', { name, profile });
+    if (!isProfile(saved)) {
+      throw new Error('Rynna desktop returned invalid profile data');
+    }
+    return saved;
+  }
+
+  async deleteProfile(name: string): Promise<void> {
+    await this.invoke('delete_profile', { name });
+  }
+
   async getOpenAiAccount(): Promise<OpenAiAccount> {
     const account = await this.invoke('openai_account', {});
     if (!isOpenAiAccount(account)) {

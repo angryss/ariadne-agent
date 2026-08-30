@@ -533,7 +533,7 @@ pub enum ProviderSettingsError {
     ConfigDirectoryUnavailable,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ProviderKind {
     #[serde(rename = "openai-compatible")]
     OpenAiCompatible,
@@ -584,6 +584,7 @@ pub struct FileSystemCapability {
 
 #[derive(Clone, Debug)]
 pub struct ProfileCatalog {
+    path: Option<PathBuf>,
     default_profile: String,
     providers: BTreeMap<String, ProviderConfig>,
     profiles: BTreeMap<String, ProfileConfig>,
@@ -594,6 +595,7 @@ pub struct ProfileCatalog {
 impl ProfileCatalog {
     pub fn built_in() -> Self {
         Self {
+            path: None,
             default_profile: DEFAULT_PROFILE.to_owned(),
             providers: BTreeMap::from([(
                 DEFAULT_PROVIDER.to_owned(),
@@ -631,7 +633,9 @@ impl ProfileCatalog {
             path: path.to_owned(),
             source,
         })?;
-        Self::from_toml(&source)
+        let mut catalog = Self::from_toml(&source)?;
+        catalog.path = Some(path.to_owned());
+        Ok(catalog)
     }
 
     pub fn default_path() -> Result<PathBuf, ConfigError> {
@@ -648,7 +652,11 @@ impl ProfileCatalog {
     fn load_default_from(path: &Path) -> Result<Self, ConfigError> {
         match path.try_exists() {
             Ok(true) => Self::load(path),
-            Ok(false) => Ok(Self::built_in()),
+            Ok(false) => {
+                let mut catalog = Self::built_in();
+                catalog.path = Some(path.to_owned());
+                Ok(catalog)
+            }
             Err(source) => Err(ConfigError::Inspect {
                 path: path.to_owned(),
                 source,
@@ -658,6 +666,127 @@ impl ProfileCatalog {
 
     pub fn default_profile(&self) -> &str {
         &self.default_profile
+    }
+
+    pub fn add_profile(&mut self, profile: Profile) -> Result<Profile, ConfigError> {
+        if self.profiles.contains_key(&profile.name) {
+            return Err(ConfigError::DuplicateProfile(profile.name));
+        }
+        self.write_profile(None, profile)
+    }
+
+    pub fn update_profile(
+        &mut self,
+        original_name: &str,
+        profile: Profile,
+    ) -> Result<Profile, ConfigError> {
+        if !self.profiles.contains_key(original_name) {
+            return Err(ConfigError::UnknownProfile(original_name.to_owned()));
+        }
+        if profile.name != original_name && self.profiles.contains_key(&profile.name) {
+            return Err(ConfigError::DuplicateProfile(profile.name));
+        }
+        self.write_profile(Some(original_name), profile)
+    }
+
+    pub fn delete_profile(&mut self, name: &str) -> Result<(), ConfigError> {
+        if !self.profiles.contains_key(name) {
+            return Err(ConfigError::UnknownProfile(name.to_owned()));
+        }
+        if self.profiles.len() <= 1 {
+            return Err(ConfigError::LastProfile);
+        }
+        let mut file = self.to_file();
+        file.profiles.remove(name);
+        if file.default_profile == name {
+            file.default_profile = file
+                .profiles
+                .keys()
+                .next()
+                .cloned()
+                .expect("a remaining profile exists");
+        }
+        self.apply_file(file)?;
+        self.save()
+    }
+
+    fn write_profile(
+        &mut self,
+        original_name: Option<&str>,
+        profile: Profile,
+    ) -> Result<Profile, ConfigError> {
+        let mut file = self.to_file();
+        let system_prompt = original_name
+            .and_then(|name| file.profiles.get(name))
+            .and_then(|existing| existing.system_prompt.clone());
+        if let Some(name) = original_name {
+            file.profiles.remove(name);
+            if file.default_profile == name {
+                file.default_profile = profile.name.clone();
+            }
+        }
+        file.profiles.insert(
+            profile.name.clone(),
+            ProfileConfig {
+                provider: profile.provider.clone(),
+                model: profile.model.clone(),
+                system_prompt,
+                active_skills: profile.active_skills.clone(),
+                mcp_servers: profile.mcp_servers.clone(),
+                capabilities: profile.capabilities.clone(),
+            },
+        );
+        self.apply_file(file)?;
+        self.save()?;
+        Ok(profile)
+    }
+
+    fn apply_file(&mut self, file: ConfigFile) -> Result<(), ConfigError> {
+        let path = self.path.clone();
+        *self = Self::from_file(file)?;
+        self.path = path;
+        Ok(())
+    }
+
+    fn to_file(&self) -> ConfigFile {
+        ConfigFile {
+            version: CONFIG_VERSION,
+            default_profile: self.default_profile.clone(),
+            providers: self.providers.clone(),
+            profiles: self.profiles.clone(),
+            mcp_servers: self.mcp_servers.clone(),
+            capabilities: self.capabilities.clone(),
+        }
+    }
+
+    fn save(&self) -> Result<(), ConfigError> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let parent = path.parent().ok_or_else(|| ConfigError::Write {
+            path: path.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "configuration path has no parent directory",
+            ),
+        })?;
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        let encoded = toml::to_string_pretty(&self.to_file())?;
+        let temporary =
+            write_private_temporary_file(path, encoded.as_bytes()).map_err(|source| {
+                ConfigError::Write {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+        let _temporary_cleanup = TemporaryFileCleanup(temporary.clone());
+        replace_file(&temporary, path).map_err(|source| ConfigError::Write {
+            path: path.clone(),
+            source,
+        })
     }
 
     pub fn resolve_all(&self) -> Result<Vec<ResolvedProfile>, ConfigError> {
@@ -855,6 +984,7 @@ impl ProfileCatalog {
         }
 
         Ok(Self {
+            path: None,
             default_profile: file.default_profile,
             providers: file.providers,
             profiles: file.profiles,
@@ -864,25 +994,26 @@ impl ProfileCatalog {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
     version: u32,
     default_profile: String,
     providers: BTreeMap<String, ProviderConfig>,
     profiles: BTreeMap<String, ProfileConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     mcp_servers: BTreeMap<String, toml::Table>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     capabilities: BTreeMap<String, CapabilityConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProviderConfig {
     kind: ProviderKind,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     api_base: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     api_key_env: Option<String>,
     #[serde(default = "default_claude_program")]
     claude_program: PathBuf,
@@ -892,21 +1023,22 @@ fn default_claude_program() -> PathBuf {
     PathBuf::from("claude")
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileConfig {
     provider: String,
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     system_prompt: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     active_skills: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     mcp_servers: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     capabilities: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 enum CapabilityConfig {
     #[serde(rename = "filesystem")]
@@ -915,7 +1047,7 @@ enum CapabilityConfig {
     Command(CommandCapabilityConfig),
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CommandCapabilityConfig {
     working_directory: PathBuf,
@@ -935,7 +1067,7 @@ impl From<CommandCapabilityConfig> for CommandCapability {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct FileSystemCapabilityConfig {
     root: PathBuf,
@@ -971,6 +1103,10 @@ impl From<FileSystemCapabilityConfig> for FileSystemCapability {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("profile `{0}` is defined more than once")]
+    DuplicateProfile(String),
+    #[error("the last profile cannot be deleted")]
+    LastProfile,
     #[error("Rynna configuration is not valid TOML: {0}")]
     Parse(#[from] toml::de::Error),
     #[error("Rynna configuration version {0} is not supported")]
@@ -1030,6 +1166,13 @@ pub enum ConfigError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("failed to write Rynna configuration at {}: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to encode Rynna configuration: {0}")]
+    Encode(#[from] toml::ser::Error),
     #[error("the platform configuration directory is unavailable")]
     ConfigDirectoryUnavailable,
 }

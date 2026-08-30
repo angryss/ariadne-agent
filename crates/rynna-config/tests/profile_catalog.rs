@@ -2,6 +2,7 @@ use rynna_config::{
     AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
     ProviderKind, ProviderSettingsStore, ResolvedCapability, secure_private_directory,
 };
+use rynna_core::Profile;
 
 #[test]
 fn parses_anthropic_api_and_subscription_profiles() {
@@ -756,4 +757,78 @@ fn provider_settings_support_a_bare_relative_filename() {
     );
     std::fs::remove_file(file_name).unwrap();
     std::fs::remove_file(lock_name).unwrap();
+}
+
+fn editable_profile(name: &str, model: &str) -> Profile {
+    Profile {
+        name: name.to_owned(),
+        provider: "ollama".to_owned(),
+        model: model.to_owned(),
+        active_skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        capabilities: Vec::new(),
+    }
+}
+
+#[test]
+fn adds_updates_and_deletes_profiles_and_persists_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+    catalog
+        .add_profile(editable_profile("zeta", "gpt-5"))
+        .unwrap();
+    catalog
+        .update_profile("zeta", editable_profile("work", "gpt-5.2"))
+        .unwrap();
+    catalog.delete_profile("work").unwrap();
+
+    let reloaded = ProfileCatalog::load(&path).unwrap();
+    let names: Vec<_> = reloaded
+        .resolve_all()
+        .unwrap()
+        .into_iter()
+        .map(|profile| profile.profile.name)
+        .collect();
+    assert_eq!(names, vec!["alpha".to_owned()]);
+    assert_eq!(reloaded.resolve("alpha").unwrap().profile.model, "qwen3:8b");
+}
+
+#[test]
+fn rejects_deleting_the_last_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+    let error = catalog.delete_profile("alpha").unwrap_err();
+    assert!(error.to_string().contains("last profile"));
 }

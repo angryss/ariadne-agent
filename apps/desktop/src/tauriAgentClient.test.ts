@@ -63,6 +63,34 @@ describe('TauriAgentClient', () => {
     expect(profiles.profiles[0]!.mcp_servers).toEqual(['filesystem']);
   });
 
+  it('uses narrow commands for profile CRUD', async () => {
+    const profile = {
+      name: 'work',
+      provider: 'openai',
+      model: 'gpt-5',
+      active_skills: [],
+      mcp_servers: [],
+      capabilities: [],
+    };
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce(profile)
+      .mockResolvedValueOnce({ ...profile, model: 'gpt-5.2' })
+      .mockResolvedValueOnce(undefined);
+    const client = new TauriAgentClient(invoke);
+
+    await client.createProfile(profile);
+    await client.updateProfile('work', { ...profile, model: 'gpt-5.2' });
+    await client.deleteProfile('work');
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'create_profile', { profile });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'update_profile', {
+      name: 'work',
+      profile: { ...profile, model: 'gpt-5.2' },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, 'delete_profile', { name: 'work' });
+  });
+
   it('uses narrow commands for OpenAI account status and login', async () => {
     const invoke = vi
       .fn()

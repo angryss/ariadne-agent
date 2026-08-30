@@ -889,6 +889,10 @@ pub enum ProfileError {
     Duplicate(String),
     #[error("default profile `{0}` is not defined")]
     UnknownDefault(String),
+    #[error("profile `{0}` is not defined")]
+    UnknownProfile(String),
+    #[error("the last profile cannot be deleted")]
+    LastProfile,
 }
 
 #[derive(Debug, Error)]
@@ -940,6 +944,62 @@ impl AgentProfiles {
             .values()
             .map(|(profile, _)| profile.clone())
             .collect()
+    }
+
+    pub fn clone_agent(&self, name: &str) -> Option<Agent> {
+        self.profiles.get(name).map(|(_, agent)| agent.clone())
+    }
+
+    pub fn clone_agent_for_provider(&self, provider: &str) -> Option<Agent> {
+        self.profiles
+            .values()
+            .find(|(profile, _)| profile.provider == provider)
+            .map(|(_, agent)| agent.clone())
+            .or_else(|| {
+                self.profiles
+                    .get(self.default_profile.as_ref())
+                    .map(|(_, agent)| agent.clone())
+            })
+    }
+
+    pub fn upsert(&mut self, profile: Profile, agent: Agent) -> Result<(), ProfileError> {
+        if profile.name.trim().is_empty() {
+            return Err(ProfileError::BlankName);
+        }
+        let mut indexed = (*self.profiles).clone();
+        indexed.insert(profile.name.clone(), (profile, agent));
+        self.profiles = Arc::new(indexed);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, name: &str) -> Result<Profile, ProfileError> {
+        if !self.profiles.contains_key(name) {
+            return Err(ProfileError::UnknownProfile(name.to_owned()));
+        }
+        if self.profiles.len() <= 1 {
+            return Err(ProfileError::LastProfile);
+        }
+        let mut indexed = (*self.profiles).clone();
+        let (profile, _) = indexed.remove(name).expect("profile exists");
+        if self.default_profile.as_ref() == name {
+            self.default_profile = indexed
+                .keys()
+                .next()
+                .cloned()
+                .expect("a remaining profile exists")
+                .into();
+        }
+        self.profiles = Arc::new(indexed);
+        Ok(profile)
+    }
+
+    pub fn set_default(&mut self, name: impl Into<String>) -> Result<(), ProfileError> {
+        let name = name.into();
+        if !self.profiles.contains_key(&name) {
+            return Err(ProfileError::UnknownDefault(name));
+        }
+        self.default_profile = name.into();
+        Ok(())
     }
 
     pub async fn respond(

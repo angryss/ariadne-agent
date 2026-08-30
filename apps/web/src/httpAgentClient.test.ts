@@ -105,6 +105,31 @@ describe('HttpAgentClient', () => {
     expect(profiles.profiles[0]!.active_skills).toEqual(['rust']);
   });
 
+  it('creates updates and deletes profiles through the profiles API', async () => {
+    const profile = {
+      name: 'work',
+      provider: 'openai',
+      model: 'gpt-5',
+      active_skills: [],
+      mcp_servers: [],
+      capabilities: [],
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(profile))
+      .mockResolvedValueOnce(jsonResponse({ ...profile, model: 'gpt-5.2' }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new HttpAgentClient('/v1/respond', fetcher);
+
+    await client.createProfile(profile);
+    await client.updateProfile('work', { ...profile, model: 'gpt-5.2' });
+    await client.deleteProfile('work');
+
+    expect(fetcher).toHaveBeenNthCalledWith(1, '/v1/profiles', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenNthCalledWith(2, '/v1/profiles/work', expect.objectContaining({ method: 'PUT' }));
+    expect(fetcher).toHaveBeenNthCalledWith(3, '/v1/profiles/work', expect.objectContaining({ method: 'DELETE' }));
+  });
+
   it('lists and mutates provider settings through the providers API', async () => {
     const fetcher = vi
       .fn()

@@ -58,6 +58,9 @@ export type ProviderInput =
 export interface AgentClient {
   respond(request: RespondRequest, onDelta?: CompletionDeltaHandler): Promise<RespondResponse>;
   listProfiles?(): Promise<ProfileCatalog>;
+  createProfile?(profile: Profile): Promise<Profile>;
+  updateProfile?(name: string, profile: Profile): Promise<Profile>;
+  deleteProfile?(name: string): Promise<void>;
   getOpenAiAccount?(): Promise<OpenAiAccount>;
   getExistingOpenAiAccount?(): Promise<OpenAiAccount>;
   connectOpenAi?(request: ConnectOpenAiRequest): Promise<OpenAiAccount>;
