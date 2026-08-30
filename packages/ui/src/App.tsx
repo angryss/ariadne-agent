@@ -1,5 +1,10 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
+import { ThemeToggle } from './components/theme-toggle';
+import { Badge } from './components/ui/badge';
+import { Button } from './components/ui/button';
+import { Input } from './components/ui/input';
+import { Textarea } from './components/ui/textarea';
 import type {
   AgentClient,
   CompletionDelta,
@@ -383,23 +388,24 @@ export function App({ client }: AppProps) {
             </label>
           ) : null}
           {client.connectOpenAi ? (
-            <button
+            <Button
               className="account-button"
               onClick={() => {
                 if (showOpenAi) setApiKey('');
                 setShowOpenAi(!showOpenAi);
               }}
               type="button"
+              variant="outline"
             >
               {openAiAccount?.connected
                 ? openAiAccount.method === 'chatgpt'
                   ? `Connected with ChatGPT${openAiAccount.plan ? ` ${formatPlan(openAiAccount.plan)}` : ''}`
                   : 'Connected with API key'
                 : 'Connect OpenAI'}
-            </button>
+            </Button>
           ) : null}
           {client.listProviders ? (
-            <button
+            <Button
               className="account-button"
               onClick={() => {
                 setView(view === 'settings' ? 'chat' : 'settings');
@@ -407,54 +413,57 @@ export function App({ client }: AppProps) {
                 setError(null);
               }}
               type="button"
+              variant="outline"
             >
               {view === 'settings' ? 'Back to chat' : 'Settings'}
-            </button>
+            </Button>
           ) : null}
+          <ThemeToggle />
           <span className="status"><span aria-hidden="true" /> Ready</span>
         </div>
       </header>
 
       {view === 'chat' && showOpenAi && client.connectOpenAi ? (
         <section className="account-panel" aria-label="Connect OpenAI">
-          <button
+          <Button
             disabled={connectingOpenAi}
             onClick={() => void connectOpenAi('chatgpt')}
             type="button"
+            variant="secondary"
           >
             {connectingOpenAi ? 'Connecting…' : 'Use ChatGPT subscription'}
-          </button>
+          </Button>
           <span>or</span>
           <label htmlFor="openai-api-key">OpenAI API key</label>
-          <input
+          <Input
             autoComplete="off"
             id="openai-api-key"
             onChange={(event) => setApiKey(event.target.value)}
             type="password"
             value={apiKey}
           />
-          <button
+          <Button
             disabled={connectingOpenAi || !apiKey.trim()}
             onClick={() => void connectOpenAi('api_key')}
             type="button"
           >
             Save API key
-          </button>
+          </Button>
         </section>
       ) : null}
 
       {view === 'chat' && activeProfile ? (
         <aside className="profile-summary" aria-label="Active profile">
           <strong>{activeProfile.model}</strong>
-          <span>{activeProfile.provider}</span>
+          <Badge>{activeProfile.provider}</Badge>
           {activeProfile.active_skills.map((skill) => (
-            <span key={`skill-${skill}`}>{skill} skill</span>
+            <Badge key={`skill-${skill}`}>{skill} skill</Badge>
           ))}
           {activeProfile.mcp_servers.map((server) => (
-            <span key={`mcp-${server}`}>{server} MCP</span>
+            <Badge key={`mcp-${server}`}>{server} MCP</Badge>
           ))}
           {activeProfile.capabilities.map((capability) => (
-            <span key={`capability-${capability}`}>{capability} capability</span>
+            <Badge key={`capability-${capability}`}>{capability} capability</Badge>
           ))}
         </aside>
       ) : null}
@@ -466,9 +475,9 @@ export function App({ client }: AppProps) {
               <p className="eyebrow">Settings</p>
               <h2>Providers</h2>
             </div>
-            <button disabled={providerSettings.length >= 3} onClick={beginAddProvider} type="button">
+            <Button disabled={providerSettings.length >= 3} onClick={beginAddProvider} type="button">
               Add provider
-            </button>
+            </Button>
           </div>
           <p>
             Provider credentials are stored here; runtime profiles and models load from rynna.toml
@@ -495,20 +504,24 @@ export function App({ client }: AppProps) {
                     </p>
                   </div>
                   <div className="provider-actions">
-                    <button
+                    <Button
                       aria-label={`Edit ${providerTitle(provider.kind)}`}
                       onClick={() => beginEditProvider(provider)}
+                      size="sm"
                       type="button"
+                      variant="outline"
                     >
                       Edit
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       aria-label={`Delete ${providerTitle(provider.kind)}`}
                       onClick={() => void removeProvider(provider.kind)}
+                      size="sm"
                       type="button"
+                      variant="ghost"
                     >
                       Delete
-                    </button>
+                    </Button>
                   </div>
                 </article>
               ))}
@@ -554,7 +567,7 @@ export function App({ client }: AppProps) {
               {providerKind === 'ollama' ? (
                 <>
                   <label htmlFor="ollama-api-base">Ollama API base URL</label>
-                  <input
+                  <Input
                     id="ollama-api-base"
                     onChange={(event) => setOllamaApiBase(event.target.value)}
                     required
@@ -579,7 +592,7 @@ export function App({ client }: AppProps) {
                   {openAiAuthentication === 'api_key' ? (
                     <>
                       <label htmlFor="provider-openai-api-key">OpenAI API key</label>
-                      <input
+                      <Input
                         autoComplete="off"
                         id="provider-openai-api-key"
                         onChange={(event) => setProviderApiKey(event.target.value)}
@@ -598,20 +611,22 @@ export function App({ client }: AppProps) {
                         different account for Rynna.
                       </p>
                       <div className="provider-actions">
-                        <button
+                        <Button
                           aria-pressed={reuseExistingChatgpt === true}
                           onClick={() => setReuseExistingChatgpt(true)}
                           type="button"
+                          variant="outline"
                         >
                           Use existing credentials
-                        </button>
-                        <button
+                        </Button>
+                        <Button
                           aria-pressed={reuseExistingChatgpt === false}
                           onClick={() => setReuseExistingChatgpt(false)}
                           type="button"
+                          variant="outline"
                         >
                           Register new credentials
-                        </button>
+                        </Button>
                       </div>
                       {reuseExistingChatgpt === false ? (
                         <p>A browser window will open so you can sign in to ChatGPT.</p>
@@ -642,7 +657,7 @@ export function App({ client }: AppProps) {
                 </>
               )}
               <div className="provider-actions">
-                <button
+                <Button
                   disabled={
                     savingProvider ||
                     (providerKind === 'openai' &&
@@ -655,17 +670,18 @@ export function App({ client }: AppProps) {
                   type="submit"
                 >
                   Save provider
-                </button>
-                <button
+                </Button>
+                <Button
                   onClick={() => {
                     setEditingProvider(null);
                     setReuseExistingChatgpt(null);
                     setProviderApiKey('');
                   }}
                   type="button"
+                  variant="ghost"
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             </form>
           ) : null}
@@ -716,7 +732,7 @@ export function App({ client }: AppProps) {
         <form className="composer" onSubmit={submit}>
           <label htmlFor="prompt">Message Rynna</label>
           <div className="composer-row">
-            <textarea
+            <Textarea
               id="prompt"
               name="prompt"
               value={input}
@@ -737,9 +753,9 @@ export function App({ client }: AppProps) {
               placeholder="Describe the task, constraints, and desired outcome…"
               rows={3}
             />
-            <button disabled={pending || !input.trim()} type="submit">
+            <Button disabled={pending || !input.trim()} type="submit">
               {pending ? 'Working…' : 'Send'}
-            </button>
+            </Button>
           </div>
         </form>
       </section> : null}
