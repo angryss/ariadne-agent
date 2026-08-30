@@ -6,6 +6,28 @@ import { App } from './App';
 import type { AgentClient } from './contracts';
 
 describe('App', () => {
+  it('switches between dark and light themes and remembers the selection', async () => {
+    const values = new Map<string, string>();
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+      },
+    });
+    window.localStorage.setItem('rynna-theme', 'dark');
+    const user = userEvent.setup();
+    render(<App client={{ respond: vi.fn() }} />);
+
+    expect(document.documentElement).toHaveClass('dark');
+    await user.click(screen.getByRole('button', { name: 'Switch to light theme' }));
+
+    expect(document.documentElement).not.toHaveClass('dark');
+    expect(document.documentElement).toHaveClass('light');
+    expect(window.localStorage.getItem('rynna-theme')).toBe('light');
+    expect(screen.getByRole('button', { name: 'Switch to dark theme' })).toBeInTheDocument();
+  });
+
   it('sends a prompt through the injected client and renders the reply', async () => {
     const client: AgentClient = {
       respond: vi.fn().mockResolvedValue({
