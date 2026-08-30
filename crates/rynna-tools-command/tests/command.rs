@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
@@ -10,8 +11,13 @@ use serde_json::json;
 
 fn executable(directory: &tempfile::TempDir, name: &str, source: &str) -> std::path::PathBuf {
     let program = directory.path().join(name);
-    std::fs::write(&program, source).unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut fixture = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+    fixture.write_all(source.as_bytes()).unwrap();
+    fixture
+        .as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .unwrap();
+    drop(fixture.persist(&program).unwrap());
     program
 }
 

@@ -161,36 +161,13 @@ async fn desktop_stream_command_forwards_typed_deltas() {
 #[cfg(unix)]
 #[tokio::test]
 async fn desktop_openai_commands_use_codex_managed_credentials_without_echoing_keys() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let directory = tempfile::tempdir().unwrap();
-    let program = directory.path().join("fake-codex");
-    std::fs::write(
-        &program,
-        r#"#!/bin/sh
-if [ "$1" = "login" ] && [ "$2" = "--with-api-key" ]; then
-  IFS= read -r key
-  [ "$key" = "sk-test-secret" ]
-  exit $?
-fi
-if [ "$1" = "app-server" ]; then
-  IFS= read -r initialize
-  printf '%s\n' '{"id":1,"result":{"userAgent":"fake"}}'
-  IFS= read -r initialized
-  IFS= read -r account
-  printf '%s\n' '{"id":2,"result":{"account":{"type":"apiKey"},"requiresOpenaiAuth":true}}'
-  exit 0
-fi
-exit 2
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let program =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_codex_auth.sh");
 
     let connected = connect_openai_with_program(
         &program,
         OpenAiConnectRequest::ApiKey {
-            api_key: "sk-test-secret".to_owned(),
+            api_key: "test-credential".to_owned(),
         },
     )
     .await
