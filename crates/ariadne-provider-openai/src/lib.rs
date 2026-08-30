@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ariadne_core::{
-    CacheOptimizer, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
-    PrefixCacheOptimizer, ProviderError, Role, ToolCall, ToolDefinition,
+    CacheOptimizer, Completion, CompletionDelta, CompletionRequest, ContextPlan, Message,
+    ModelProvider, PrefixCacheOptimizer, ProviderContext, ProviderError, Role, ServerCompaction,
+    ToolCall, ToolDefinition,
 };
 use async_trait::async_trait;
 use reqwest::{Client, Url};
@@ -19,6 +20,7 @@ const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 pub struct OpenAiCompatibleProvider {
     client: Client,
     completion_url: Url,
+    responses_url: Url,
     model: String,
     api_key: Option<String>,
     cache_technology: CacheTechnology,
@@ -76,6 +78,11 @@ impl OpenAiCompatibleProvider {
         );
         let completion_url = Url::parse(&endpoint)
             .map_err(|error| ProviderConfigError::InvalidBaseUrl(error.to_string()))?;
+        let responses_url = Url::parse(&format!(
+            "{}/responses",
+            base_url.as_ref().trim_end_matches('/')
+        ))
+        .map_err(|error| ProviderConfigError::InvalidBaseUrl(error.to_string()))?;
         let api_key = api_key.filter(|key| !key.trim().is_empty());
         if !completion_url.username().is_empty() || completion_url.password().is_some() {
             return Err(ProviderConfigError::EmbeddedCredentials);
@@ -97,6 +104,7 @@ impl OpenAiCompatibleProvider {
         Ok(Self {
             client,
             completion_url,
+            responses_url,
             model,
             api_key,
             cache_technology,
@@ -272,6 +280,56 @@ struct PendingToolCall {
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
+    fn server_compaction(&self) -> Option<ServerCompaction> {
+        (self.cache_technology == CacheTechnology::OpenAi).then_some(ServerCompaction::OpenAi)
+    }
+
+    async fn complete_managed(&self, plan: ContextPlan) -> Result<Completion, ProviderError> {
+        let has_continuation = has_openai_context(&plan.request);
+        if self.server_compaction().is_none()
+            || (plan.server_compaction_threshold.is_none() && !has_continuation)
+        {
+            return self.complete(plan.request).await;
+        }
+        let payload =
+            responses_request(&self.model, plan.request, plan.server_compaction_threshold)?;
+        let mut request_builder = self.client.post(self.responses_url.clone()).json(&payload);
+        if let Some(api_key) = &self.api_key {
+            request_builder = request_builder.bearer_auth(api_key);
+        }
+        let response = request_builder
+            .send()
+            .await
+            .map_err(|error| ProviderError::new(format!("request failed: {error}")))?;
+        let status = response.status();
+        let body = read_response_body(response).await?;
+        if !status.is_success() {
+            return Err(ProviderError::new(format!(
+                "provider returned {status}: {}",
+                truncate(&String::from_utf8_lossy(&body), MAX_ERROR_BODY_CHARS)
+            )));
+        }
+        response_completion(&body)
+    }
+
+    async fn complete_stream_managed(
+        &self,
+        plan: ContextPlan,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+    ) -> Result<Completion, ProviderError> {
+        if plan.server_compaction_threshold.is_some() || has_openai_context(&plan.request) {
+            let completion = self.complete_managed(plan).await?;
+            if !completion.message.content.is_empty() {
+                on_delta(&CompletionDelta::Content(
+                    completion.message.content.clone(),
+                ));
+            }
+            Ok(completion)
+        } else {
+            self.complete_stream(plan.request, on_delta).await
+        }
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
         let cache = self.cache_optimizer.optimize(&request);
         let cache_key = (self.cache_technology == CacheTechnology::OpenAi
@@ -390,6 +448,149 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 }
 
+fn responses_request(
+    model: &str,
+    request: CompletionRequest,
+    compact_threshold: Option<usize>,
+) -> Result<serde_json::Value, ProviderError> {
+    let mut input = Vec::new();
+    for message in request.messages {
+        if let Some(ProviderContext::OpenAi(output)) = message.provider_context {
+            validate_openai_output(&output)?;
+            if let Some(compaction_index) = output
+                .iter()
+                .rposition(|item| item["type"].as_str() == Some("compaction"))
+            {
+                input.clear();
+                input.extend(output.into_iter().skip(compaction_index));
+            } else {
+                input.extend(output);
+            }
+            continue;
+        }
+        if message.role != Role::Tool && !message.content.is_empty() {
+            input.push(serde_json::json!({
+                "role": message.role,
+                "content": message.content,
+            }));
+        }
+        for call in message.tool_calls {
+            input.push(serde_json::json!({
+                "type": "function_call",
+                "call_id": call.id,
+                "name": call.name,
+                "arguments": call.arguments.to_string(),
+            }));
+        }
+        if message.role == Role::Tool {
+            let call_id = message
+                .tool_call_id
+                .ok_or_else(|| ProviderError::new("tool result is missing its tool-call id"))?;
+            input.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": message.content,
+            }));
+        }
+    }
+    let tools = request
+        .tools
+        .into_iter()
+        .map(|tool| {
+            serde_json::json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut payload = serde_json::json!({
+        "model": model,
+        "input": input,
+        "include": ["reasoning.encrypted_content"],
+        "store": false,
+    });
+    if let Some(compact_threshold) = compact_threshold {
+        payload["context_management"] = serde_json::json!([{
+            "type": "compaction",
+            "compact_threshold": compact_threshold,
+        }]);
+    }
+    if !tools.is_empty() {
+        payload["tools"] = serde_json::Value::Array(tools);
+    }
+    Ok(payload)
+}
+
+fn response_completion(body: &[u8]) -> Result<Completion, ProviderError> {
+    let response: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| ProviderError::new(format!("invalid provider response: {error}")))?;
+    let output = response["output"]
+        .as_array()
+        .ok_or_else(|| ProviderError::new("provider response is missing output"))?;
+    let mut content = String::new();
+    let mut tool_calls = Vec::new();
+    for item in output {
+        match item["type"].as_str() {
+            Some("message") if item["role"].as_str() == Some("assistant") => {
+                if let Some(parts) = item["content"].as_array() {
+                    for part in parts {
+                        if part["type"].as_str() == Some("output_text") {
+                            content.push_str(part["text"].as_str().unwrap_or_default());
+                        }
+                    }
+                }
+            }
+            Some("function_call") => {
+                let id = item["call_id"]
+                    .as_str()
+                    .ok_or_else(|| ProviderError::new("function call is missing call_id"))?;
+                let name = item["name"]
+                    .as_str()
+                    .ok_or_else(|| ProviderError::new("function call is missing name"))?;
+                let arguments = item["arguments"]
+                    .as_str()
+                    .ok_or_else(|| ProviderError::new("function call is missing arguments"))?;
+                let arguments = serde_json::from_str(arguments).map_err(|error| {
+                    ProviderError::new(format!("invalid tool-call arguments: {error}"))
+                })?;
+                tool_calls.push(ToolCall::new(id, name, arguments));
+            }
+            _ => {}
+        }
+    }
+    Ok(Completion::new(Message {
+        role: Role::Assistant,
+        content,
+        tool_calls,
+        tool_call_id: None,
+        provider_context: Some(ProviderContext::OpenAi(output.clone())),
+    }))
+}
+
+fn has_openai_context(request: &CompletionRequest) -> bool {
+    request
+        .messages
+        .iter()
+        .any(|message| matches!(message.provider_context, Some(ProviderContext::OpenAi(_))))
+}
+
+fn validate_openai_output(output: &[serde_json::Value]) -> Result<(), ProviderError> {
+    for item in output {
+        match item["type"].as_str() {
+            Some("compaction" | "reasoning" | "function_call") => {}
+            Some("message") if item["role"].as_str() == Some("assistant") => {}
+            _ => {
+                return Err(ProviderError::new(
+                    "stored OpenAI context contains an unsupported output item",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn chat_completion_request(
     model: &str,
     request: CompletionRequest,
@@ -462,6 +663,7 @@ fn response_message(message: OpenAiResponseMessage) -> Result<Message, ProviderE
         content: message.content.unwrap_or_default(),
         tool_calls,
         tool_call_id: None,
+        provider_context: None,
     })
 }
 
@@ -486,6 +688,7 @@ fn stream_message(
         content,
         tool_calls,
         tool_call_id: None,
+        provider_context: None,
     })
 }
 
@@ -631,6 +834,7 @@ mod tests {
         let provider = OpenAiCompatibleProvider {
             client: build_http_client(Duration::from_millis(70)).unwrap(),
             completion_url: Url::parse(&format!("http://{address}/v1/chat/completions")).unwrap(),
+            responses_url: Url::parse(&format!("http://{address}/v1/responses")).unwrap(),
             model: "test-model".to_owned(),
             api_key: None,
             cache_technology: super::CacheTechnology::Generic,

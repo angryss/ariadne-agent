@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use ariadne_core::{
-    CacheOptimization, CacheOptimizer, CompletionDelta, CompletionRequest, Message, ModelProvider,
-    ToolCall, ToolDefinition,
+    CacheOptimization, CacheOptimizer, CompletionDelta, CompletionRequest, ContextPlan,
+    ContextSize, Message, ModelProvider, ProviderContext, ServerCompaction, ToolCall,
+    ToolDefinition,
 };
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
@@ -126,6 +127,228 @@ async fn ollama_requests_use_the_cache_friendly_openai_compatible_shape() {
         completion.message,
         Message::assistant("Hello from the model")
     );
+}
+
+#[tokio::test]
+async fn openai_uses_responses_server_side_compaction_for_managed_context() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(body_json(json!({
+            "model": "test-model",
+            "input": [
+                {"role": "system", "content": "You are Ariadne."},
+                {"role": "user", "content": "Continue"}
+            ],
+            "context_management": [{"type": "compaction", "compact_threshold": 80}],
+            "include": ["reasoning.encrypted_content"],
+            "store": false
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Compacted answer"}]
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatibleProvider::new_openai(
+        format!("{}/v1", server.uri()),
+        "test-model",
+        Some("test-key".to_owned()),
+    )
+    .unwrap();
+
+    assert_eq!(provider.server_compaction(), Some(ServerCompaction::OpenAi));
+    let completion = provider
+        .complete_managed(ContextPlan {
+            request: CompletionRequest {
+                messages: vec![
+                    Message::system("You are Ariadne."),
+                    Message::user("Continue"),
+                ],
+                tools: vec![],
+            },
+            size: ContextSize {
+                current_tokens: 85,
+                max_tokens: 100,
+            },
+            server_compaction_threshold: Some(80),
+            compacted: false,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(completion.message.content, "Compacted answer");
+    assert!(matches!(
+        completion.message.provider_context,
+        Some(ProviderContext::OpenAi(_))
+    ));
+}
+
+#[tokio::test]
+async fn openai_round_trips_server_compaction_output_on_the_next_response() {
+    let server = MockServer::start().await;
+    let compacted_output = json!([
+        {"type": "compaction", "encrypted_content": "opaque-summary"},
+        {"type": "reasoning", "encrypted_content": "opaque-reasoning"},
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Compacted answer"}]
+        }
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output": compacted_output})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatibleProvider::new_openai(
+        format!("{}/v1", server.uri()),
+        "test-model",
+        Some("test-key".to_owned()),
+    )
+    .unwrap();
+
+    let compacted = provider
+        .complete_managed(ContextPlan {
+            request: CompletionRequest {
+                messages: vec![Message::user("Start")],
+                tools: vec![],
+            },
+            size: ContextSize {
+                current_tokens: 85,
+                max_tokens: 100,
+            },
+            server_compaction_threshold: Some(80),
+            compacted: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        compacted.message.provider_context,
+        Some(ProviderContext::OpenAi(
+            compacted_output.as_array().unwrap().clone()
+        ))
+    );
+
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(body_json(json!({
+            "model": "test-model",
+            "input": [
+                {"type": "compaction", "encrypted_content": "opaque-summary"},
+                {"type": "reasoning", "encrypted_content": "opaque-reasoning"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Compacted answer"}]
+                },
+                {"role": "user", "content": "Continue"}
+            ],
+            "include": ["reasoning.encrypted_content"],
+            "store": false
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Final answer"}]
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let completion = provider
+        .complete_managed(ContextPlan {
+            request: CompletionRequest {
+                messages: vec![
+                    Message::user("Old prompt that was compacted"),
+                    Message::assistant("Old answer that was compacted"),
+                    compacted.message,
+                    Message::user("Continue"),
+                ],
+                tools: vec![],
+            },
+            size: ContextSize {
+                current_tokens: 20,
+                max_tokens: 100,
+            },
+            server_compaction_threshold: None,
+            compacted: false,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(completion.message.content, "Final answer");
+}
+
+#[tokio::test]
+async fn openai_streaming_preserves_a_server_compaction_continuation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Continued answer"}]
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = OpenAiCompatibleProvider::new_openai(
+        format!("{}/v1", server.uri()),
+        "test-model",
+        Some("test-key".to_owned()),
+    )
+    .unwrap();
+    let mut prior = Message::assistant("Compacted answer");
+    prior.provider_context = Some(ProviderContext::OpenAi(vec![json!({
+        "type": "compaction",
+        "encrypted_content": "opaque-summary"
+    })]));
+    let mut deltas = Vec::new();
+
+    let completion = provider
+        .complete_stream_managed(
+            ContextPlan {
+                request: CompletionRequest {
+                    messages: vec![prior, Message::user("Continue")],
+                    tools: vec![],
+                },
+                size: ContextSize {
+                    current_tokens: 20,
+                    max_tokens: 100,
+                },
+                server_compaction_threshold: None,
+                compacted: false,
+            },
+            &mut |delta| deltas.push(delta.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(completion.message.content, "Continued answer");
+    assert_eq!(
+        deltas,
+        vec![CompletionDelta::Content("Continued answer".to_owned())]
+    );
+}
+
+#[test]
+fn ollama_reports_that_server_side_compaction_is_unavailable() {
+    let provider =
+        OpenAiCompatibleProvider::new_ollama("http://127.0.0.1:11434/v1", "test-model", None)
+            .unwrap();
+
+    assert_eq!(provider.server_compaction(), None);
 }
 
 #[tokio::test]

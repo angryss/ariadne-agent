@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use ariadne_core::{
-    CacheOptimization, CacheOptimizer, CompletionDelta, CompletionRequest, Message, ModelProvider,
-    ToolCall, ToolDefinition,
+    CacheOptimization, CacheOptimizer, CompletionDelta, CompletionRequest, ContextPlan,
+    ContextSize, Message, ModelProvider, ProviderContext, ServerCompaction, ToolCall,
+    ToolDefinition,
 };
 use ariadne_provider_anthropic::AnthropicMessagesProvider;
 use serde_json::json;
@@ -97,6 +98,203 @@ async fn messages_api_uses_anthropic_headers_and_content_blocks() {
         .await
         .unwrap();
     assert_eq!(completion.message, Message::assistant("Hello from Claude"));
+}
+
+#[tokio::test]
+async fn messages_api_enables_server_side_compaction_for_managed_context() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("anthropic-beta", "compact-2026-01-12"))
+        .and(body_json(json!({
+            "model": "claude-opus-4-6",
+            "max_tokens": 4096,
+            "cache_control": {"type": "ephemeral"},
+            "messages": [{"role":"user","content":[{"type":"text","text":"Continue"}]}],
+            "context_management": {"edits": [{
+                "type": "compact_20260112",
+                "trigger": {"type": "input_tokens", "value": 50000},
+                "instructions": "Summarize the transcript for continuity. Do not call tools."
+            }]}
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content":[
+                {"type":"compaction","content":"Earlier work was summarized."},
+                {"type":"text","text":"Compacted answer"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        AnthropicMessagesProvider::with_base_url(server.uri(), "claude-opus-4-6", "test-key")
+            .unwrap();
+
+    assert_eq!(
+        provider.server_compaction(),
+        Some(ServerCompaction::Anthropic)
+    );
+    let completion = provider
+        .complete_managed(ContextPlan {
+            request: CompletionRequest {
+                messages: vec![Message::user("Continue")],
+                tools: vec![],
+            },
+            size: ContextSize {
+                current_tokens: 50_000,
+                max_tokens: 60_000,
+            },
+            server_compaction_threshold: Some(40_000),
+            compacted: false,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(completion.message.content, "Compacted answer");
+    assert_eq!(
+        completion.message.provider_context,
+        Some(ProviderContext::AnthropicCompaction(Some(
+            "Earlier work was summarized.".to_owned()
+        )))
+    );
+}
+
+#[test]
+fn unsupported_anthropic_models_use_local_compaction_fallback() {
+    let provider = AnthropicMessagesProvider::with_base_url(
+        "http://127.0.0.1:3000",
+        "claude-sonnet-4-5",
+        "test-key",
+    )
+    .unwrap();
+
+    assert_eq!(provider.server_compaction(), None);
+}
+
+#[tokio::test]
+async fn messages_api_round_trips_compaction_blocks_on_the_next_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [
+                {"type": "compaction", "content": "Earlier work was summarized."},
+                {"type": "text", "text": "Compacted answer"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        AnthropicMessagesProvider::with_base_url(server.uri(), "claude-test", "test-key").unwrap();
+
+    let compacted = provider
+        .complete_managed(ContextPlan {
+            request: CompletionRequest {
+                messages: vec![Message::user("Start")],
+                tools: vec![],
+            },
+            size: ContextSize {
+                current_tokens: 50_000,
+                max_tokens: 60_000,
+            },
+            server_compaction_threshold: Some(40_000),
+            compacted: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        compacted.message.provider_context,
+        Some(ProviderContext::AnthropicCompaction(Some(
+            "Earlier work was summarized.".to_owned()
+        )))
+    );
+
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("anthropic-beta", "compact-2026-01-12"))
+        .and(body_json(json!({
+            "model": "claude-test",
+            "max_tokens": 4096,
+            "cache_control": {"type": "ephemeral"},
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "compaction", "content": "Earlier work was summarized."},
+                    {"type": "text", "text": "Compacted answer"}
+                ]},
+                {"role": "user", "content": [{"type": "text", "text": "Continue"}]}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{"type": "text", "text": "Final answer"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let completion = provider
+        .complete_managed(ContextPlan {
+            request: CompletionRequest {
+                messages: vec![
+                    Message::user("Old prompt that was compacted"),
+                    Message::assistant("Old answer that was compacted"),
+                    compacted.message,
+                    Message::user("Continue"),
+                ],
+                tools: vec![],
+            },
+            size: ContextSize {
+                current_tokens: 20_000,
+                max_tokens: 60_000,
+            },
+            server_compaction_threshold: None,
+            compacted: false,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(completion.message.content, "Final answer");
+}
+
+#[tokio::test]
+async fn messages_api_rejects_a_failed_null_compaction_before_tool_execution() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [
+                {"type": "compaction", "content": null},
+                {"type":"tool_use","id":"summarizer-call","name":"write_file","input":{"path":"report.md"}}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        AnthropicMessagesProvider::with_base_url(server.uri(), "claude-test", "test-key").unwrap();
+
+    let error = provider
+        .complete_managed(ContextPlan {
+            request: CompletionRequest {
+                messages: vec![Message::user("Start")],
+                tools: vec![ToolDefinition::new(
+                    "write_file",
+                    "Write a file",
+                    json!({"type":"object"}),
+                )],
+            },
+            size: ContextSize {
+                current_tokens: 50_000,
+                max_tokens: 60_000,
+            },
+            server_compaction_threshold: Some(40_000),
+            compacted: false,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("compaction failed"));
 }
 
 #[tokio::test]
@@ -279,6 +477,60 @@ async fn messages_api_streams_text_and_accumulates_tool_input() {
         result.message.tool_calls[0],
         ToolCall::new("call-1", "read_file", json!({"path":"README.md"}))
     );
+}
+
+#[tokio::test]
+async fn messages_api_streaming_does_not_move_an_old_compaction_marker_forward() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("anthropic-beta", "compact-2026-01-12"))
+        .and(body_json(json!({
+            "model": "claude-test",
+            "max_tokens": 4096,
+            "cache_control": {"type": "ephemeral"},
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "compaction", "content": "Earlier summary"},
+                    {"type": "text", "text": "Earlier answer"}
+                ]},
+                {"role": "user", "content": [{"type": "text", "text": "Continue"}]}
+            ],
+            "stream": true
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Next answer\"}}\n\n",
+                    "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                    "data: {\"type\":\"message_stop\"}\n\n"
+                )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        AnthropicMessagesProvider::with_base_url(server.uri(), "claude-test", "test-key").unwrap();
+    let mut compacted = Message::assistant("Earlier answer");
+    compacted.provider_context = Some(ProviderContext::AnthropicCompaction(Some(
+        "Earlier summary".to_owned(),
+    )));
+
+    let completion = provider
+        .complete_stream(
+            CompletionRequest {
+                messages: vec![compacted, Message::user("Continue")],
+                tools: vec![],
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(completion.message.content, "Next answer");
+    assert_eq!(completion.message.provider_context, None);
 }
 
 #[tokio::test]
