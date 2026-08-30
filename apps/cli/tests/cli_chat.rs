@@ -19,15 +19,15 @@ async fn chat_removes_terminal_control_characters() {
         .mount(&server)
         .await;
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command
         .arg("chat")
         .write_stdin("Hello\n/quit\n")
-        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
-        .env("ARIADNE_MODEL", "test-model");
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model");
 
     command.assert().success().stdout(predicate::eq(
-        "Ariadne interactive mode. Type /quit to exit.\nyou> ariadne> safe[2J]0;owned31m\nyou> ",
+        "Rynna interactive mode. Type /quit to exit.\nyou> rynna> safe[2J]0;owned31m\nyou> ",
     ));
 }
 
@@ -39,7 +39,7 @@ async fn chat_keeps_history_until_the_user_quits() {
         .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
-                {"role": "system", "content": "You are Ariadne."},
+                {"role": "system", "content": "You are Rynna."},
                 {"role": "user", "content": "Hello"}
             ]
         })))
@@ -56,7 +56,7 @@ async fn chat_keeps_history_until_the_user_quits() {
         .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
-                {"role": "system", "content": "You are Ariadne."},
+                {"role": "system", "content": "You are Rynna."},
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "Ready."},
                 {"role": "user", "content": "Next"}
@@ -72,16 +72,16 @@ async fn chat_keeps_history_until_the_user_quits() {
         .mount(&server)
         .await;
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command
         .arg("chat")
         .write_stdin("Hello\nNext\n/quit\n")
-        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
-        .env("ARIADNE_MODEL", "test-model")
-        .env("ARIADNE_SYSTEM_PROMPT", "You are Ariadne.");
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model")
+        .env("RYNNA_SYSTEM_PROMPT", "You are Rynna.");
 
     command.assert().success().stdout(
-        predicate::str::contains("Ariadne interactive mode")
+        predicate::str::contains("Rynna interactive mode")
             .and(predicate::str::contains("Ready."))
             .and(predicate::str::contains("Done.")),
     );
@@ -90,14 +90,14 @@ async fn chat_keeps_history_until_the_user_quits() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_alias_quits_without_contacting_the_provider() {
     let server = MockServer::start().await;
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command
         .arg("chat")
         .write_stdin("/exit\n")
-        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
-        .env("ARIADNE_MODEL", "test-model");
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model");
 
     command.assert().success().stdout(predicate::eq(
-        "Ariadne interactive mode. Type /quit to exit.\nyou> ",
+        "Rynna interactive mode. Type /quit to exit.\nyou> ",
     ));
 }

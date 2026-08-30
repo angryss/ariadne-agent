@@ -1,7 +1,6 @@
 use std::io::{self, Stdout};
 
 use anyhow::{Context, Result};
-use ariadne_core::{AgentProfiles, CompletionDelta, Message};
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -16,6 +15,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use rynna_core::{AgentProfiles, CompletionDelta, Message};
 use tokio::sync::mpsc;
 
 const USER_BACKGROUND: Color = Color::Rgb(52, 52, 52);
@@ -71,7 +71,7 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/quit",
-        description: "Exit Ariadne",
+        description: "Exit Rynna",
         action: CommandAction::Quit,
         aliases: &[SlashCommandAlias {
             name: "/exit",
@@ -515,7 +515,7 @@ fn highlighted_user_line(mut line: Line<'static>, width: u16) -> Line<'static> {
 
 fn transcript_text(ui: &ChatUi, width: u16) -> Text<'static> {
     let mut lines = vec![Line::styled(
-        "Ariadne",
+        "Rynna",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -971,7 +971,7 @@ mod tests {
         assert!(screen.contains("/help"), "{screen}");
         assert!(screen.contains("Show available commands"), "{screen}");
         assert!(screen.contains("/quit"), "{screen}");
-        assert!(screen.contains("Exit Ariadne"), "{screen}");
+        assert!(screen.contains("Exit Rynna"), "{screen}");
         assert!(screen.contains("/exit"), "{screen}");
         assert!(screen.contains("Alias for /quit"), "{screen}");
     }
@@ -1057,7 +1057,7 @@ mod tests {
         let help = &ui.messages().last().unwrap().content;
         assert!(help.contains("/clear — Clear the conversation"), "{help}");
         assert!(help.contains("/help — Show available commands"), "{help}");
-        assert!(help.contains("/quit — Exit Ariadne"), "{help}");
+        assert!(help.contains("/quit — Exit Rynna"), "{help}");
         assert!(help.contains("/exit — Alias for /quit"), "{help}");
     }
 

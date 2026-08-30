@@ -5,7 +5,7 @@
 
 ## Context
 
-Ariadne must support an interactive CLI, browser UI, Tauri desktop app, one-shot automation, and a long-running VPS process without allowing their lifecycle and transport concerns to fork agent behavior.
+Rynna must support an interactive CLI, browser UI, Tauri desktop app, one-shot automation, and a long-running VPS process without allowing their lifecycle and transport concerns to fork agent behavior.
 
 ## Decision
 

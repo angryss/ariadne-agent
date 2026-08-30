@@ -1,0 +1,21 @@
+[package]
+name = "rynna-provider-anthropic"
+description = "Anthropic Messages API and Claude subscription providers for Rynna"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rynna-core = { path = "../rynna-core" }
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+wiremock = "0.6"

@@ -1,0 +1,24 @@
+[package]
+name = "rynna-config"
+description = "Profile and configuration loading for Rynna"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rynna-core = { path = "../rynna-core" }
+dirs.workspace = true
+fs2.workspace = true
+libc.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+url.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"

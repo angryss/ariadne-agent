@@ -6,18 +6,18 @@ Accepted
 
 ## Context
 
-Ariadne needs distinct local, work, automation, and hosted configurations without copying provider credentials or rebuilding each application surface. Profiles must select their own provider and model and must also scope capability activation such as skills and MCP servers. CLI, HTTP, browser, and desktop execution need the same profile semantics.
+Rynna needs distinct local, work, automation, and hosted configurations without copying provider credentials or rebuilding each application surface. Profiles must select their own provider and model and must also scope capability activation such as skills and MCP servers. CLI, HTTP, browser, and desktop execution need the same profile semantics.
 
 ## Decision
 
-Ariadne uses a versioned TOML profile catalog owned by `ariadne-config`.
+Rynna uses a versioned TOML profile catalog owned by `rynna-config`.
 
 - Providers are reusable named connection definitions with a provider kind, API base URL, and optional API-key environment-variable name.
 - Profiles select one provider and model and carry a trusted system prompt, active skill names, and active MCP server names.
 - MCP server definitions are named TOML tables. Profiles reference them by name; invalid references fail configuration loading.
 - Secrets are not stored in the catalog. Provider definitions name an environment variable whose value is read only by composition roots.
-- The platform configuration path is `<config-dir>/ariadne/config.toml`. Ariadne preserves its previous local Ollama behavior when that file is absent.
-- `--config`/`ARIADNE_CONFIG` selects an explicit catalog. `--profile`/`ARIADNE_PROFILE` selects the process default.
+- The platform configuration path is `<config-dir>/rynna/config.toml`. Rynna preserves its previous local Ollama behavior when that file is absent.
+- `--config`/`RYNNA_CONFIG` selects an explicit catalog. `--profile`/`RYNNA_PROFILE` selects the process default.
 - Existing provider/model/system-prompt CLI flags and environment variables override only the selected default profile.
 - The core owns transport-independent profile metadata and dispatch. CLI, Axum, and Tauri compose concrete providers around it.
 - The HTTP and Tauri adapters expose profile metadata and accept an optional profile on response requests. Browser and desktop clients clear conversation history when the user changes profiles.

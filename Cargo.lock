@@ -110,165 +110,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "ariadne-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ariadne-config",
- "ariadne-core",
- "ariadne-provider-anthropic",
- "ariadne-provider-openai",
- "ariadne-server",
- "ariadne-tools-command",
- "ariadne-tools-filesystem",
- "assert_cmd",
- "axum",
- "clap",
- "crossterm",
- "dirs",
- "futures-util",
- "predicates",
- "ratatui",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wiremock",
-]
-
-[[package]]
-name = "ariadne-config"
-version = "0.1.0"
-dependencies = [
- "ariadne-core",
- "dirs",
- "fs2",
- "libc",
- "serde",
- "tempfile",
- "thiserror 2.0.20",
- "toml 0.9.12+spec-1.1.0",
- "url",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ariadne-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "ariadne-desktop"
-version = "0.1.0"
-dependencies = [
- "ariadne-config",
- "ariadne-core",
- "ariadne-provider-anthropic",
- "ariadne-provider-openai",
- "ariadne-tools-command",
- "ariadne-tools-filesystem",
- "async-trait",
- "dirs",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "ariadne-provider-anthropic"
-version = "0.1.0"
-dependencies = [
- "ariadne-core",
- "async-trait",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "wiremock",
-]
-
-[[package]]
-name = "ariadne-provider-openai"
-version = "0.1.0"
-dependencies = [
- "ariadne-core",
- "async-trait",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "wiremock",
-]
-
-[[package]]
-name = "ariadne-server"
-version = "0.1.0"
-dependencies = [
- "ariadne-config",
- "ariadne-core",
- "ariadne-provider-anthropic",
- "async-trait",
- "axum",
- "dirs",
- "futures-util",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tower",
- "tower-http 0.7.0",
- "tracing",
-]
-
-[[package]]
-name = "ariadne-tools-command"
-version = "0.1.0"
-dependencies = [
- "ariadne-core",
- "async-trait",
- "libc",
- "process-wrap",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "ariadne-tools-filesystem"
-version = "0.1.0"
-dependencies = [
- "ariadne-core",
- "async-trait",
- "cap-fs-ext",
- "cap-std",
- "globset",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
 name = "assert-json-diff"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3642,6 +3483,165 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rynna-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "clap",
+ "crossterm",
+ "dirs",
+ "futures-util",
+ "predicates",
+ "ratatui",
+ "rynna-config",
+ "rynna-core",
+ "rynna-provider-anthropic",
+ "rynna-provider-openai",
+ "rynna-server",
+ "rynna-tools-command",
+ "rynna-tools-filesystem",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
+name = "rynna-config"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "fs2",
+ "libc",
+ "rynna-core",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "toml 0.9.12+spec-1.1.0",
+ "url",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rynna-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "rynna-desktop"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "rynna-config",
+ "rynna-core",
+ "rynna-provider-anthropic",
+ "rynna-provider-openai",
+ "rynna-tools-command",
+ "rynna-tools-filesystem",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rynna-provider-anthropic"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "rynna-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "rynna-provider-openai"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "rynna-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "rynna-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "dirs",
+ "futures-util",
+ "rynna-config",
+ "rynna-core",
+ "rynna-provider-anthropic",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http 0.7.0",
+ "tracing",
+]
+
+[[package]]
+name = "rynna-tools-command"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "process-wrap",
+ "rynna-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "rynna-tools-filesystem"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cap-fs-ext",
+ "cap-std",
+ "globset",
+ "regex",
+ "rynna-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+]
 
 [[package]]
 name = "ryu"

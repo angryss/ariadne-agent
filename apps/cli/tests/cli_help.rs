@@ -3,7 +3,7 @@ use predicates::prelude::*;
 
 #[test]
 fn help_describes_interactive_run_and_server_modes() {
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command.arg("--help");
 
     command.assert().success().stdout(
@@ -21,7 +21,7 @@ fn help_describes_interactive_run_and_server_modes() {
 
 #[test]
 fn provider_configuration_requires_an_interactive_terminal() {
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command.arg("--configure-providers");
 
     command

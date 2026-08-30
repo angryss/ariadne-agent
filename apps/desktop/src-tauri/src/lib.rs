@@ -5,19 +5,19 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ariadne_config::{
+use rynna_config::{
     AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
     ProviderKind, ProviderSettingsStore, ResolvedCapability, ResolvedProfile,
     secure_private_directory,
 };
-use ariadne_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile, Tool};
-use ariadne_provider_anthropic::{
+use rynna_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile, Tool};
+use rynna_provider_anthropic::{
     AnthropicMessagesProvider, CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, ClaudeCodeProvider,
     isolate_claude_subscription_environment, terminate_child,
 };
-use ariadne_provider_openai::OpenAiCompatibleProvider;
-use ariadne_tools_command::{CommandConfig, CommandTool};
-use ariadne_tools_filesystem::{FileSystemConfig, FileSystemToolset};
+use rynna_provider_openai::OpenAiCompatibleProvider;
+use rynna_tools_command::{CommandConfig, CommandTool};
+use rynna_tools_filesystem::{FileSystemConfig, FileSystemToolset};
 use serde::{Deserialize, Serialize};
 use tauri::{State, ipc::Channel};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -200,7 +200,7 @@ pub async fn openai_account_with_program(
     let mut command = Command::new(program);
     command
         .env_remove("CODEX_HOME")
-        .env_remove("ARIADNE_CODEX_HOME");
+        .env_remove("RYNNA_CODEX_HOME");
     openai_account_with_command(command).await
 }
 
@@ -240,7 +240,7 @@ async fn openai_account_with_command(
         &serde_json::json!({
             "method": "initialize",
             "id": 1,
-            "params": {"clientInfo": {"name": "ariadne", "title": "Ariadne", "version": env!("CARGO_PKG_VERSION")}}
+            "params": {"clientInfo": {"name": "rynna", "title": "Rynna", "version": env!("CARGO_PKG_VERSION")}}
         }),
         deadline,
     )
@@ -369,13 +369,13 @@ pub(crate) async fn read_codex_message(
 }
 
 fn codex_program() -> PathBuf {
-    env::var_os("ARIADNE_CODEX_PATH")
+    env::var_os("RYNNA_CODEX_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("codex"))
 }
 
 fn claude_program() -> PathBuf {
-    env::var_os("ARIADNE_CLAUDE_PATH")
+    env::var_os("RYNNA_CLAUDE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("claude"))
 }
@@ -383,14 +383,14 @@ fn claude_program() -> PathBuf {
 pub fn prepare_codex_home(
     config_directory: impl AsRef<std::path::Path>,
 ) -> Result<PathBuf, String> {
-    secure_codex_home(config_directory.as_ref().join("ariadne").join("codex"))
+    secure_codex_home(config_directory.as_ref().join("rynna").join("codex"))
 }
 
 fn configured_codex_home() -> Result<PathBuf, String> {
-    match env::var_os("ARIADNE_CODEX_HOME") {
+    match env::var_os("RYNNA_CODEX_HOME") {
         Some(home) => secure_codex_home(PathBuf::from(home)),
         None => prepare_codex_home(
-            dirs::config_dir().ok_or("Ariadne could not determine its configuration directory")?,
+            dirs::config_dir().ok_or("Rynna could not determine its configuration directory")?,
         ),
     }
 }
@@ -405,10 +405,10 @@ fn selected_openai_codex_home(
 pub(crate) fn secure_codex_home(home: PathBuf) -> Result<PathBuf, String> {
     secure_private_directory(home).map_err(|error| {
         if error.to_string().contains("symbolic link") {
-            "Ariadne's Codex directory must not be a symbolic link or contain symbolic links"
+            "Rynna's Codex directory must not be a symbolic link or contain symbolic links"
                 .to_owned()
         } else {
-            format!("failed to prepare Ariadne's Codex directory: {error}")
+            format!("failed to prepare Rynna's Codex directory: {error}")
         }
     })
 }
@@ -675,7 +675,7 @@ async fn verify_existing_openai_credentials_with_program(
         Command::new(program)
             .args(["login", "status"])
             .env_remove("CODEX_HOME")
-            .env_remove("ARIADNE_CODEX_HOME")
+            .env_remove("RYNNA_CODEX_HOME")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true)
@@ -756,12 +756,12 @@ async fn delete_provider(
 
 pub fn run() {
     let provider_settings = configured_provider_settings()
-        .unwrap_or_else(|error| panic!("failed to load Ariadne provider settings: {error}"));
+        .unwrap_or_else(|error| panic!("failed to load Rynna provider settings: {error}"));
     let credential_selection = OpenAiCredentialSelection::new(
         openai_account_reuses_existing_credentials(&provider_settings),
     );
     let configured = configured_profiles(credential_selection.clone())
-        .unwrap_or_else(|error| panic!("failed to configure Ariadne model provider: {error}"));
+        .unwrap_or_else(|error| panic!("failed to configure Rynna model provider: {error}"));
 
     tauri::Builder::default()
         .manage(configured)
@@ -781,11 +781,11 @@ pub fn run() {
             delete_provider
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run Ariadne desktop application");
+        .expect("failed to run Rynna desktop application");
 }
 
 fn configured_provider_settings() -> Result<ProviderSettingsStore, String> {
-    match env::var_os("ARIADNE_PROVIDER_CONFIG") {
+    match env::var_os("RYNNA_PROVIDER_CONFIG") {
         Some(path) => ProviderSettingsStore::load(PathBuf::from(path)),
         None => ProviderSettingsStore::load_default(),
     }
@@ -795,13 +795,13 @@ fn configured_provider_settings() -> Result<ProviderSettingsStore, String> {
 fn configured_profiles(
     credential_selection: OpenAiCredentialSelection,
 ) -> Result<AgentProfiles, String> {
-    let catalog = match optional_env("ARIADNE_CONFIG")? {
+    let catalog = match optional_env("RYNNA_CONFIG")? {
         Some(path) => ProfileCatalog::load(path),
         None => ProfileCatalog::load_default(),
     }
     .map_err(|error| error.to_string())?;
     let default_profile =
-        optional_env("ARIADNE_PROFILE")?.unwrap_or_else(|| catalog.default_profile().to_owned());
+        optional_env("RYNNA_PROFILE")?.unwrap_or_else(|| catalog.default_profile().to_owned());
     catalog
         .resolve(&default_profile)
         .map_err(|error| error.to_string())?;
@@ -809,16 +809,16 @@ fn configured_profiles(
     let mut configured = Vec::new();
     for mut profile in catalog.resolve_all().map_err(|error| error.to_string())? {
         let api_key_override = if profile.profile.name == default_profile {
-            if let Some(api_base) = optional_env("ARIADNE_API_BASE")? {
+            if let Some(api_base) = optional_env("RYNNA_API_BASE")? {
                 profile.api_base = api_base;
             }
-            if let Some(model) = optional_env("ARIADNE_MODEL")? {
+            if let Some(model) = optional_env("RYNNA_MODEL")? {
                 profile.profile.model = model;
             }
-            if let Some(system_prompt) = optional_env("ARIADNE_SYSTEM_PROMPT")? {
+            if let Some(system_prompt) = optional_env("RYNNA_SYSTEM_PROMPT")? {
                 profile.system_prompt = system_prompt;
             }
-            optional_env("ARIADNE_API_KEY")?
+            optional_env("RYNNA_API_KEY")?
         } else {
             None
         };
@@ -852,7 +852,7 @@ fn configured_profiles(
         ));
     let openai_agent = Agent::new(
         openai_provider,
-        "You are Ariadne, a careful and capable AI software agent.",
+        "You are Rynna, a careful and capable AI software agent.",
     );
     configured.push((openai_profile, openai_agent));
 
@@ -959,7 +959,7 @@ fn configured_agent(
 
     if profile.provider_kind == ProviderKind::ClaudeSubscription && !profile.capabilities.is_empty()
     {
-        return Err("Claude subscription profiles do not support Ariadne capabilities".to_owned());
+        return Err("Claude subscription profiles do not support Rynna capabilities".to_owned());
     }
 
     compose_agent(profile, provider)
@@ -1039,7 +1039,7 @@ mod tests {
     use tokio::io::BufReader;
     use tokio::time::{Duration, Instant};
 
-    use ariadne_config::{ConfiguredProvider, OpenAiAuthentication, ProviderSettingsStore};
+    use rynna_config::{ConfiguredProvider, OpenAiAuthentication, ProviderSettingsStore};
 
     use super::{
         MAX_CODEX_MESSAGE_BYTES, OpenAiAuthenticationLock, OpenAiCredentialSelection,
@@ -1156,7 +1156,7 @@ mod tests {
     #[test]
     fn openai_account_status_uses_the_selected_credential_home() {
         let selection = OpenAiCredentialSelection::new(false);
-        let private_home = PathBuf::from("/private/ariadne/codex");
+        let private_home = PathBuf::from("/private/rynna/codex");
 
         assert_eq!(
             selected_openai_codex_home(&selection, &private_home),
@@ -1214,14 +1214,14 @@ mod tests {
     #[test]
     fn configured_environment_values_must_be_valid_unicode() {
         let error = decode_optional_env(
-            "ARIADNE_CONFIG",
+            "RYNNA_CONFIG",
             Err(VarError::NotUnicode(OsString::from("invalid"))),
         )
         .unwrap_err();
 
         assert_eq!(
             error,
-            "environment variable `ARIADNE_CONFIG` is not valid Unicode"
+            "environment variable `RYNNA_CONFIG` is not valid Unicode"
         );
     }
 

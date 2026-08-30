@@ -1,3 +1,3 @@
 fn main() {
-    ariadne_desktop::run();
+    rynna_desktop::run();
 }

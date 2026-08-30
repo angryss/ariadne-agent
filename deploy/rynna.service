@@ -1,0 +1,25 @@
+[Unit]
+Description=Rynna AI agent service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rynna
+Group=rynna
+EnvironmentFile=-/etc/rynna/rynna.env
+ExecStart=/usr/local/bin/rynna serve --bind 127.0.0.1:3000 --web-dir /opt/rynna/web
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

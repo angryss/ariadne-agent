@@ -1,5 +1,5 @@
 {
-  "name": "ariadne",
+  "name": "rynna",
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
@@ -9,14 +9,14 @@
     "packages/ui"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace @ariadne/web",
+    "dev": "npm run dev --workspace @rynna/web",
     "build": "npm run build --workspaces --if-present",
     "check": "npm run check --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "web:dev": "npm run dev --workspace @ariadne/web",
-    "web:build": "npm run build --workspace @ariadne/web",
-    "desktop:dev": "npm run tauri:dev --workspace @ariadne/desktop",
-    "desktop:build": "npm run tauri:build --workspace @ariadne/desktop"
+    "web:dev": "npm run dev --workspace @rynna/web",
+    "web:build": "npm run build --workspace @rynna/web",
+    "desktop:dev": "npm run tauri:dev --workspace @rynna/desktop",
+    "desktop:build": "npm run tauri:build --workspace @rynna/desktop"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^7.0.1",

@@ -4,13 +4,6 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use ariadne_config::{
-    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProviderSettingsStore,
-    secure_private_directory,
-};
-use ariadne_provider_anthropic::{
-    CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, claude_subscription_environment,
-};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -23,6 +16,13 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Text},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+};
+use rynna_config::{
+    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProviderSettingsStore,
+    secure_private_directory,
+};
+use rynna_provider_anthropic::{
+    CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, claude_subscription_environment,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -146,7 +146,7 @@ pub fn run(path: PathBuf) -> Result<()> {
         bail!("provider configuration requires an interactive terminal");
     }
     let mut store =
-        ProviderSettingsStore::load(path).context("failed to load Ariadne provider settings")?;
+        ProviderSettingsStore::load(path).context("failed to load Rynna provider settings")?;
     let mut ui = ProviderUi::new(store.list());
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     let mut stdout = io::stdout();
@@ -306,13 +306,13 @@ fn save_provider(ui: &mut ProviderUi, store: &mut ProviderSettingsStore) {
 }
 
 fn authenticate_openai(authentication: OpenAiAuthentication, api_key: &str) -> Result<()> {
-    let codex_home = std::env::var_os("ARIADNE_CODEX_HOME")
+    let codex_home = std::env::var_os("RYNNA_CODEX_HOME")
         .map(PathBuf::from)
-        .or_else(|| dirs::config_dir().map(|path| path.join("ariadne").join("codex")))
-        .context("Ariadne could not determine its configuration directory")?;
+        .or_else(|| dirs::config_dir().map(|path| path.join("rynna").join("codex")))
+        .context("Rynna could not determine its configuration directory")?;
     let codex_home = secure_private_directory(codex_home)
         .context("failed to prepare secure OpenAI credentials")?;
-    let program = std::env::var_os("ARIADNE_CODEX_PATH").unwrap_or_else(|| "codex".into());
+    let program = std::env::var_os("RYNNA_CODEX_PATH").unwrap_or_else(|| "codex".into());
     let mut command = Command::new(program);
     command
         .env("CODEX_HOME", codex_home)
@@ -353,7 +353,7 @@ fn authenticate_openai(authentication: OpenAiAuthentication, api_key: &str) -> R
 }
 
 fn authenticate_anthropic() -> Result<()> {
-    let program = std::env::var_os("ARIADNE_CLAUDE_PATH").unwrap_or_else(|| "claude".into());
+    let program = std::env::var_os("RYNNA_CLAUDE_PATH").unwrap_or_else(|| "claude".into());
     let mut command = Command::new(program);
     command.env_clear().envs(claude_subscription_environment());
     command
@@ -432,9 +432,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
         .split(frame.area());
     frame.render_widget(
         Paragraph::new(concat!(
-            "Ariadne Settings — Providers\n",
+            "Rynna Settings — Providers\n",
             "Provider settings record credential readiness only.\n",
-            "Runtime provider/profile/model routing remains authoritative in ariadne.toml and loads at startup."
+            "Runtime provider/profile/model routing remains authoritative in rynna.toml and loads at startup."
         ))
             .style(
                 Style::default()
@@ -495,10 +495,10 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
                     ..
                 } => "ChatGPT subscription",
                 ConfiguredProvider::Anthropic { authentication } => match authentication {
-                    ariadne_config::AnthropicAuthentication::ApiKey => {
+                    rynna_config::AnthropicAuthentication::ApiKey => {
                         "API key (configure via environment)"
                     }
-                    ariadne_config::AnthropicAuthentication::Subscription => {
+                    rynna_config::AnthropicAuthentication::Subscription => {
                         "Claude subscription / usage bundle"
                     }
                 },
@@ -550,8 +550,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{ChildProcess, ProviderUi, draw, wait_for_child, wait_for_child_process};
-    use ariadne_config::ConfiguredProvider;
     use ratatui::{Terminal, backend::TestBackend};
+    use rynna_config::ConfiguredProvider;
 
     #[cfg(unix)]
     #[test]
@@ -622,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_ui_discloses_that_runtime_routing_comes_from_ariadne_config() {
+    fn provider_ui_discloses_that_runtime_routing_comes_from_rynna_config() {
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         let ui = ProviderUi::new(Vec::new());
 
@@ -632,7 +632,7 @@ mod tests {
         assert!(screen.contains("credential readiness only"), "{screen}");
         assert!(
             screen.contains(
-                "Runtime provider/profile/model routing remains authoritative in ariadne.toml"
+                "Runtime provider/profile/model routing remains authoritative in rynna.toml"
             ),
             "{screen}"
         );

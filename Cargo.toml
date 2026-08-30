@@ -2,13 +2,13 @@
 members = [
   "apps/cli",
   "apps/desktop/src-tauri",
-  "crates/ariadne-config",
-  "crates/ariadne-core",
-  "crates/ariadne-provider-anthropic",
-  "crates/ariadne-provider-openai",
-  "crates/ariadne-server",
-  "crates/ariadne-tools-command",
-  "crates/ariadne-tools-filesystem",
+  "crates/rynna-config",
+  "crates/rynna-core",
+  "crates/rynna-provider-anthropic",
+  "crates/rynna-provider-openai",
+  "crates/rynna-server",
+  "crates/rynna-tools-command",
+  "crates/rynna-tools-filesystem",
 ]
 resolver = "3"
 
@@ -17,7 +17,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-repository = "https://github.com/angryss/areadne-agent"
+repository = "https://github.com/angryss/rynna-agent"
 
 [workspace.dependencies]
 anyhow = "1"

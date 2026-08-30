@@ -1,10 +1,10 @@
-# Contributing to Ariadne
+# Contributing to Rynna
 
-Thank you for improving Ariadne.
+Thank you for improving Rynna.
 
 ## Design rules
 
-- Keep domain and orchestration behavior in `ariadne-core`.
+- Keep domain and orchestration behavior in `rynna-core`.
 - Keep provider, HTTP, CLI, Tauri, and browser concerns in adapters.
 - Depend inward; the core must not import a transport or UI framework.
 - Preserve non-interactive behavior: JSON mode emits one JSON value to stdout, diagnostics go to stderr, and failures return a non-zero status.
@@ -39,7 +39,7 @@ Install `cargo-audit` once with `cargo install cargo-audit --locked` if it is no
 Changes to the Tauri host should also pass:
 
 ```bash
-cargo check -p ariadne-desktop
+cargo check -p rynna-desktop
 ```
 
 ## Pull requests

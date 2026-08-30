@@ -5,46 +5,46 @@ use std::sync::Arc;
 use std::{io, io::BufRead, io::IsTerminal, io::Read, io::Write};
 
 use anyhow::{Context, Result, ensure};
-use ariadne_config::{
+use clap::{Parser, Subcommand, ValueEnum};
+use rynna_config::{
     ProfileCatalog, ProviderKind, ProviderSettingsStore, ResolvedCapability, ResolvedProfile,
 };
-use ariadne_core::{Agent, AgentProfiles, ModelProvider, Tool};
-use ariadne_provider_anthropic::{AnthropicMessagesProvider, ClaudeCodeProvider};
-use ariadne_provider_openai::OpenAiCompatibleProvider;
-use ariadne_tools_command::{CommandConfig, CommandTool};
-use ariadne_tools_filesystem::{FileSystemConfig, FileSystemToolset};
-use clap::{Parser, Subcommand, ValueEnum};
+use rynna_core::{Agent, AgentProfiles, ModelProvider, Tool};
+use rynna_provider_anthropic::{AnthropicMessagesProvider, ClaudeCodeProvider};
+use rynna_provider_openai::OpenAiCompatibleProvider;
+use rynna_tools_command::{CommandConfig, CommandTool};
+use rynna_tools_filesystem::{FileSystemConfig, FileSystemToolset};
 use tracing_subscriber::EnvFilter;
 
 mod chat_ui;
 mod provider_ui;
 
 #[derive(Parser)]
-#[command(name = "ariadne", version, about = "A local-first AI agent")]
+#[command(name = "rynna", version, about = "A local-first AI agent")]
 struct Cli {
     /// TOML configuration file. Uses the platform default when omitted.
-    #[arg(long, env = "ARIADNE_CONFIG", global = true)]
+    #[arg(long, env = "RYNNA_CONFIG", global = true)]
     config: Option<PathBuf>,
     /// Provider settings file. Uses the platform default when omitted.
-    #[arg(long, env = "ARIADNE_PROVIDER_CONFIG", global = true)]
+    #[arg(long, env = "RYNNA_PROVIDER_CONFIG", global = true)]
     provider_config: Option<PathBuf>,
     /// Open the interactive provider settings interface.
     #[arg(long, global = true)]
     configure_providers: bool,
     /// Profile to use as the process default.
-    #[arg(long, env = "ARIADNE_PROFILE", global = true)]
+    #[arg(long, env = "RYNNA_PROFILE", global = true)]
     profile: Option<String>,
     /// Base URL for an OpenAI-compatible API, including any `/v1` prefix.
-    #[arg(long, env = "ARIADNE_API_BASE", global = true)]
+    #[arg(long, env = "RYNNA_API_BASE", global = true)]
     api_base: Option<String>,
     /// Model identifier understood by the provider.
-    #[arg(long, env = "ARIADNE_MODEL", global = true)]
+    #[arg(long, env = "RYNNA_MODEL", global = true)]
     model: Option<String>,
     /// Optional API key. Prefer the environment variable to shell history.
-    #[arg(long, env = "ARIADNE_API_KEY", global = true, hide_env_values = true)]
+    #[arg(long, env = "RYNNA_API_KEY", global = true, hide_env_values = true)]
     api_key: Option<String>,
     /// Trusted system instruction prepended to every request.
-    #[arg(long, env = "ARIADNE_SYSTEM_PROMPT", global = true)]
+    #[arg(long, env = "RYNNA_SYSTEM_PROMPT", global = true)]
     system_prompt: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
     let provider_config = match cli.provider_config.clone() {
         Some(path) => path,
         None => ProviderSettingsStore::default_path()
-            .context("failed to locate Ariadne provider settings")?,
+            .context("failed to locate Rynna provider settings")?,
     };
     if cli.configure_providers {
         return provider_ui::run(provider_config);
@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
     let catalog = match &cli.config {
         Some(path) => ProfileCatalog::load(path)
             .with_context(|| format!("failed to load configuration from {}", path.display()))?,
-        None => ProfileCatalog::load_default().context("failed to load Ariadne configuration")?,
+        None => ProfileCatalog::load_default().context("failed to load Rynna configuration")?,
     };
     let default_profile = cli
         .profile
@@ -287,7 +287,7 @@ fn configured_agent(profile: &ResolvedProfile, api_key_override: Option<String>)
 
     if profile.provider_kind == ProviderKind::ClaudeSubscription && !profile.capabilities.is_empty()
     {
-        anyhow::bail!("Claude subscription profiles do not support Ariadne capabilities");
+        anyhow::bail!("Claude subscription profiles do not support Rynna capabilities");
     }
     let tools = configured_tools(profile)?;
     if tools.is_empty() {
@@ -365,7 +365,7 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
     let mut history = Vec::new();
     let mut line = String::new();
 
-    println!("Ariadne interactive mode. Type /quit to exit.");
+    println!("Rynna interactive mode. Type /quit to exit.");
     loop {
         print!("you> ");
         io::stdout().flush().context("failed to flush stdout")?;
@@ -386,8 +386,8 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
             .respond(Some(profile), &history, prompt)
             .await
             .map_err(sanitize_agent_error)?;
-        println!("ariadne> {}", sanitize_terminal_text(&message.content));
-        history.push(ariadne_core::Message::user(prompt));
+        println!("rynna> {}", sanitize_terminal_text(&message.content));
+        history.push(rynna_core::Message::user(prompt));
         history.push(message);
     }
 
@@ -401,7 +401,7 @@ async fn serve(
     provider_config: PathBuf,
 ) -> Result<()> {
     let provider_settings = ProviderSettingsStore::load(provider_config)
-        .context("failed to load Ariadne provider settings")?;
+        .context("failed to load Rynna provider settings")?;
     let app = match web_dir {
         Some(web_dir) => {
             ensure!(
@@ -409,27 +409,27 @@ async fn serve(
                 "web directory does not contain index.html: {}",
                 web_dir.display()
             );
-            ariadne_server::router_with_profiles_provider_settings_and_web(
+            rynna_server::router_with_profiles_provider_settings_and_web(
                 profiles,
                 provider_settings,
                 web_dir,
             )
         }
         None => {
-            ariadne_server::router_with_profiles_and_provider_settings(profiles, provider_settings)
+            rynna_server::router_with_profiles_and_provider_settings(profiles, provider_settings)
         }
     };
     let listener = tokio::net::TcpListener::bind(bind)
         .await
-        .with_context(|| format!("failed to bind Ariadne server to {bind}"))?;
-    tracing::info!(address = %bind, "Ariadne server started");
+        .with_context(|| format!("failed to bind Rynna server to {bind}"))?;
+    tracing::info!(address = %bind, "Rynna server started");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
-    .context("Ariadne server failed")
+    .context("Rynna server failed")
 }
 
 async fn shutdown_signal() {
@@ -491,7 +491,7 @@ async fn run_once(
         OutputFormat::Text => println!("{}", sanitize_terminal_text(&message.content)),
         OutputFormat::Json => println!(
             "{}",
-            serde_json::to_string(&ariadne_server::RespondResponse { message })?
+            serde_json::to_string(&rynna_server::RespondResponse { message })?
         ),
     }
     Ok(())

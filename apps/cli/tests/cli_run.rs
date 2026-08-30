@@ -19,11 +19,11 @@ async fn run_text_removes_terminal_control_characters() {
         .mount(&server)
         .await;
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command
         .args(["run", "--prompt", "Do the work", "--output", "text"])
-        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
-        .env("ARIADNE_MODEL", "test-model");
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model");
 
     command
         .assert()
@@ -42,11 +42,11 @@ async fn provider_error_body_removes_terminal_control_characters() {
         .mount(&server)
         .await;
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command
         .args(["run", "--prompt", "Do the work", "--output", "text"])
-        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
-        .env("ARIADNE_MODEL", "test-model");
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model");
 
     command.assert().failure().stderr(
         predicate::str::contains("safe[2J]0;owned31m")
@@ -73,11 +73,11 @@ async fn run_json_escapes_control_characters_without_changing_content() {
         .mount(&server)
         .await;
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     let output = command
         .args(["run", "--prompt", "Do the work", "--output", "json"])
-        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
-        .env("ARIADNE_MODEL", "test-model")
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model")
         .output()
         .unwrap();
 
@@ -101,7 +101,7 @@ async fn run_emits_one_json_response_for_unattended_use() {
         .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
-                {"role": "system", "content": "You are Ariadne."},
+                {"role": "system", "content": "You are Rynna."},
                 {"role": "user", "content": "Do the work"}
             ]
         })))
@@ -114,12 +114,12 @@ async fn run_emits_one_json_response_for_unattended_use() {
         .mount(&server)
         .await;
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command
         .args(["run", "--prompt", "Do the work", "--output", "json"])
-        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
-        .env("ARIADNE_MODEL", "test-model")
-        .env("ARIADNE_SYSTEM_PROMPT", "You are Ariadne.");
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model")
+        .env("RYNNA_SYSTEM_PROMPT", "You are Rynna.");
 
     command
         .assert()
@@ -138,7 +138,7 @@ async fn run_reads_the_prompt_from_stdin_when_the_flag_is_omitted() {
         .and(body_partial_json(json!({
             "model": "test-model",
             "messages": [
-                {"role": "system", "content": "You are Ariadne."},
+                {"role": "system", "content": "You are Rynna."},
                 {"role": "user", "content": "Prompt from stdin"}
             ]
         })))
@@ -151,13 +151,13 @@ async fn run_reads_the_prompt_from_stdin_when_the_flag_is_omitted() {
         .mount(&server)
         .await;
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command
         .args(["run", "--output", "json"])
         .write_stdin("Prompt from stdin\n")
-        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
-        .env("ARIADNE_MODEL", "test-model")
-        .env("ARIADNE_SYSTEM_PROMPT", "You are Ariadne.");
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model")
+        .env("RYNNA_SYSTEM_PROMPT", "You are Rynna.");
 
     command.assert().success().stdout(predicate::eq(
         "{\"message\":{\"role\":\"assistant\",\"content\":\"Read it.\"}}\n",
@@ -178,11 +178,11 @@ async fn run_keeps_diagnostics_off_json_stdout() {
         .mount(&server)
         .await;
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command
         .args(["run", "--prompt", "Do the work", "--output", "json"])
-        .env("ARIADNE_API_BASE", format!("{}/v1", server.uri()))
-        .env("ARIADNE_MODEL", "test-model")
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model")
         .env("RUST_LOG", "trace");
 
     command.assert().success().stdout(predicate::eq(
@@ -247,7 +247,7 @@ command = "mcp-filesystem"
     )
     .unwrap();
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command.args([
         "--config",
         config.to_str().unwrap(),
@@ -293,7 +293,7 @@ api_base = "{server}/v1"
 [providers.remote]
 kind = "openai-compatible"
 api_base = "https://example.com/v1"
-api_key_env = "ARIADNE_TEST_MISSING_REMOTE_KEY"
+api_key_env = "RYNNA_TEST_MISSING_REMOTE_KEY"
 
 [profiles.local]
 provider = "local"
@@ -308,7 +308,7 @@ model = "remote-model"
     )
     .unwrap();
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command.args([
         "--config",
         config.to_str().unwrap(),
@@ -352,7 +352,7 @@ async fn run_executes_the_selected_profiles_filesystem_capability() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .and(body_string_contains("\"role\":\"tool\""))
-        .and(body_string_contains("# Ariadne"))
+        .and(body_string_contains("# Rynna"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "choices": [{
                 "message": {"role": "assistant", "content": "Read the workspace file."}
@@ -363,7 +363,7 @@ async fn run_executes_the_selected_profiles_filesystem_capability() {
         .mount(&server)
         .await;
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("README.md"), "# Ariadne\n").unwrap();
+    std::fs::write(directory.path().join("README.md"), "# Rynna\n").unwrap();
     let config = directory.path().join("config.toml");
     std::fs::write(
         &config,
@@ -392,7 +392,7 @@ read_only = true
     )
     .unwrap();
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command.args([
         "--config",
         config.to_str().unwrap(),
@@ -485,7 +485,7 @@ max_output_bytes = 8192
     )
     .unwrap();
 
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command.args([
         "--config",
         config.to_str().unwrap(),

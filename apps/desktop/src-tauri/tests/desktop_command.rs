@@ -1,17 +1,17 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ariadne_core::{
+use async_trait::async_trait;
+use rynna_core::{
     Agent, AgentProfiles, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
     Profile, ProviderError, ToolCall,
 };
-use ariadne_desktop::{
+use rynna_desktop::{
     CodexAppServerProvider, OpenAiConnectRequest, RespondRequest, compose_agent,
     connect_openai_with_program, connect_openai_with_program_and_home, list_profiles,
     openai_account_with_program, openai_account_with_program_and_home, prepare_codex_home,
     respond_stream_with_profiles, respond_with_agent, respond_with_profiles,
 };
-use async_trait::async_trait;
 
 #[derive(Default)]
 struct RecordingProvider {
@@ -214,7 +214,7 @@ async fn codex_app_server_provider_returns_the_subscription_answer() {
         r#"#!/bin/sh
 [ "$1" = "--version" ] && { printf '%s\n' 'codex-cli 0.149.1'; exit 0; }
 [ "$1" = "app-server" ] || exit 2
-[ "${CODEX_HOME##*/}" = "ariadne-codex" ] || exit 4
+[ "${CODEX_HOME##*/}" = "rynna-codex" ] || exit 4
 IFS= read -r initialize
 case "$initialize" in *'"experimentalApi":true'*) ;; *) exit 4 ;; esac
 printf '%s\n' '{"id":1,"result":{"userAgent":"fake"}}'
@@ -240,11 +240,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn"
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let provider = Arc::new(CodexAppServerProvider::with_home(
         &program,
-        directory
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("ariadne-codex"),
+        directory.path().canonicalize().unwrap().join("rynna-codex"),
         None,
     ));
     let agent = Agent::new(provider, "Desktop policy");
@@ -274,7 +270,7 @@ async fn codex_app_server_provider_rejects_unreviewed_codex_versions() {
 
     assert_eq!(
         error.to_string(),
-        "model provider failed: unsupported Codex CLI version; Ariadne requires codex-cli 0.149.1"
+        "model provider failed: unsupported Codex CLI version; Rynna requires codex-cli 0.149.1"
     );
 }
 
@@ -315,7 +311,7 @@ async fn desktop_openai_account_uses_an_isolated_codex_home() {
     let directory = tempfile::tempdir().unwrap();
     let program = directory.path().join("fake-codex-home");
     let marker = directory.path().join("codex-home");
-    let home = directory.path().join("ariadne-codex");
+    let home = directory.path().join("rynna-codex");
     std::fs::write(
         &program,
         format!(
@@ -353,7 +349,7 @@ async fn desktop_openai_login_uses_the_same_isolated_codex_home() {
     let directory = tempfile::tempdir().unwrap();
     let program = directory.path().join("fake-codex-login-home");
     let marker = directory.path().join("codex-homes");
-    let home = directory.path().join("ariadne-codex");
+    let home = directory.path().join("rynna-codex");
     std::fs::write(
         &program,
         format!(
@@ -396,7 +392,7 @@ printf '%s\n' '{{"id":2,"result":{{"account":{{"type":"apiKey"}},"requiresOpenai
 
 #[cfg(unix)]
 #[test]
-fn desktop_codex_home_is_private_and_scoped_to_ariadne() {
+fn desktop_codex_home_is_private_and_scoped_to_rynna() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -404,7 +400,7 @@ fn desktop_codex_home_is_private_and_scoped_to_ariadne() {
 
     let home = prepare_codex_home(&config_directory).unwrap();
 
-    assert_eq!(home, config_directory.join("ariadne").join("codex"));
+    assert_eq!(home, config_directory.join("rynna").join("codex"));
     assert_eq!(
         std::fs::metadata(home).unwrap().permissions().mode() & 0o777,
         0o700
@@ -420,10 +416,10 @@ fn desktop_codex_home_rejects_a_symlink_target() {
     let ordinary_codex_home = directory.path().join("ordinary-codex");
     std::fs::create_dir(&ordinary_codex_home).unwrap();
     std::fs::set_permissions(&ordinary_codex_home, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::create_dir(directory.path().join("ariadne")).unwrap();
+    std::fs::create_dir(directory.path().join("rynna")).unwrap();
     symlink(
         &ordinary_codex_home,
-        directory.path().join("ariadne").join("codex"),
+        directory.path().join("rynna").join("codex"),
     )
     .unwrap();
 
@@ -454,15 +450,15 @@ fn desktop_codex_home_rejects_a_symlink_in_an_ancestor() {
 
     assert_eq!(
         error,
-        "Ariadne's Codex directory must not be a symbolic link or contain symbolic links"
+        "Rynna's Codex directory must not be a symbolic link or contain symbolic links"
     );
-    assert!(!outside.path().join("ariadne/codex").exists());
+    assert!(!outside.path().join("rynna/codex").exists());
 }
 
 #[tokio::test]
 #[ignore = "requires an installed, authenticated Codex CLI and consumes provider quota"]
 async fn live_codex_account_provider_returns_an_answer() {
-    let program = std::env::var_os("ARIADNE_CODEX_PATH").unwrap_or_else(|| "codex".into());
+    let program = std::env::var_os("RYNNA_CODEX_PATH").unwrap_or_else(|| "codex".into());
     let provider = Arc::new(CodexAppServerProvider::new(PathBuf::from(program), None));
     let agent = Agent::new(
         provider,
@@ -472,7 +468,7 @@ async fn live_codex_account_provider_returns_an_answer() {
     let response = agent
         .respond(
             &[
-                Message::user("The verification token is ARIADNE_LIVE_CODEX_OK."),
+                Message::user("The verification token is RYNNA_LIVE_CODEX_OK."),
                 Message::assistant("I will remember the verification token."),
             ],
             "Reply with the verification token only.",
@@ -480,17 +476,17 @@ async fn live_codex_account_provider_returns_an_answer() {
         .await
         .unwrap();
 
-    assert_eq!(response, Message::assistant("ARIADNE_LIVE_CODEX_OK"));
+    assert_eq!(response, Message::assistant("RYNNA_LIVE_CODEX_OK"));
 
     let no_tools = agent
         .respond(
             &[],
-            "Use a shell command to run `pwd`. If no shell tool is available, reply with ARIADNE_TOOLS_DISABLED only.",
+            "Use a shell command to run `pwd`. If no shell tool is available, reply with RYNNA_TOOLS_DISABLED only.",
         )
         .await
         .unwrap();
 
-    assert_eq!(no_tools, Message::assistant("ARIADNE_TOOLS_DISABLED"));
+    assert_eq!(no_tools, Message::assistant("RYNNA_TOOLS_DISABLED"));
 }
 
 #[cfg(unix)]
@@ -498,7 +494,7 @@ async fn live_codex_account_provider_returns_an_answer() {
 async fn desktop_composition_executes_command_capabilities_without_leaking_paths() {
     use std::os::unix::fs::PermissionsExt;
 
-    use ariadne_config::ProfileCatalog;
+    use rynna_config::ProfileCatalog;
     use serde_json::json;
 
     struct CommandProvider {
@@ -511,7 +507,7 @@ async fn desktop_composition_executes_command_capabilities_without_leaking_paths
             let has_result = request
                 .messages
                 .iter()
-                .any(|message| message.role == ariadne_core::Role::Tool);
+                .any(|message| message.role == rynna_core::Role::Tool);
             self.requests.lock().unwrap().push(request);
             if has_result {
                 Ok(Completion::new(Message::assistant("command complete")))

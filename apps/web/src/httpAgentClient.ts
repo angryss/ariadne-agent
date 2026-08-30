@@ -9,7 +9,7 @@ import type {
   ProviderInput,
   RespondRequest,
   RespondResponse,
-} from '@ariadne/ui';
+} from '@rynna/ui';
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -33,7 +33,7 @@ export class HttpAgentClient implements AgentClient {
   async listProviders(): Promise<ConfiguredProvider[]> {
     const body = await this.providerRequest(this.providersEndpoint, 'GET');
     if (!Array.isArray(body) || !body.every(isConfiguredProvider)) {
-      throw new Error('Ariadne API returned invalid provider data');
+      throw new Error('Rynna API returned invalid provider data');
     }
     return body;
   }
@@ -44,7 +44,7 @@ export class HttpAgentClient implements AgentClient {
       'GET',
     );
     if (!isOpenAiAccount(body)) {
-      throw new Error('Ariadne API returned invalid OpenAI account data');
+      throw new Error('Rynna API returned invalid OpenAI account data');
     }
     return body;
   }
@@ -59,7 +59,7 @@ export class HttpAgentClient implements AgentClient {
 
   async deleteProvider(kind: ConfiguredProvider['kind']): Promise<void> {
     const response = await this.fetcher(`${this.providersEndpoint}/${kind}`, { method: 'DELETE' });
-    if (!response.ok) throw new Error(`Ariadne API returned ${response.status}`);
+    if (!response.ok) throw new Error(`Rynna API returned ${response.status}`);
   }
 
   private async savedProvider(
@@ -69,7 +69,7 @@ export class HttpAgentClient implements AgentClient {
   ): Promise<ConfiguredProvider> {
     const body = await this.providerRequest(endpoint, method, provider);
     if (!isConfiguredProvider(body)) {
-      throw new Error('Ariadne API returned invalid provider data');
+      throw new Error('Rynna API returned invalid provider data');
     }
     return body;
   }
@@ -85,10 +85,10 @@ export class HttpAgentClient implements AgentClient {
     try {
       decoded = await response.json();
     } catch {
-      throw new Error(`Ariadne API returned ${response.status}`);
+      throw new Error(`Rynna API returned ${response.status}`);
     }
     if (!response.ok) {
-      throw new Error(readApiError(decoded) ?? `Ariadne API returned ${response.status}`);
+      throw new Error(readApiError(decoded) ?? `Rynna API returned ${response.status}`);
     }
     return decoded;
   }
@@ -104,15 +104,15 @@ export class HttpAgentClient implements AgentClient {
     } catch {
       throw new Error(
         response.ok
-          ? 'Ariadne API returned invalid profile data'
-          : `Ariadne API returned ${response.status}`,
+          ? 'Rynna API returned invalid profile data'
+          : `Rynna API returned ${response.status}`,
       );
     }
     if (!response.ok) {
-      throw new Error(readApiError(body) ?? `Ariadne API returned ${response.status}`);
+      throw new Error(readApiError(body) ?? `Rynna API returned ${response.status}`);
     }
     if (!isProfileCatalog(body)) {
-      throw new Error('Ariadne API returned invalid profile data');
+      throw new Error('Rynna API returned invalid profile data');
     }
     return body;
   }
@@ -134,15 +134,15 @@ export class HttpAgentClient implements AgentClient {
       body = await response.json();
     } catch {
       throw new Error(
-        response.ok ? 'Ariadne API returned an invalid response' : `Ariadne API returned ${response.status}`,
+        response.ok ? 'Rynna API returned an invalid response' : `Rynna API returned ${response.status}`,
       );
     }
 
     if (!response.ok) {
-      throw new Error(readApiError(body) ?? `Ariadne API returned ${response.status}`);
+      throw new Error(readApiError(body) ?? `Rynna API returned ${response.status}`);
     }
     if (!isRespondResponse(body)) {
-      throw new Error('Ariadne API returned an invalid response');
+      throw new Error('Rynna API returned an invalid response');
     }
 
     return body;
@@ -165,12 +165,12 @@ export class HttpAgentClient implements AgentClient {
       try {
         body = await response.json();
       } catch {
-        throw new Error(`Ariadne API returned ${response.status}`);
+        throw new Error(`Rynna API returned ${response.status}`);
       }
-      throw new Error(readApiError(body) ?? `Ariadne API returned ${response.status}`);
+      throw new Error(readApiError(body) ?? `Rynna API returned ${response.status}`);
     }
     if (!response.body) {
-      throw new Error('Ariadne API returned an invalid stream');
+      throw new Error('Rynna API returned an invalid stream');
     }
 
     const reader = response.body.getReader();
@@ -195,7 +195,7 @@ export class HttpAgentClient implements AgentClient {
         try {
           event = JSON.parse(data);
         } catch {
-          throw new Error('Ariadne API returned an invalid stream event');
+          throw new Error('Rynna API returned an invalid stream event');
         }
         if (isCompletionDelta(event)) {
           onDelta(event);
@@ -204,7 +204,7 @@ export class HttpAgentClient implements AgentClient {
         } else if (isErrorEvent(event)) {
           throw new Error(event.message);
         } else {
-          throw new Error('Ariadne API returned an invalid stream event');
+          throw new Error('Rynna API returned an invalid stream event');
         }
       }
     };
@@ -224,14 +224,14 @@ export class HttpAgentClient implements AgentClient {
     }
 
     if (!result) {
-      throw new Error('Ariadne API stream ended without a response');
+      throw new Error('Rynna API stream ended without a response');
     }
     return result;
   }
 }
 
 function defaultEndpoint(): string {
-  const baseUrl = import.meta.env.VITE_ARIADNE_API_URL?.replace(/\/$/, '') ?? '';
+  const baseUrl = import.meta.env.VITE_RYNNA_API_URL?.replace(/\/$/, '') ?? '';
   return `${baseUrl}/v1/respond`;
 }
 
