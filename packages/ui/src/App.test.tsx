@@ -15,7 +15,7 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App client={client} />);
 
-    await user.type(screen.getByLabelText('Message Ariadne'), 'Help me plan this');
+    await user.type(screen.getByLabelText('Message Rynna'), 'Help me plan this');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
     expect(client.respond).toHaveBeenCalledWith(
@@ -36,7 +36,7 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App client={{ respond }} />);
 
-    await user.type(screen.getByLabelText('Message Ariadne'), 'Send with Enter{Enter}');
+    await user.type(screen.getByLabelText('Message Rynna'), 'Send with Enter{Enter}');
 
     expect(respond).toHaveBeenCalledWith(
       {
@@ -60,7 +60,7 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App client={client} />);
 
-    await user.type(screen.getByLabelText('Message Ariadne'), 'Investigate this');
+    await user.type(screen.getByLabelText('Message Rynna'), 'Investigate this');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
     expect(await screen.findByText('Here is the result.')).toBeInTheDocument();
@@ -91,7 +91,7 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App client={client} />);
 
-    await user.type(screen.getByLabelText('Message Ariadne'), 'Which operating system?');
+    await user.type(screen.getByLabelText('Message Rynna'), 'Which operating system?');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
     expect(await screen.findByText('The computer is running macOS 26.6.1.')).toBeInTheDocument();
@@ -110,7 +110,7 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App client={client} />);
 
-    await user.type(screen.getByLabelText('Message Ariadne'), 'Answer this');
+    await user.type(screen.getByLabelText('Message Rynna'), 'Answer this');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
     expect(await screen.findByText('Verified final answer')).toBeInTheDocument();
@@ -124,7 +124,7 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App client={client} />);
 
-    await user.type(screen.getByLabelText('Message Ariadne'), 'Try this');
+    await user.type(screen.getByLabelText('Message Rynna'), 'Try this');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('The local server is unavailable');
@@ -141,7 +141,7 @@ describe('App', () => {
     const user = userEvent.setup();
     render(<App client={{ respond }} />);
 
-    await user.type(screen.getByLabelText('Message Ariadne'), 'Retry this');
+    await user.type(screen.getByLabelText('Message Rynna'), 'Retry this');
     await user.click(screen.getByRole('button', { name: 'Send' }));
     await screen.findByRole('alert');
     await user.click(screen.getByRole('button', { name: 'Send' }));
@@ -191,12 +191,12 @@ describe('App', () => {
 
     const profile = await screen.findByLabelText('Profile');
     expect(screen.getByText('workspace capability')).toBeInTheDocument();
-    await user.type(screen.getByLabelText('Message Ariadne'), 'Use local');
+    await user.type(screen.getByLabelText('Message Rynna'), 'Use local');
     await user.click(screen.getByRole('button', { name: 'Send' }));
     await screen.findByText('Work reply.');
 
     await user.selectOptions(profile, 'work');
-    await user.type(screen.getByLabelText('Message Ariadne'), 'Use work');
+    await user.type(screen.getByLabelText('Message Rynna'), 'Use work');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
     expect(respond).toHaveBeenNthCalledWith(
@@ -370,7 +370,7 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     expect(await screen.findByRole('heading', { name: 'Providers' })).toBeInTheDocument();
     expect(
-      screen.getByText(/Provider credentials are stored here; runtime profiles and models load from ariadne.toml/),
+      screen.getByText(/Provider credentials are stored here; runtime profiles and models load from rynna.toml/),
     ).toBeInTheDocument();
     expect(screen.getByText('No providers configured.')).toBeInTheDocument();
 
@@ -555,7 +555,7 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Add provider' }));
     await user.selectOptions(screen.getByLabelText('Provider type'), 'anthropic');
-    expect(screen.getByText(/Ariadne tools are disabled/)).toBeInTheDocument();
+    expect(screen.getByText(/Rynna tools are disabled/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Save provider' }));
 
     expect(createProvider).toHaveBeenCalledWith({

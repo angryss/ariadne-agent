@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use ariadne_core::{
+use async_trait::async_trait;
+use rynna_core::{
     Completion, CompletionDelta, CompletionRequest, Message, ModelProvider, ProviderError, Role,
 };
-use async_trait::async_trait;
 use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::time::{Duration, Instant};
@@ -78,7 +78,7 @@ impl CodexAppServerProvider {
                 .any(|message| !message.tool_calls.is_empty() || message.tool_call_id.is_some())
         {
             return Err(ProviderError::new(
-                "Codex account profiles do not accept Ariadne tool calls",
+                "Codex account profiles do not accept Rynna tool calls",
             ));
         }
 
@@ -87,7 +87,7 @@ impl CodexAppServerProvider {
             .iter()
             .find(|message| message.role == Role::System)
             .map(|message| message.content.as_str())
-            .unwrap_or("You are Ariadne, a careful AI software agent.");
+            .unwrap_or("You are Rynna, a careful AI software agent.");
         let last_user = request
             .messages
             .iter()
@@ -107,7 +107,7 @@ impl CodexAppServerProvider {
         if reuse_existing {
             command
                 .env_remove("CODEX_HOME")
-                .env_remove("ARIADNE_CODEX_HOME");
+                .env_remove("RYNNA_CODEX_HOME");
         } else if let Some(codex_home) = &self.codex_home {
             command.env(
                 "CODEX_HOME",
@@ -116,7 +116,7 @@ impl CodexAppServerProvider {
         } else {
             command
                 .env_remove("CODEX_HOME")
-                .env_remove("ARIADNE_CODEX_HOME");
+                .env_remove("RYNNA_CODEX_HOME");
         }
         let mut child = command
             .arg("app-server")
@@ -143,7 +143,7 @@ impl CodexAppServerProvider {
                 "method": "initialize",
                 "id": 1,
                 "params": {
-                    "clientInfo": {"name": "ariadne", "title": "Ariadne", "version": env!("CARGO_PKG_VERSION")},
+                    "clientInfo": {"name": "rynna", "title": "Rynna", "version": env!("CARGO_PKG_VERSION")},
                     "capabilities": {"experimentalApi": true}
                 }
             }),
@@ -176,7 +176,7 @@ impl CodexAppServerProvider {
             "baseInstructions": format!(
                 "{system_prompt}\n\nDo not run commands, inspect files, or use tools. Answer only from the supplied conversation."
             ),
-            "serviceName": "ariadne"
+            "serviceName": "rynna"
         });
         if let Some(model) = &self.model {
             thread_params["model"] = serde_json::Value::String(model.clone());
@@ -343,7 +343,7 @@ async fn verify_codex_version(
         || String::from_utf8_lossy(&output.stdout).trim() != SUPPORTED_CODEX_VERSION
     {
         return Err(ProviderError::new(format!(
-            "unsupported Codex CLI version; Ariadne requires {SUPPORTED_CODEX_VERSION}"
+            "unsupported Codex CLI version; Rynna requires {SUPPORTED_CODEX_VERSION}"
         )));
     }
     Ok(())

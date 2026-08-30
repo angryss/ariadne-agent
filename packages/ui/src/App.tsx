@@ -119,7 +119,7 @@ export function App({ client }: AppProps) {
           setError(
             profileError instanceof Error
               ? profileError.message
-              : 'Ariadne could not load profiles',
+              : 'Rynna could not load profiles',
           );
         }
       });
@@ -188,7 +188,7 @@ export function App({ client }: AppProps) {
             setError(
               providerError instanceof Error
                 ? providerError.message
-                : 'Ariadne could not load provider settings',
+                : 'Rynna could not load provider settings',
             );
           }
         });
@@ -215,7 +215,7 @@ export function App({ client }: AppProps) {
       setError(
         connectError instanceof Error
           ? connectError.message
-          : 'Ariadne could not connect OpenAI',
+          : 'Rynna could not connect OpenAI',
       );
     } finally {
       setApiKey('');
@@ -292,7 +292,7 @@ export function App({ client }: AppProps) {
       setError(
         providerError instanceof Error
           ? providerError.message
-          : 'Ariadne could not save the provider',
+          : 'Rynna could not save the provider',
       );
     } finally {
       setProviderApiKey('');
@@ -314,7 +314,7 @@ export function App({ client }: AppProps) {
       setError(
         providerError instanceof Error
           ? providerError.message
-          : 'Ariadne could not delete the provider',
+          : 'Rynna could not delete the provider',
       );
     } finally {
       setSavingProvider(false);
@@ -345,7 +345,7 @@ export function App({ client }: AppProps) {
       });
       setMessages((current) => finalizeResponse(current, response.message));
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Ariadne could not complete the request');
+      setError(requestError instanceof Error ? requestError.message : 'Rynna could not complete the request');
       setMessages(displayHistory);
       setInput(prompt);
     } finally {
@@ -358,7 +358,7 @@ export function App({ client }: AppProps) {
       <header className="app-header">
         <div>
           <p className="eyebrow">Local-first agent</p>
-          <h1>Ariadne</h1>
+          <h1>Rynna</h1>
         </div>
         <div className="header-actions">
           {profiles.length > 0 ? (
@@ -471,7 +471,7 @@ export function App({ client }: AppProps) {
             </button>
           </div>
           <p>
-            Provider credentials are stored here; runtime profiles and models load from ariadne.toml
+            Provider credentials are stored here; runtime profiles and models load from rynna.toml
             at startup.
           </p>
           {providerSettings.length === 0 ? (
@@ -595,7 +595,7 @@ export function App({ client }: AppProps) {
                         {existingOpenAiAccount.plan
                           ? `ChatGPT ${formatPlan(existingOpenAiAccount.plan)}`
                           : 'A ChatGPT subscription'} is already connected. Use it or sign in with a
-                        different account for Ariadne.
+                        different account for Rynna.
                       </p>
                       <div className="provider-actions">
                         <button
@@ -636,8 +636,8 @@ export function App({ client }: AppProps) {
                   </select>
                   <p>
                     {anthropicAuthentication === 'subscription'
-                      ? 'A browser window will open for Claude login. Ariadne tools are disabled for this mode.'
-                      : 'Set ANTHROPIC_API_KEY in the Ariadne process environment; the key is never saved in provider settings.'}
+                      ? 'A browser window will open for Claude login. Rynna tools are disabled for this mode.'
+                      : 'Set ANTHROPIC_API_KEY in the Rynna process environment; the key is never saved in provider settings.'}
                   </p>
                 </>
               )}
@@ -679,7 +679,7 @@ export function App({ client }: AppProps) {
             <div className="empty-state">
               <p className="thread-mark" aria-hidden="true">A</p>
               <h2>What should we work through?</h2>
-              <p>Ask Ariadne to investigate, plan, or execute a development task.</p>
+              <p>Ask Rynna to investigate, plan, or execute a development task.</p>
             </div>
           ) : (
             messages.map((message, index) =>
@@ -704,7 +704,7 @@ export function App({ client }: AppProps) {
                 </details>
               ) : (
                 <article className={`message message-${message.role}`} key={`${message.role}-${index}`}>
-                  <p className="message-role">{message.role === 'assistant' ? 'Ariadne' : 'You'}</p>
+                  <p className="message-role">{message.role === 'assistant' ? 'Rynna' : 'You'}</p>
                   <p>{message.content}</p>
                 </article>
               ),
@@ -714,7 +714,7 @@ export function App({ client }: AppProps) {
 
         {error ? <p className="request-error" role="alert">{error}</p> : null}
         <form className="composer" onSubmit={submit}>
-          <label htmlFor="prompt">Message Ariadne</label>
+          <label htmlFor="prompt">Message Rynna</label>
           <div className="composer-row">
             <textarea
               id="prompt"

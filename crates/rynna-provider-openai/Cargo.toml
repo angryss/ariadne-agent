@@ -1,0 +1,20 @@
+[package]
+name = "rynna-provider-openai"
+description = "OpenAI-compatible model provider adapter for Rynna"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rynna-core = { path = "../rynna-core" }
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+wiremock = "0.6"

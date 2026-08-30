@@ -23,4 +23,4 @@ apps/desktop/src-tauri/gen/
 !.vscode/settings.json
 
 # Runtime data
-.ariadne/
+.rynna/

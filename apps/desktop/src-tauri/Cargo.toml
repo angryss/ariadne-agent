@@ -1,6 +1,6 @@
 [package]
-name = "ariadne-desktop"
-description = "Tauri desktop host for Ariadne"
+name = "rynna-desktop"
+description = "Tauri desktop host for Rynna"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,11 +8,11 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-name = "ariadne_desktop"
+name = "rynna_desktop"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [[bin]]
-name = "ariadne-desktop"
+name = "rynna-desktop"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -20,12 +20,12 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 async-trait.workspace = true
-ariadne-config = { path = "../../../crates/ariadne-config" }
-ariadne-core = { path = "../../../crates/ariadne-core" }
-ariadne-provider-anthropic = { path = "../../../crates/ariadne-provider-anthropic" }
-ariadne-provider-openai = { path = "../../../crates/ariadne-provider-openai" }
-ariadne-tools-command = { path = "../../../crates/ariadne-tools-command" }
-ariadne-tools-filesystem = { path = "../../../crates/ariadne-tools-filesystem" }
+rynna-config = { path = "../../../crates/rynna-config" }
+rynna-core = { path = "../../../crates/rynna-core" }
+rynna-provider-anthropic = { path = "../../../crates/rynna-provider-anthropic" }
+rynna-provider-openai = { path = "../../../crates/rynna-provider-openai" }
+rynna-tools-command = { path = "../../../crates/rynna-tools-command" }
+rynna-tools-filesystem = { path = "../../../crates/rynna-tools-filesystem" }
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

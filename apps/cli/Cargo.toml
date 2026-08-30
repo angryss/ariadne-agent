@@ -1,6 +1,6 @@
 [package]
-name = "ariadne-cli"
-description = "CLI and server executable for Ariadne"
+name = "rynna-cli"
+description = "CLI and server executable for Rynna"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,18 +8,18 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "ariadne"
+name = "rynna"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-ariadne-config = { path = "../../crates/ariadne-config" }
-ariadne-core = { path = "../../crates/ariadne-core" }
-ariadne-provider-anthropic = { path = "../../crates/ariadne-provider-anthropic" }
-ariadne-provider-openai = { path = "../../crates/ariadne-provider-openai" }
-ariadne-server = { path = "../../crates/ariadne-server" }
-ariadne-tools-command = { path = "../../crates/ariadne-tools-command" }
-ariadne-tools-filesystem = { path = "../../crates/ariadne-tools-filesystem" }
+rynna-config = { path = "../../crates/rynna-config" }
+rynna-core = { path = "../../crates/rynna-core" }
+rynna-provider-anthropic = { path = "../../crates/rynna-provider-anthropic" }
+rynna-provider-openai = { path = "../../crates/rynna-provider-openai" }
+rynna-server = { path = "../../crates/rynna-server" }
+rynna-tools-command = { path = "../../crates/rynna-tools-command" }
+rynna-tools-filesystem = { path = "../../crates/rynna-tools-filesystem" }
 axum.workspace = true
 clap.workspace = true
 crossterm.workspace = true

@@ -29,7 +29,7 @@ active_skills = ["github"]
     )
     .unwrap();
 
-    let output = Command::cargo_bin("ariadne")
+    let output = Command::cargo_bin("rynna")
         .unwrap()
         .args([
             "--config",
@@ -75,7 +75,7 @@ model = "work-model"
     )
     .unwrap();
 
-    let output = Command::cargo_bin("ariadne")
+    let output = Command::cargo_bin("rynna")
         .unwrap()
         .args([
             "--config",
@@ -100,7 +100,7 @@ model = "work-model"
 
 #[test]
 fn profiles_rejects_a_blank_effective_model() {
-    let mut command = Command::cargo_bin("ariadne").unwrap();
+    let mut command = Command::cargo_bin("rynna").unwrap();
     command.args(["--model", "   ", "profiles"]);
 
     command

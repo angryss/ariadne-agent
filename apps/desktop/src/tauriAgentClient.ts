@@ -11,7 +11,7 @@ import type {
   ProviderInput,
   RespondRequest,
   RespondResponse,
-} from '@ariadne/ui';
+} from '@rynna/ui';
 
 type Invoker = (command: string, args: Record<string, unknown>) => Promise<unknown>;
 interface DeltaChannel {
@@ -34,7 +34,7 @@ export class TauriAgentClient implements AgentClient {
   async listProfiles(): Promise<ProfileCatalog> {
     const profiles = await this.invoke('profiles', {});
     if (!isProfileCatalog(profiles)) {
-      throw new Error('Ariadne desktop returned invalid profile data');
+      throw new Error('Rynna desktop returned invalid profile data');
     }
     return profiles;
   }
@@ -42,7 +42,7 @@ export class TauriAgentClient implements AgentClient {
   async getOpenAiAccount(): Promise<OpenAiAccount> {
     const account = await this.invoke('openai_account', {});
     if (!isOpenAiAccount(account)) {
-      throw new Error('Ariadne desktop returned invalid OpenAI account data');
+      throw new Error('Rynna desktop returned invalid OpenAI account data');
     }
     return account;
   }
@@ -50,7 +50,7 @@ export class TauriAgentClient implements AgentClient {
   async getExistingOpenAiAccount(): Promise<OpenAiAccount> {
     const account = await this.invoke('existing_openai_account', {});
     if (!isOpenAiAccount(account)) {
-      throw new Error('Ariadne desktop returned invalid existing OpenAI account data');
+      throw new Error('Rynna desktop returned invalid existing OpenAI account data');
     }
     return account;
   }
@@ -58,7 +58,7 @@ export class TauriAgentClient implements AgentClient {
   async connectOpenAi(request: ConnectOpenAiRequest): Promise<OpenAiAccount> {
     const account = await this.invoke('connect_openai', { request });
     if (!isOpenAiAccount(account)) {
-      throw new Error('Ariadne desktop returned invalid OpenAI account data');
+      throw new Error('Rynna desktop returned invalid OpenAI account data');
     }
     return account;
   }
@@ -66,7 +66,7 @@ export class TauriAgentClient implements AgentClient {
   async listProviders(): Promise<ConfiguredProvider[]> {
     const providers = await this.invoke('list_providers', {});
     if (!Array.isArray(providers) || !providers.every(isConfiguredProvider)) {
-      throw new Error('Ariadne desktop returned invalid provider data');
+      throw new Error('Rynna desktop returned invalid provider data');
     }
     return providers;
   }
@@ -86,7 +86,7 @@ export class TauriAgentClient implements AgentClient {
   private async saveProvider(command: string, provider: ProviderInput): Promise<ConfiguredProvider> {
     const saved = await this.invoke(command, { provider });
     if (!isConfiguredProvider(saved)) {
-      throw new Error('Ariadne desktop returned invalid provider data');
+      throw new Error('Rynna desktop returned invalid provider data');
     }
     return saved;
   }
@@ -113,10 +113,10 @@ export class TauriAgentClient implements AgentClient {
 
     const response = await this.invoke(command, args);
     if (invalidDelta) {
-      throw new Error('Ariadne desktop returned invalid stream data');
+      throw new Error('Rynna desktop returned invalid stream data');
     }
     if (!isRespondResponse(response)) {
-      throw new Error('Ariadne desktop returned an invalid response');
+      throw new Error('Rynna desktop returned an invalid response');
     }
     return response;
   }

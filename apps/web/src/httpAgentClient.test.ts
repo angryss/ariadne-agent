@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { HttpAgentClient } from './httpAgentClient';
 
 describe('HttpAgentClient', () => {
-  it('posts a response request to the Ariadne API', async () => {
+  it('posts a response request to the Rynna API', async () => {
     const fetcher = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -28,7 +28,7 @@ describe('HttpAgentClient', () => {
     expect(response.message.content).toBe('From the server.');
   });
 
-  it('streams typed thinking and content events from the Ariadne API', async () => {
+  it('streams typed thinking and content events from the Rynna API', async () => {
     const fetcher = vi.fn().mockResolvedValue(
       new Response(
         [
@@ -70,7 +70,7 @@ describe('HttpAgentClient', () => {
     const client = new HttpAgentClient('/v1/respond', fetcher);
 
     await expect(client.respond({ prompt: 'Hello', history: [] })).rejects.toThrow(
-      'Ariadne API returned 502',
+      'Rynna API returned 502',
     );
   });
 

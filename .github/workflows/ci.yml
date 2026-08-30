@@ -20,7 +20,7 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test -p ariadne-tools-command -p ariadne-config
+      - run: cargo test -p rynna-tools-command -p rynna-config
 
   rust:
     runs-on: ubuntu-24.04
@@ -68,4 +68,4 @@ jobs:
         with:
           context: .
           push: false
-          tags: ariadne:ci
+          tags: rynna:ci

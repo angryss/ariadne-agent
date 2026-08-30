@@ -1,16 +1,16 @@
 services:
-  ariadne:
+  rynna:
     build:
       context: .
-    image: ariadne:local
+    image: rynna:local
     restart: unless-stopped
     ports:
-      - "${ARIADNE_HOST_BIND:-127.0.0.1}:3000:3000"
+      - "${RYNNA_HOST_BIND:-127.0.0.1}:3000:3000"
     environment:
-      ARIADNE_API_BASE: "${ARIADNE_API_BASE:-http://host.docker.internal:11434/v1}"
-      ARIADNE_MODEL: "${ARIADNE_MODEL:-qwen3:8b}"
-      ARIADNE_API_KEY: "${ARIADNE_API_KEY:-}"
-      ARIADNE_SYSTEM_PROMPT: "${ARIADNE_SYSTEM_PROMPT:-You are Ariadne, a careful and capable AI software agent.}"
+      RYNNA_API_BASE: "${RYNNA_API_BASE:-http://host.docker.internal:11434/v1}"
+      RYNNA_MODEL: "${RYNNA_MODEL:-qwen3:8b}"
+      RYNNA_API_KEY: "${RYNNA_API_KEY:-}"
+      RYNNA_SYSTEM_PROMPT: "${RYNNA_SYSTEM_PROMPT:-You are Rynna, a careful and capable AI software agent.}"
       RUST_LOG: "${RUST_LOG:-warn}"
     extra_hosts:
       # Linux host Ollama must listen beyond loopback; see README.md.

@@ -11,7 +11,7 @@ mod unix {
         let address = listener.local_addr().unwrap();
         drop(listener);
 
-        let mut command = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("ariadne"));
+        let mut command = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("rynna"));
         let mut child = command
             .args(["serve", "--bind", &address.to_string()])
             .spawn()
@@ -22,7 +22,7 @@ mod unix {
             if Instant::now() >= ready_deadline {
                 child.kill().unwrap();
                 child.wait().unwrap();
-                panic!("Ariadne server did not become ready");
+                panic!("Rynna server did not become ready");
             }
             thread::sleep(Duration::from_millis(20));
         }
@@ -42,7 +42,7 @@ mod unix {
             if Instant::now() >= exit_deadline {
                 child.kill().unwrap();
                 child.wait().unwrap();
-                panic!("Ariadne server did not stop after SIGTERM");
+                panic!("Rynna server did not stop after SIGTERM");
             }
             thread::sleep(Duration::from_millis(20));
         }

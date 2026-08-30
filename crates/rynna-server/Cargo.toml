@@ -1,0 +1,27 @@
+[package]
+name = "rynna-server"
+description = "HTTP server adapter for Rynna"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rynna-config = { path = "../rynna-config" }
+rynna-core = { path = "../rynna-core" }
+rynna-provider-anthropic = { path = "../rynna-provider-anthropic" }
+axum.workspace = true
+dirs.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+tokio.workspace = true
+tower.workspace = true
