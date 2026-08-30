@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,62 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_context: Option<ProviderContext>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "provider", content = "state", rename_all = "snake_case")]
+pub enum ProviderContext {
+    OpenAi(Vec<serde_json::Value>),
+    AnthropicCompaction(Option<String>),
+    ManagedToken(String),
+}
+
+fn has_direct_compaction(message: &Message) -> bool {
+    match message.provider_context.as_ref() {
+        Some(ProviderContext::OpenAi(output)) => output
+            .iter()
+            .any(|item| item["type"].as_str() == Some("compaction")),
+        Some(ProviderContext::AnthropicCompaction(Some(_))) => true,
+        _ => false,
+    }
+}
+
+fn has_direct_provider_context(message: &Message) -> bool {
+    matches!(
+        message.provider_context,
+        Some(ProviderContext::OpenAi(_) | ProviderContext::AnthropicCompaction(_))
+    )
+}
+
+fn halve_longest_content(messages: &mut [Message]) -> bool {
+    let Some(message) = messages
+        .iter_mut()
+        .max_by_key(|message| message.content.len())
+    else {
+        return false;
+    };
+    if message.content.is_empty() {
+        return false;
+    }
+    let desired = message.content.len() / 2;
+    let boundary = message
+        .content
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= desired)
+        .last()
+        .unwrap_or(0);
+    message.content.truncate(boundary);
+    true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServerCompaction {
+    OpenAi,
+    Anthropic,
+    Other,
 }
 
 impl Message {
@@ -32,6 +89,7 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_context: None,
         }
     }
 
@@ -41,6 +99,7 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_context: None,
         }
     }
 
@@ -50,6 +109,7 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_context: None,
         }
     }
 
@@ -59,6 +119,7 @@ impl Message {
             content: String::new(),
             tool_calls,
             tool_call_id: None,
+            provider_context: None,
         }
     }
 
@@ -68,6 +129,7 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
+            provider_context: None,
         }
     }
 }
@@ -138,6 +200,223 @@ pub trait Tool: Send + Sync {
 pub struct CompletionRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContextSize {
+    pub current_tokens: usize,
+    pub max_tokens: usize,
+}
+
+impl ContextSize {
+    pub fn remaining_tokens(self) -> usize {
+        self.max_tokens.saturating_sub(self.current_tokens)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextPlan {
+    pub request: CompletionRequest,
+    pub size: ContextSize,
+    pub server_compaction_threshold: Option<usize>,
+    pub compacted: bool,
+}
+
+pub trait ContextManagement: Send + Sync {
+    fn prepare(
+        &self,
+        request: CompletionRequest,
+        server_compaction: Option<ServerCompaction>,
+    ) -> ContextPlan;
+
+    fn current_size(&self) -> ContextSize;
+}
+
+#[derive(Debug, Error)]
+pub enum ContextConfigError {
+    #[error("context window must contain at least one token")]
+    EmptyWindow,
+    #[error("compaction threshold must be below the context window")]
+    InvalidThreshold,
+}
+
+pub struct ThresholdContextManager {
+    max_tokens: usize,
+    compact_at_tokens: usize,
+    current_tokens: AtomicUsize,
+}
+
+impl ThresholdContextManager {
+    pub fn new(max_tokens: usize, compact_at_tokens: usize) -> Result<Self, ContextConfigError> {
+        if max_tokens == 0 {
+            return Err(ContextConfigError::EmptyWindow);
+        }
+        if compact_at_tokens == 0 || compact_at_tokens >= max_tokens {
+            return Err(ContextConfigError::InvalidThreshold);
+        }
+        Ok(Self {
+            max_tokens,
+            compact_at_tokens,
+            current_tokens: AtomicUsize::new(0),
+        })
+    }
+
+    fn estimate(request: &CompletionRequest, server_compaction: Option<ServerCompaction>) -> usize {
+        let context_start = server_compaction
+            .and_then(|server_compaction| {
+                request
+                    .messages
+                    .iter()
+                    .rposition(|message| match &message.provider_context {
+                        Some(ProviderContext::OpenAi(output))
+                            if server_compaction == ServerCompaction::OpenAi =>
+                        {
+                            output
+                                .iter()
+                                .any(|item| item["type"].as_str() == Some("compaction"))
+                        }
+                        Some(ProviderContext::AnthropicCompaction(Some(_)))
+                            if server_compaction == ServerCompaction::Anthropic =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    })
+            })
+            .unwrap_or(0);
+        let message_tokens = request
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| *index >= context_start || message.role == Role::System)
+            .fold(0_usize, |total, (_, message)| {
+                let tool_tokens = message.tool_calls.iter().fold(0_usize, |tool_total, call| {
+                    tool_total
+                        .saturating_add(call.id.len())
+                        .saturating_add(call.name.len())
+                        .saturating_add(call.arguments.to_string().len())
+                });
+                let provider_context_tokens = serde_json::to_vec(&message.provider_context)
+                    .map_or(0, |context| context.len());
+                total
+                    .saturating_add(message.content.len())
+                    .saturating_add(message.tool_call_id.as_ref().map_or(0, String::len))
+                    .saturating_add(tool_tokens)
+                    .saturating_add(provider_context_tokens)
+                    .saturating_add(16)
+            });
+        let tool_tokens = serde_json::to_vec(&request.tools).map_or(0, |tools| tools.len());
+        message_tokens.saturating_add(tool_tokens).div_ceil(4)
+    }
+
+    fn compact_locally(&self, request: CompletionRequest) -> CompletionRequest {
+        let CompletionRequest { messages, tools } = request;
+        let mut retained = messages
+            .iter()
+            .take_while(|message| message.role == Role::System)
+            .cloned()
+            .collect::<Vec<_>>();
+        let system_count = retained.len();
+        let target = self.compact_at_tokens / 2;
+        let mut groups: Vec<Vec<Message>> = Vec::new();
+        for mut message in messages.into_iter().skip(system_count) {
+            message.provider_context = None;
+            let belongs_to_tool_call = message.role == Role::Tool
+                && groups.last().is_some_and(|group| {
+                    group
+                        .first()
+                        .is_some_and(|first| !first.tool_calls.is_empty())
+                });
+            if belongs_to_tool_call {
+                groups
+                    .last_mut()
+                    .expect("the tool group exists")
+                    .push(message);
+            } else {
+                groups.push(vec![message]);
+            }
+        }
+        let mut suffix_groups: Vec<Vec<Message>> = Vec::new();
+        'groups: for group in groups.into_iter().rev() {
+            suffix_groups.push(group);
+            loop {
+                let mut candidate = retained.clone();
+                candidate.extend(
+                    suffix_groups
+                        .iter()
+                        .rev()
+                        .flat_map(|group| group.iter().cloned()),
+                );
+                if Self::estimate(
+                    &CompletionRequest {
+                        messages: candidate,
+                        tools: tools.clone(),
+                    },
+                    None,
+                ) <= target
+                {
+                    break;
+                }
+                if suffix_groups.len() > 1 {
+                    suffix_groups.pop();
+                    break 'groups;
+                }
+                if !halve_longest_content(&mut suffix_groups[0]) {
+                    suffix_groups.pop();
+                    break 'groups;
+                }
+            }
+        }
+        retained.extend(suffix_groups.into_iter().rev().flatten());
+        CompletionRequest {
+            messages: retained,
+            tools,
+        }
+    }
+}
+
+impl Default for ThresholdContextManager {
+    fn default() -> Self {
+        Self::new(128_000, 112_000).expect("the default context limits are valid")
+    }
+}
+
+impl ContextManagement for ThresholdContextManager {
+    fn prepare(
+        &self,
+        request: CompletionRequest,
+        server_compaction: Option<ServerCompaction>,
+    ) -> ContextPlan {
+        let original_size = Self::estimate(&request, server_compaction);
+        let near_limit = original_size >= self.compact_at_tokens;
+        let (request, compacted, server_compaction_threshold) = if near_limit {
+            if server_compaction.is_some() {
+                (request, false, Some(self.compact_at_tokens))
+            } else {
+                (self.compact_locally(request), true, None)
+            }
+        } else {
+            (request, false, None)
+        };
+        let current_tokens = Self::estimate(&request, server_compaction);
+        self.current_tokens.store(current_tokens, Ordering::Relaxed);
+        ContextPlan {
+            request,
+            size: ContextSize {
+                current_tokens,
+                max_tokens: self.max_tokens,
+            },
+            server_compaction_threshold,
+            compacted,
+        }
+    }
+
+    fn current_size(&self) -> ContextSize {
+        ContextSize {
+            current_tokens: self.current_tokens.load(Ordering::Relaxed),
+            max_tokens: self.max_tokens,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,6 +513,14 @@ impl ProviderError {
 pub trait ModelProvider: Send + Sync {
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError>;
 
+    fn server_compaction(&self) -> Option<ServerCompaction> {
+        None
+    }
+
+    async fn complete_managed(&self, plan: ContextPlan) -> Result<Completion, ProviderError> {
+        self.complete(plan.request).await
+    }
+
     async fn complete_stream(
         &self,
         request: CompletionRequest,
@@ -244,6 +531,22 @@ pub trait ModelProvider: Send + Sync {
             completion.message.content.clone(),
         ));
         Ok(completion)
+    }
+
+    async fn complete_stream_managed(
+        &self,
+        plan: ContextPlan,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+    ) -> Result<Completion, ProviderError> {
+        if plan.server_compaction_threshold.is_some() {
+            let completion = self.complete_managed(plan).await?;
+            on_delta(&CompletionDelta::Content(
+                completion.message.content.clone(),
+            ));
+            Ok(completion)
+        } else {
+            self.complete_stream(plan.request, on_delta).await
+        }
     }
 }
 
@@ -277,11 +580,39 @@ pub enum AgentError {
     Provider(#[from] ProviderError),
 }
 
+const MAX_MANAGED_CONTEXTS: usize = 16;
+
+#[derive(Default)]
+struct ManagedContextStore {
+    contexts: BTreeMap<String, Vec<Message>>,
+    order: VecDeque<String>,
+}
+
+impl ManagedContextStore {
+    fn insert(&mut self, messages: Vec<Message>) -> String {
+        let token = uuid::Uuid::new_v4().to_string();
+        self.contexts.insert(token.clone(), messages);
+        self.order.push_back(token.clone());
+        while self.order.len() > MAX_MANAGED_CONTEXTS {
+            if let Some(expired) = self.order.pop_front() {
+                self.contexts.remove(&expired);
+            }
+        }
+        token
+    }
+
+    fn get(&self, token: &str) -> Option<&[Message]> {
+        self.contexts.get(token).map(Vec::as_slice)
+    }
+}
+
 #[derive(Clone)]
 pub struct Agent {
     provider: Arc<dyn ModelProvider>,
     system_prompt: Arc<str>,
     tools: Arc<BTreeMap<String, Arc<dyn Tool>>>,
+    context_manager: Arc<dyn ContextManagement>,
+    managed_contexts: Arc<Mutex<ManagedContextStore>>,
 }
 
 const MAX_MODEL_TURNS: usize = 8;
@@ -297,6 +628,8 @@ impl Agent {
             provider,
             system_prompt: system_prompt.into(),
             tools: Arc::new(BTreeMap::new()),
+            context_manager: Arc::new(ThresholdContextManager::default()),
+            managed_contexts: Arc::new(Mutex::new(ManagedContextStore::default())),
         }
     }
 
@@ -319,7 +652,18 @@ impl Agent {
             provider,
             system_prompt: system_prompt.into(),
             tools: Arc::new(indexed),
+            context_manager: Arc::new(ThresholdContextManager::default()),
+            managed_contexts: Arc::new(Mutex::new(ManagedContextStore::default())),
         })
+    }
+
+    pub fn with_context_manager(mut self, context_manager: Arc<dyn ContextManagement>) -> Self {
+        self.context_manager = context_manager;
+        self
+    }
+
+    pub fn context_size(&self) -> ContextSize {
+        self.context_manager.current_size()
     }
 
     pub async fn respond(&self, history: &[Message], input: &str) -> Result<Message, AgentError> {
@@ -347,17 +691,46 @@ impl Agent {
         if input.trim().is_empty() {
             return Err(AgentError::BlankInput);
         }
-        if history.iter().any(|message| {
-            !matches!(message.role, Role::User | Role::Assistant)
-                || !message.tool_calls.is_empty()
-                || message.tool_call_id.is_some()
-        }) {
-            return Err(AgentError::InvalidHistory);
-        }
-
+        let latest_managed = history.iter().rposition(|message| {
+            matches!(
+                message.provider_context,
+                Some(ProviderContext::ManagedToken(_))
+            )
+        });
         let mut messages = Vec::with_capacity(history.len() + 2);
         messages.push(Message::system(self.system_prompt.as_ref()));
-        messages.extend_from_slice(history);
+        for (index, message) in history.iter().enumerate() {
+            if !matches!(message.role, Role::User | Role::Assistant)
+                || !message.tool_calls.is_empty()
+                || message.tool_call_id.is_some()
+            {
+                return Err(AgentError::InvalidHistory);
+            }
+            match message.provider_context.as_ref() {
+                None if latest_managed.is_none_or(|latest| index >= latest) => {
+                    messages.push(message.clone());
+                }
+                None => {}
+                Some(ProviderContext::ManagedToken(token)) if message.role == Role::Assistant => {
+                    if Some(index) == latest_managed {
+                        let managed = self
+                            .managed_contexts
+                            .lock()
+                            .expect("managed context lock must not be poisoned")
+                            .get(token)
+                            .map(<[Message]>::to_vec)
+                            .ok_or(AgentError::InvalidHistory)?;
+                        if managed.last().is_none_or(|last| {
+                            last.role != Role::Assistant || last.content != message.content
+                        }) {
+                            return Err(AgentError::InvalidHistory);
+                        }
+                        messages.extend(managed);
+                    }
+                }
+                _ => return Err(AgentError::InvalidHistory),
+            }
+        }
         messages.push(Message::user(input));
 
         let tools = self
@@ -379,11 +752,16 @@ impl Agent {
                     tools.clone()
                 },
             };
+            let plan = self
+                .context_manager
+                .prepare(request, self.provider.server_compaction());
             let completion = if tools.is_empty() {
                 if stream {
-                    self.provider.complete_stream(request, on_delta).await?
+                    self.provider
+                        .complete_stream_managed(plan, on_delta)
+                        .await?
                 } else {
-                    self.provider.complete(request).await?
+                    self.provider.complete_managed(plan).await?
                 }
             } else {
                 tokio::time::timeout_at(tool_deadline, async {
@@ -395,7 +773,7 @@ impl Agent {
                         };
                         let completion = self
                             .provider
-                            .complete_stream(request, &mut forward_thinking)
+                            .complete_stream_managed(plan, &mut forward_thinking)
                             .await?;
                         if completion.message.tool_calls.is_empty() {
                             for delta in &content_deltas {
@@ -404,7 +782,7 @@ impl Agent {
                         }
                         Ok(completion)
                     } else {
-                        self.provider.complete(request).await
+                        self.provider.complete_managed(plan).await
                     }
                 })
                 .await
@@ -418,7 +796,29 @@ impl Agent {
             }
             if completion.message.tool_calls.is_empty() {
                 if !completion.message.content.trim().is_empty() {
-                    return Ok(completion.message);
+                    let mut final_message = completion.message;
+                    messages.push(final_message.clone());
+                    let context_start =
+                        messages
+                            .iter()
+                            .rposition(has_direct_compaction)
+                            .or_else(|| {
+                                messages.iter().any(has_direct_provider_context).then(|| {
+                                    messages
+                                        .iter()
+                                        .position(|message| message.role != Role::System)
+                                        .unwrap_or(messages.len())
+                                })
+                            });
+                    if let Some(start) = context_start {
+                        let token = self
+                            .managed_contexts
+                            .lock()
+                            .expect("managed context lock must not be poisoned")
+                            .insert(messages[start..].to_vec());
+                        final_message.provider_context = Some(ProviderContext::ManagedToken(token));
+                    }
+                    return Ok(final_message);
                 }
                 if turn + 1 == MAX_MODEL_TURNS {
                     return Err(AgentError::EmptyProviderResponse);

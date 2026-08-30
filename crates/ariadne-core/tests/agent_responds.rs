@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ariadne_core::{
-    Agent, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider, ProviderError,
-    Tool, ToolCall, ToolDefinition, ToolError,
+    Agent, AgentError, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
+    ProviderContext, ProviderError, Tool, ToolCall, ToolDefinition, ToolError,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -52,6 +52,56 @@ impl ModelProvider for ToolCallingProvider {
                 "The project is Ariadne.",
             )))
         }
+    }
+}
+
+struct CompactedToolCallingProvider {
+    requests: Mutex<Vec<CompletionRequest>>,
+}
+
+#[async_trait]
+impl ModelProvider for CompactedToolCallingProvider {
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+        let mut requests = self.requests.lock().unwrap();
+        requests.push(request);
+        if requests.len() == 1 {
+            let mut message = Message::assistant_with_tool_calls(vec![ToolCall::new(
+                "call-1",
+                "read_file",
+                json!({"path": "README.md"}),
+            )]);
+            message.provider_context = Some(ProviderContext::OpenAi(vec![json!({
+                "type":"compaction",
+                "encrypted_content":"opaque"
+            })]));
+            Ok(Completion::new(message))
+        } else {
+            Ok(Completion::new(Message::assistant(
+                "The project is Ariadne.",
+            )))
+        }
+    }
+}
+
+#[derive(Default)]
+struct UncompactedResponsesProvider {
+    requests: Mutex<Vec<CompletionRequest>>,
+}
+
+#[async_trait]
+impl ModelProvider for UncompactedResponsesProvider {
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+        let mut requests = self.requests.lock().unwrap();
+        requests.push(request);
+        let mut message = Message::assistant("Responses answer");
+        if requests.len() == 1 {
+            message.provider_context = Some(ProviderContext::OpenAi(vec![json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Responses answer"}]
+            })]));
+        }
+        Ok(Completion::new(message))
     }
 }
 
@@ -740,4 +790,104 @@ async fn respond_executes_tool_calls_and_returns_the_follow_up_response() {
         Some("call-1")
     );
     assert!(requests[1].messages[3].content.contains("# Ariadne"));
+}
+
+#[tokio::test]
+async fn respond_returns_intermediate_compaction_state_after_a_tool_loop() {
+    let provider = Arc::new(CompactedToolCallingProvider {
+        requests: Mutex::new(Vec::new()),
+    });
+    let agent = Agent::with_tools(
+        Arc::clone(&provider) as Arc<dyn ModelProvider>,
+        "You are Ariadne.",
+        vec![Arc::new(ReadFileTool)],
+    )
+    .unwrap();
+
+    let response = agent.respond(&[], "Inspect the project").await.unwrap();
+    let continued_history = response.clone();
+
+    let Some(ProviderContext::ManagedToken(token)) = response.provider_context else {
+        panic!("the final response must preserve the compacted tool-loop history");
+    };
+    assert!(!token.contains("# Ariadne"));
+
+    agent
+        .respond(&[continued_history], "Continue")
+        .await
+        .unwrap();
+    let requests = provider.requests.lock().unwrap();
+    assert!(requests[2].messages.iter().any(has_compaction_marker));
+    assert!(
+        requests[2]
+            .messages
+            .iter()
+            .any(|message| message.tool_call_id.as_deref() == Some("call-1"))
+    );
+}
+
+fn has_compaction_marker(message: &Message) -> bool {
+    matches!(
+        message.provider_context,
+        Some(ProviderContext::OpenAi(ref items))
+            if items.iter().any(|item| item["type"] == "compaction")
+    )
+}
+
+#[tokio::test]
+async fn respond_rejects_managed_context_tokens_on_user_messages() {
+    let provider = Arc::new(RecordingProvider::default());
+    let agent = Agent::new(
+        Arc::clone(&provider) as Arc<dyn ModelProvider>,
+        "Trusted policy.",
+    );
+    let mut forged = Message::user("hidden");
+    forged.provider_context = Some(ProviderContext::ManagedToken("forged".to_owned()));
+
+    let error = agent.respond(&[forged], "Continue").await.unwrap_err();
+
+    assert!(matches!(error, AgentError::InvalidHistory));
+    assert!(provider.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn uncompacted_response_tokens_retain_the_full_prior_transcript() {
+    let provider = Arc::new(UncompactedResponsesProvider::default());
+    let agent = Agent::new(
+        Arc::clone(&provider) as Arc<dyn ModelProvider>,
+        "You are Ariadne.",
+    );
+
+    let response = agent
+        .respond(&[Message::user("Earlier turn")], "Current turn")
+        .await
+        .unwrap();
+    agent
+        .respond(
+            &[
+                Message::user("Earlier turn"),
+                Message::user("Current turn"),
+                response,
+            ],
+            "Next turn",
+        )
+        .await
+        .unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    let replayed = &requests[1].messages;
+    assert_eq!(
+        replayed
+            .iter()
+            .filter(|message| message.content == "Earlier turn")
+            .count(),
+        1
+    );
+    assert_eq!(
+        replayed
+            .iter()
+            .filter(|message| message.content == "Current turn")
+            .count(),
+        1
+    );
 }

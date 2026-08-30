@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ariadne_core::{
-    CacheOptimizer, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
-    PrefixCacheOptimizer, ProviderError, Role, ToolCall,
+    CacheOptimizer, Completion, CompletionDelta, CompletionRequest, ContextPlan, Message,
+    ModelProvider, PrefixCacheOptimizer, ProviderContext, ProviderError, Role, ServerCompaction,
+    ToolCall,
 };
 use async_trait::async_trait;
 use reqwest::{Client, Url};
@@ -18,6 +19,18 @@ use tokio::process::{Child, Command};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const COMPACTION_BETA: &str = "compact-2026-01-12";
+const MIN_COMPACTION_TOKENS: usize = 50_000;
+const COMPACTION_MODEL_PREFIXES: [&str; 8] = [
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+];
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -26,6 +39,15 @@ const MAX_CLAUDE_MESSAGES: usize = 4096;
 const MAX_CLAUDE_PROMPT_BYTES: usize = 1024 * 1024;
 pub const SUPPORTED_CLAUDE_CODE_VERSION: &str = "2.1.223";
 const SUPPORTED_CLAUDE_CODE_VERSION_OUTPUT: &str = "2.1.223 (Claude Code)";
+
+fn supports_compaction_model(model: &str) -> bool {
+    COMPACTION_MODEL_PREFIXES.iter().any(|prefix| {
+        model == *prefix
+            || model
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('-'))
+    })
+}
 
 /// Environment settings that can override Claude account authentication,
 /// redirect requests, or select a separately billed cloud provider.
@@ -190,9 +212,16 @@ impl AnthropicMessagesProvider {
         &self,
         request: CompletionRequest,
         stream: bool,
+        compaction_threshold: Option<usize>,
     ) -> Result<MessagesRequest, ProviderError> {
         let cache = self.cache_optimizer.optimize(&request);
-        build_messages_request(&self.model, request, stream, cache.use_server_cache)
+        build_messages_request(
+            &self.model,
+            request,
+            stream,
+            cache.use_server_cache,
+            compaction_threshold,
+        )
     }
 }
 
@@ -225,6 +254,8 @@ struct MessagesRequest {
     messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_management: Option<AnthropicContextManagement>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
 }
@@ -233,6 +264,23 @@ struct MessagesRequest {
 struct CacheControl {
     #[serde(rename = "type")]
     kind: &'static str,
+}
+#[derive(Serialize)]
+struct AnthropicContextManagement {
+    edits: Vec<AnthropicContextEdit>,
+}
+#[derive(Serialize)]
+struct AnthropicContextEdit {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    trigger: AnthropicContextTrigger,
+    instructions: &'static str,
+}
+#[derive(Serialize)]
+struct AnthropicContextTrigger {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    value: usize,
 }
 #[derive(Serialize)]
 struct ApiMessage {
@@ -254,6 +302,9 @@ enum ContentBlock {
         tool_use_id: String,
         content: String,
     },
+    Compaction {
+        content: Option<String>,
+    },
 }
 #[derive(Serialize)]
 struct ApiTool {
@@ -267,12 +318,26 @@ fn build_messages_request(
     request: CompletionRequest,
     stream: bool,
     use_server_cache: bool,
+    compaction_threshold: Option<usize>,
 ) -> Result<MessagesRequest, ProviderError> {
     let mut system = Vec::new();
     let mut messages = Vec::new();
-    for message in request.messages {
+    let latest_compaction = request.messages.iter().rposition(|message| {
+        matches!(
+            message.provider_context,
+            Some(ProviderContext::AnthropicCompaction(Some(_)))
+        )
+    });
+    for (index, message) in request.messages.into_iter().enumerate() {
+        if message.role == Role::System {
+            system.push(message.content);
+            continue;
+        }
+        if latest_compaction.is_some_and(|compaction| index < compaction) {
+            continue;
+        }
         match message.role {
-            Role::System => system.push(message.content),
+            Role::System => unreachable!("system messages are handled before compaction pruning"),
             Role::User => messages.push(ApiMessage {
                 role: "user",
                 content: vec![ContentBlock::Text {
@@ -280,10 +345,18 @@ fn build_messages_request(
                 }],
             }),
             Role::Assistant => {
-                if message.content.is_empty() && message.tool_calls.is_empty() {
+                if message.content.is_empty()
+                    && message.tool_calls.is_empty()
+                    && message.provider_context.is_none()
+                {
                     continue;
                 }
                 let mut content = Vec::new();
+                if let Some(ProviderContext::AnthropicCompaction(summary)) =
+                    message.provider_context
+                {
+                    content.push(ContentBlock::Compaction { content: summary });
+                }
                 if !message.content.is_empty() {
                     content.push(ContentBlock::Text {
                         text: message.content,
@@ -330,6 +403,16 @@ fn build_messages_request(
                 input_schema: t.input_schema,
             })
             .collect(),
+        context_management: compaction_threshold.map(|threshold| AnthropicContextManagement {
+            edits: vec![AnthropicContextEdit {
+                kind: "compact_20260112",
+                trigger: AnthropicContextTrigger {
+                    kind: "input_tokens",
+                    value: threshold.max(MIN_COMPACTION_TOKENS),
+                },
+                instructions: "Summarize the transcript for continuity. Do not call tools.",
+            }],
+        }),
         stream,
     })
 }
@@ -350,43 +433,99 @@ enum ResponseBlock {
         name: String,
         input: Value,
     },
+    Compaction {
+        #[serde(rename = "content")]
+        content: Option<String>,
+    },
 }
 
-fn completion_from_blocks(blocks: Vec<ResponseBlock>) -> Completion {
+fn completion_from_blocks(blocks: Vec<ResponseBlock>) -> Result<Completion, ProviderError> {
     let mut content = String::new();
     let mut tool_calls = Vec::new();
+    let mut provider_context = None;
     for block in blocks {
         match block {
             ResponseBlock::Text { text } => content.push_str(&text),
             ResponseBlock::ToolUse { id, name, input } => {
                 tool_calls.push(ToolCall::new(id, name, input))
             }
+            ResponseBlock::Compaction { content: None } => {
+                return Err(ProviderError::new(
+                    "Anthropic compaction failed before tool execution",
+                ));
+            }
+            ResponseBlock::Compaction {
+                content: Some(content),
+            } => {
+                provider_context = Some(ProviderContext::AnthropicCompaction(Some(content)));
+            }
         }
     }
-    Completion::new(Message {
+    Ok(Completion::new(Message {
         role: Role::Assistant,
         content,
         tool_calls,
         tool_call_id: None,
+        provider_context,
+    }))
+}
+
+fn anthropic_context(request: &CompletionRequest) -> Option<ProviderContext> {
+    request.messages.iter().find_map(|message| {
+        if let Some(ProviderContext::AnthropicCompaction(summary)) = &message.provider_context {
+            Some(ProviderContext::AnthropicCompaction(summary.clone()))
+        } else {
+            None
+        }
     })
 }
 
 #[async_trait]
 impl ModelProvider for AnthropicMessagesProvider {
-    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+    fn server_compaction(&self) -> Option<ServerCompaction> {
+        supports_compaction_model(&self.model).then_some(ServerCompaction::Anthropic)
+    }
+
+    async fn complete_managed(&self, plan: ContextPlan) -> Result<Completion, ProviderError> {
+        if self.server_compaction().is_none() {
+            return self.complete(plan.request).await;
+        }
+        if plan.server_compaction_threshold.is_none() && anthropic_context(&plan.request).is_none()
+        {
+            return self.complete(plan.request).await;
+        }
         let response = self
             .client
             .post(self.messages_url.clone())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&self.request(request, false)?)
+            .header("anthropic-beta", COMPACTION_BETA)
+            .json(&self.request(plan.request, false, plan.server_compaction_threshold)?)
             .send()
             .await
             .map_err(request_error)?;
         let bytes = checked_body(response, &self.api_key).await?;
         let parsed: MessagesResponse = serde_json::from_slice(&bytes)
             .map_err(|e| ProviderError::new(format!("invalid Anthropic response: {e}")))?;
-        Ok(completion_from_blocks(parsed.content))
+        completion_from_blocks(parsed.content)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+        let uses_compaction = anthropic_context(&request).is_some();
+        let mut request_builder = self
+            .client
+            .post(self.messages_url.clone())
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(&self.request(request, false, None)?);
+        if uses_compaction {
+            request_builder = request_builder.header("anthropic-beta", COMPACTION_BETA);
+        }
+        let response = request_builder.send().await.map_err(request_error)?;
+        let bytes = checked_body(response, &self.api_key).await?;
+        let parsed: MessagesResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| ProviderError::new(format!("invalid Anthropic response: {e}")))?;
+        completion_from_blocks(parsed.content)
     }
 
     async fn complete_stream(
@@ -394,15 +533,17 @@ impl ModelProvider for AnthropicMessagesProvider {
         request: CompletionRequest,
         on_delta: &mut (dyn for<'a> FnMut(&'a CompletionDelta) + Send),
     ) -> Result<Completion, ProviderError> {
-        let mut response = self
+        let uses_compaction = anthropic_context(&request).is_some();
+        let mut request_builder = self
             .client
             .post(self.messages_url.clone())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&self.request(request, true)?)
-            .send()
-            .await
-            .map_err(request_error)?;
+            .json(&self.request(request, true, None)?);
+        if uses_compaction {
+            request_builder = request_builder.header("anthropic-beta", COMPACTION_BETA);
+        }
+        let mut response = request_builder.send().await.map_err(request_error)?;
         if !response.status().is_success() {
             return Err(http_error(response, &self.api_key).await);
         }
@@ -469,6 +610,7 @@ impl ModelProvider for AnthropicMessagesProvider {
             content,
             tool_calls,
             tool_call_id: None,
+            provider_context: None,
         }))
     }
 }
