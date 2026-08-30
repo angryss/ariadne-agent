@@ -151,6 +151,10 @@ select:disabled { opacity: .5; }
 .provider-form h3 { margin: 0 0 .35rem; }
 .provider-form label { color: hsl(var(--muted-foreground)); font-size: .8rem; font-weight: 590; }
 .provider-form input, .provider-form select { width: 100%; }
+.provider-typeahead { position: relative; }
+.provider-type-options { position: absolute; z-index: 10; display: grid; width: 100%; margin-top: .25rem; overflow: hidden; border: 1px solid hsl(var(--border)); border-radius: .5rem; background: hsl(var(--card)); box-shadow: 0 .5rem 1.5rem hsl(var(--foreground) / .12); }
+.provider-type-options button { padding: .6rem .75rem; border: 0; color: hsl(var(--card-foreground)); background: transparent; text-align: left; }
+.provider-type-options button:hover, .provider-type-options button:focus-visible, .provider-type-options button[aria-selected="true"] { background: hsl(var(--accent)); color: hsl(var(--accent-foreground)); outline: none; }
 .credential-choice { display: grid; gap: .65rem; margin: .25rem 0; padding: .85rem; border: 1px solid hsl(var(--border)); border-radius: .65rem; background: hsl(var(--muted) / .55); }
 .credential-choice p { margin: 0; color: hsl(var(--muted-foreground)); font-size: .86rem; }
 .credential-choice button[aria-pressed="true"] { border-color: hsl(var(--primary)); background: hsl(var(--accent)); color: hsl(var(--accent-foreground)); }

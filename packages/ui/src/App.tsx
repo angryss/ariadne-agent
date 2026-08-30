@@ -99,6 +99,10 @@ export function App({ client }: AppProps) {
   const [providerSettings, setProviderSettings] = useState<ConfiguredProvider[]>([]);
   const [editingProvider, setEditingProvider] = useState<ConfiguredProvider['kind'] | null>(null);
   const [providerKind, setProviderKind] = useState<ConfiguredProvider['kind']>('ollama');
+  const [providerTypeQuery, setProviderTypeQuery] = useState('Ollama');
+  const [providerTypeOpen, setProviderTypeOpen] = useState(false);
+  const [providerTypeDirty, setProviderTypeDirty] = useState(false);
+  const [activeProviderKind, setActiveProviderKind] = useState<ConfiguredProvider['kind'] | null>('ollama');
   const [ollamaApiBase, setOllamaApiBase] = useState('http://127.0.0.1:11434/v1');
   const [openAiAuthentication, setOpenAiAuthentication] = useState<'api_key' | 'chatgpt'>('chatgpt');
   const [anthropicAuthentication, setAnthropicAuthentication] = useState<'api_key' | 'subscription'>('subscription');
@@ -234,12 +238,24 @@ export function App({ client }: AppProps) {
     }
   }
 
+  function matchingProviderKinds(query: string, showAll = !providerTypeDirty) {
+    return PROVIDER_KINDS.filter(
+      (kind) =>
+        !providerSettings.some((provider) => provider.kind === kind) &&
+        (showAll || providerTitle(kind).toLowerCase().includes(query.toLowerCase())),
+    );
+  }
+
   function beginAddProvider() {
     const availableKind = (['ollama', 'openai', 'anthropic'] as const).find(
       (kind) => !providerSettings.some((provider) => provider.kind === kind),
     ) ?? 'ollama';
     setEditingProvider(availableKind);
     setProviderKind(availableKind);
+    setProviderTypeQuery(providerTitle(availableKind));
+    setProviderTypeOpen(false);
+    setProviderTypeDirty(false);
+    setActiveProviderKind(availableKind);
     setOllamaApiBase('http://127.0.0.1:11434/v1');
     setOpenAiAuthentication('chatgpt');
     setAnthropicAuthentication('subscription');
@@ -250,11 +266,24 @@ export function App({ client }: AppProps) {
   function beginEditProvider(provider: ConfiguredProvider) {
     setEditingProvider(provider.kind);
     setProviderKind(provider.kind);
+    setProviderTypeQuery(providerTitle(provider.kind));
+    setProviderTypeOpen(false);
+    setProviderTypeDirty(false);
+    setActiveProviderKind(provider.kind);
     if (provider.kind === 'ollama') setOllamaApiBase(provider.api_base);
     else if (provider.kind === 'openai') setOpenAiAuthentication(provider.authentication);
     else setAnthropicAuthentication(provider.authentication);
     setReuseExistingChatgpt(null);
     setProviderApiKey('');
+  }
+
+  function selectProviderKind(kind: ConfiguredProvider['kind']) {
+    setProviderKind(kind);
+    setEditingProvider(kind);
+    setProviderTypeQuery(providerTitle(kind));
+    setProviderTypeOpen(false);
+    setProviderTypeDirty(false);
+    setActiveProviderKind(kind);
   }
 
   async function refreshOpenAiAccountStatus() {
@@ -545,26 +574,89 @@ export function App({ client }: AppProps) {
                   : 'Add provider'}
               </h3>
               <label htmlFor="provider-type">Provider type</label>
-              <select
-                disabled={providerSettings.some((provider) => provider.kind === editingProvider)}
-                id="provider-type"
-                onChange={(event) => {
-                  const kind = event.target.value as ConfiguredProvider['kind'];
-                  setProviderKind(kind);
-                  setEditingProvider(kind);
-                }}
-                value={providerKind}
-              >
-                {PROVIDER_KINDS.map((kind) => (
-                  <option
-                    disabled={providerSettings.some((provider) => provider.kind === kind)}
-                    key={kind}
-                    value={kind}
-                  >
-                    {providerTitle(kind)}
-                  </option>
-                ))}
-              </select>
+              {providerSettings.some((provider) => provider.kind === editingProvider) ? (
+                <select disabled id="provider-type" value={providerKind}>
+                  <option value={providerKind}>{providerTitle(providerKind)}</option>
+                </select>
+              ) : (
+                <div className="provider-typeahead">
+                  <Input
+                    aria-autocomplete="list"
+                    aria-activedescendant={
+                      providerTypeOpen && activeProviderKind
+                        ? `provider-type-option-${activeProviderKind}`
+                        : undefined
+                    }
+                    aria-controls="provider-type-options"
+                    aria-expanded={providerTypeOpen}
+                    autoComplete="off"
+                    id="provider-type"
+                    onBlur={() => setProviderTypeOpen(false)}
+                    onChange={(event) => {
+                      const query = event.target.value;
+                      setProviderTypeQuery(query);
+                      setProviderTypeOpen(true);
+                      setProviderTypeDirty(true);
+                      setActiveProviderKind(matchingProviderKinds(query, false)[0] ?? null);
+                    }}
+                    onFocus={(event) => {
+                      event.currentTarget.select();
+                      setProviderTypeOpen(true);
+                      const matches = matchingProviderKinds(providerTypeQuery);
+                      setActiveProviderKind(matches.includes(providerKind) ? providerKind : (matches[0] ?? null));
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        setProviderTypeOpen(false);
+                        return;
+                      }
+                      const matches = matchingProviderKinds(providerTypeQuery);
+                      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        if (matches.length === 0) return;
+                        event.preventDefault();
+                        setProviderTypeOpen(true);
+                        const currentIndex = activeProviderKind ? matches.indexOf(activeProviderKind) : -1;
+                        const offset = event.key === 'ArrowDown' ? 1 : -1;
+                        const nextIndex =
+                          currentIndex === -1
+                            ? event.key === 'ArrowDown' ? 0 : matches.length - 1
+                            : (currentIndex + offset + matches.length) % matches.length;
+                        setActiveProviderKind(matches[nextIndex] ?? null);
+                        return;
+                      }
+                      if (event.key !== 'Enter') return;
+                      const match =
+                        (activeProviderKind && matches.includes(activeProviderKind)
+                          ? activeProviderKind
+                          : matches[0]) ?? null;
+                      if (!match) return;
+                      event.preventDefault();
+                      selectProviderKind(match);
+                    }}
+                    role="combobox"
+                    value={providerTypeQuery}
+                  />
+                  {providerTypeOpen ? (
+                    <div className="provider-type-options" id="provider-type-options" role="listbox">
+                      {matchingProviderKinds(providerTypeQuery).map((kind) => (
+                        <button
+                          aria-selected={kind === activeProviderKind}
+                          id={`provider-type-option-${kind}`}
+                          key={kind}
+                          onClick={() => selectProviderKind(kind)}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onMouseMove={() => setActiveProviderKind(kind)}
+                          role="option"
+                          tabIndex={-1}
+                          type="button"
+                        >
+                          {providerTitle(kind)}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              )}
               {providerKind === 'ollama' ? (
                 <>
                   <label htmlFor="ollama-api-base">Ollama API base URL</label>
@@ -661,6 +753,7 @@ export function App({ client }: AppProps) {
                 <Button
                   disabled={
                     savingProvider ||
+                    providerTypeQuery !== providerTitle(providerKind) ||
                     (providerKind === 'openai' &&
                       openAiAuthentication === 'chatgpt' &&
                       (discoveringExistingOpenAiAccount ||
