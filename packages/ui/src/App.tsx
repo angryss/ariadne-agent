@@ -498,42 +498,42 @@ export function App({ client }: AppProps) {
                   providerTitle(left.kind).localeCompare(providerTitle(right.kind)),
                 )
                 .map((provider) => (
-                  <article className="provider-card" key={provider.kind}>
-                    <div>
-                      <h3>{providerTitle(provider.kind)}</h3>
-                      <p>
-                        {provider.kind === 'ollama'
-                          ? provider.api_base
-                          : provider.kind === 'anthropic'
-                            ? provider.authentication === 'subscription'
-                              ? 'Claude subscription / usage bundle'
-                              : 'API key via environment variable'
-                            : provider.authentication === 'chatgpt'
-                              ? 'ChatGPT subscription'
-                              : 'API key'}
-                      </p>
-                    </div>
-                    <div className="provider-actions">
-                      <Button
-                        aria-label={`Edit ${providerTitle(provider.kind)}`}
-                        onClick={() => beginEditProvider(provider)}
-                        size="sm"
-                        type="button"
-                        variant="outline"
-                      >
-                        Edit
-                      </Button>
-                      <Button
-                        aria-label={`Delete ${providerTitle(provider.kind)}`}
-                        onClick={() => void removeProvider(provider.kind)}
-                        size="sm"
-                        type="button"
-                        variant="ghost"
-                      >
-                        Delete
-                      </Button>
-                    </div>
-                  </article>
+                <article className="provider-card" key={provider.kind}>
+                  <div>
+                    <h3>{providerTitle(provider.kind)}</h3>
+                    <p>
+                      {provider.kind === 'ollama'
+                        ? provider.api_base
+                        : provider.kind === 'anthropic'
+                          ? provider.authentication === 'subscription'
+                            ? 'Claude subscription / usage bundle'
+                            : 'API key via environment variable'
+                          : provider.authentication === 'chatgpt'
+                            ? 'ChatGPT subscription'
+                            : 'API key'}
+                    </p>
+                  </div>
+                  <div className="provider-actions">
+                    <Button
+                      aria-label={`Edit ${providerTitle(provider.kind)}`}
+                      onClick={() => beginEditProvider(provider)}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      aria-label={`Delete ${providerTitle(provider.kind)}`}
+                      onClick={() => void removeProvider(provider.kind)}
+                      size="sm"
+                      type="button"
+                      variant="ghost"
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </article>
                 ))}
             </div>
           )}
