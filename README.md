@@ -1,6 +1,6 @@
 # Rynna
 
-Rynna is an open-source, local-first AI agent built with Rust, React, and Tauri. One shared application core powers an interactive CLI, deterministic one-shot jobs, a long-running HTTP service, a browser UI, and a native desktop app.
+Rynna is an open-source AI software agent built with Rust, React, and Tauri. One shared application core powers an interactive CLI, deterministic one-shot jobs, a long-running HTTP service, a browser UI, and a native desktop app.
 
 > **Project status:** bootstrap foundation. The model-provider path, versioned profiles, native workspace filesystem and bounded command tools, and all product surfaces are working. Skill execution, MCP tool execution, durable memory, approvals, and long-running autonomous loops remain future capabilities.
 

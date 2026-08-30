@@ -20,7 +20,7 @@ mod chat_ui;
 mod provider_ui;
 
 #[derive(Parser)]
-#[command(name = "rynna", version, about = "A local-first AI agent")]
+#[command(name = "rynna", version, about = "An AI software agent")]
 struct Cli {
     /// TOML configuration file. Uses the platform default when omitted.
     #[arg(long, env = "RYNNA_CONFIG", global = true)]

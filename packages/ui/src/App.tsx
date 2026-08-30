@@ -397,7 +397,7 @@ export function App({ client }: AppProps) {
     <main className="app-shell">
       <header className="app-header">
         <div>
-          <p className="eyebrow">Local-first agent</p>
+          <p className="eyebrow">AI software agent</p>
           <h1>Rynna</h1>
         </div>
         <div className="header-actions">

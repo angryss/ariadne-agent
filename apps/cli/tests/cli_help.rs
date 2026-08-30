@@ -7,7 +7,7 @@ fn help_describes_interactive_run_and_server_modes() {
     command.arg("--help");
 
     command.assert().success().stdout(
-        predicate::str::contains("A local-first AI agent")
+        predicate::str::contains("An AI software agent")
             .and(predicate::str::contains("chat"))
             .and(predicate::str::contains("run"))
             .and(predicate::str::contains("serve"))
