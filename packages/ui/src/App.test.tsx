@@ -397,7 +397,6 @@ describe('App', () => {
     expect(screen.getByText('No providers configured.')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Add provider' }));
-    await user.selectOptions(screen.getByLabelText('Provider type'), 'ollama');
     await user.clear(screen.getByLabelText('Ollama API base URL'));
     await user.type(screen.getByLabelText('Ollama API base URL'), 'http://localhost:11434/v1');
     await user.click(screen.getByRole('button', { name: 'Save provider' }));
@@ -458,12 +457,98 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Add provider' }));
 
-    const providerType = screen.getByLabelText('Provider type') as HTMLSelectElement;
-    expect(Array.from(providerType.options, (option) => option.text)).toEqual([
+    const providerType = screen.getByRole('combobox', { name: 'Provider type' });
+    await user.click(providerType);
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
       'Anthropic',
       'Ollama',
       'OpenAI',
     ]);
+
+    await user.keyboard('{Enter}');
+    expect(providerType).toHaveValue('Ollama');
+
+    await user.clear(providerType);
+    await user.type(providerType, 'Ollama');
+    await user.keyboard('{Enter}');
+    expect(providerType).toHaveValue('Ollama');
+  });
+
+  it('supports arrow-key selection in the provider type-ahead', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders: vi.fn().mockResolvedValue([]),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+
+    const providerType = screen.getByRole('combobox', { name: 'Provider type' });
+    await user.click(providerType);
+    await user.keyboard('{ArrowDown}{Enter}');
+
+    expect(providerType).toHaveValue('OpenAI');
+    expect(screen.getByLabelText('OpenAI authentication')).toBeInTheDocument();
+  });
+
+  it('reopens the provider type-ahead when an arrow key follows Escape', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders: vi.fn().mockResolvedValue([]),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+
+    const providerType = screen.getByRole('combobox', { name: 'Provider type' });
+    await user.click(providerType);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+
+    await user.keyboard('{ArrowDown}');
+
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+    expect(providerType).toHaveAttribute('aria-activedescendant', 'provider-type-option-openai');
+    expect(screen.getByRole('option', { name: 'OpenAI' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('filters and selects provider types by typing ahead', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders: vi.fn().mockResolvedValue([]),
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+
+    const providerType = screen.getByRole('combobox', { name: 'Provider type' });
+    await user.type(providerType, 'open');
+
+    expect(screen.getByRole('option', { name: 'OpenAI' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Anthropic' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Ollama' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save provider' })).toBeDisabled();
+
+    await user.keyboard('{Enter}');
+
+    expect(providerType).toHaveValue('OpenAI');
+    expect(screen.getByLabelText('OpenAI authentication')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save provider' })).toBeEnabled();
   });
 
   it('adds OpenAI with either an API key or ChatGPT subscription', async () => {
@@ -483,7 +568,9 @@ describe('App', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Add provider' }));
-    await user.selectOptions(screen.getByLabelText('Provider type'), 'openai');
+    await user.clear(screen.getByRole('combobox', { name: 'Provider type' }));
+    await user.type(screen.getByRole('combobox', { name: 'Provider type' }), 'open');
+    await user.keyboard('{Enter}');
     await user.selectOptions(screen.getByLabelText('OpenAI authentication'), 'api_key');
     await user.type(screen.getByLabelText('OpenAI API key'), 'sk-secret');
     await user.click(screen.getByRole('button', { name: 'Save provider' }));
@@ -527,7 +614,9 @@ describe('App', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Add provider' }));
-    await user.selectOptions(screen.getByLabelText('Provider type'), 'openai');
+    await user.clear(screen.getByRole('combobox', { name: 'Provider type' }));
+    await user.type(screen.getByRole('combobox', { name: 'Provider type' }), 'open');
+    await user.keyboard('{Enter}');
 
     expect(await screen.findByText('Existing ChatGPT credentials found')).toBeInTheDocument();
     expect(screen.getByText(/ChatGPT Plus is already connected/)).toBeInTheDocument();
@@ -563,7 +652,9 @@ describe('App', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Add provider' }));
-    await user.selectOptions(screen.getByLabelText('Provider type'), 'openai');
+    await user.clear(screen.getByRole('combobox', { name: 'Provider type' }));
+    await user.type(screen.getByRole('combobox', { name: 'Provider type' }), 'open');
+    await user.keyboard('{Enter}');
 
     expect(screen.getByRole('button', { name: 'Save provider' })).toBeDisabled();
     await act(async () => resolveExistingAccount({ connected: false, method: null }));
@@ -592,7 +683,9 @@ describe('App', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Add provider' }));
-    await user.selectOptions(screen.getByLabelText('Provider type'), 'openai');
+    await user.clear(screen.getByRole('combobox', { name: 'Provider type' }));
+    await user.type(screen.getByRole('combobox', { name: 'Provider type' }), 'open');
+    await user.keyboard('{Enter}');
     expect(screen.getByRole('button', { name: 'Save provider' })).toBeDisabled();
 
     await user.click(screen.getByRole('button', { name: 'Register new credentials' }));
@@ -622,7 +715,9 @@ describe('App', () => {
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Add provider' }));
-    await user.selectOptions(screen.getByLabelText('Provider type'), 'anthropic');
+    await user.clear(screen.getByRole('combobox', { name: 'Provider type' }));
+    await user.type(screen.getByRole('combobox', { name: 'Provider type' }), 'anth');
+    await user.keyboard('{Enter}');
     expect(screen.getByText(/Rynna tools are disabled/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Save provider' }));
 
