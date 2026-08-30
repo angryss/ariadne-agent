@@ -138,6 +138,14 @@ select:disabled { opacity: .5; }
 .settings-heading, .provider-card, .provider-actions { display: flex; align-items: center; }
 .settings-heading { justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }
 .settings-heading h2 { margin: .2rem 0 0; font-size: 1.7rem; font-weight: 590; letter-spacing: -.035em; }
+.settings-page .profile-picker {
+  display: grid;
+  gap: .35rem;
+  margin: 0 0 1rem;
+  max-width: 24rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
 .settings-page > p { color: hsl(var(--muted-foreground)); line-height: 1.6; }
 .settings-page button:disabled { opacity: .45; }
 .settings-empty { padding: 2rem; border: 1px dashed hsl(var(--border)); border-radius: .75rem; color: hsl(var(--muted-foreground)); text-align: center; }

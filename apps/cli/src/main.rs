@@ -137,7 +137,9 @@ async fn main() -> Result<()> {
             run_once(&profiles, &default_profile, prompt, output).await
         }
         Command::Chat => chat(&profiles, &default_profile).await,
-        Command::Serve { bind, web_dir } => serve(profiles, bind, web_dir, provider_config).await,
+        Command::Serve { bind, web_dir } => {
+            serve(profiles, bind, web_dir, provider_config, catalog).await
+        }
         Command::Profiles { .. } => unreachable!("profiles returned before provider configuration"),
     }
 }
@@ -399,6 +401,7 @@ async fn serve(
     bind: SocketAddr,
     web_dir: Option<PathBuf>,
     provider_config: PathBuf,
+    catalog: ProfileCatalog,
 ) -> Result<()> {
     let provider_settings = ProviderSettingsStore::load(provider_config)
         .context("failed to load Rynna provider settings")?;
@@ -409,15 +412,18 @@ async fn serve(
                 "web directory does not contain index.html: {}",
                 web_dir.display()
             );
-            rynna_server::router_with_profiles_provider_settings_and_web(
+            rynna_server::router_with_profiles_provider_settings_catalog_and_web(
                 profiles,
                 provider_settings,
+                Some(catalog),
                 web_dir,
             )
         }
-        None => {
-            rynna_server::router_with_profiles_and_provider_settings(profiles, provider_settings)
-        }
+        None => rynna_server::router_with_profiles_provider_settings_and_catalog(
+            profiles,
+            provider_settings,
+            catalog,
+        ),
     };
     let listener = tokio::net::TcpListener::bind(bind)
         .await

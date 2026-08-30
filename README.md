@@ -94,7 +94,7 @@ cargo run -p rynna-cli -- serve
 npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Vite proxies API requests to port 3000. Open **Settings**, then **Providers**, to manage Ollama and OpenAI provider settings. Press Enter in the composer to submit; use Shift-Enter or Alt-Enter to insert a newline. The browser streams typed thinking and content events from the server, keeps the active thinking section open, and collapses it when the user-facing answer begins. Select the Thinking summary to expand or collapse it later.
+Open <http://127.0.0.1:5173>. Vite proxies API requests to port 3000. Open **Settings** to add, edit, or delete profiles from an alphabetical type-ahead, then manage provider credentials for the selected profile. Press Enter in the composer to submit; use Shift-Enter or Alt-Enter to insert a newline. The browser streams typed thinking and content events from the server, keeps the active thinking section open, and collapses it when the user-facing answer begins. Select the Thinking summary to expand or collapse it later.
 
 To exercise the production topology, build the SPA and serve it from the Rust process:
 
@@ -164,7 +164,7 @@ Profile-scoped skill and MCP activation is represented and exposed consistently,
 
 ## HTTP API
 
-`GET /v1/profiles` returns the process default and safe profile metadata. It never returns API keys, API-key environment-variable names, provider base URLs, system prompts, or MCP command definitions.
+`GET /v1/profiles` returns the process default and safe profile metadata. It never returns API keys, API-key environment-variable names, provider base URLs, system prompts, or MCP command definitions. `POST /v1/profiles` and `PUT`/`DELETE /v1/profiles/{name}` add, update, and delete catalog profiles for loopback clients. Profile mutations persist to `config.toml` and update the running profile list; a process restart is still required before a changed model or provider is reconstructed with new credentials.
 
 `GET /v1/providers`, `POST /v1/providers`, and `PUT`/`DELETE /v1/providers/{kind}` provide provider settings CRUD for the browser. The persisted TOML contains only Ollama's API base URL or the selected OpenAI/Anthropic authentication method. OpenAI API keys are piped to Codex and are never stored in this file or returned by the API.
 

@@ -3,7 +3,19 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
-import type { AgentClient } from './contracts';
+import type { AgentClient, Profile } from './contracts';
+
+function testProfile(name: string, overrides: Partial<Profile> = {}): Profile {
+  return {
+    name,
+    provider: `${name}-provider`,
+    model: `${name}-model`,
+    active_skills: [],
+    mcp_servers: [],
+    capabilities: [],
+    ...overrides,
+  };
+}
 
 describe('App', () => {
   it('switches between dark and light themes and remembers the selection', async () => {
@@ -217,7 +229,8 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Send' }));
     await screen.findByText('Work reply.');
 
-    await user.selectOptions(profile, 'work');
+    await user.click(profile);
+    await user.click(screen.getByRole('option', { name: 'work' }));
     await user.type(screen.getByLabelText('Message Rynna'), 'Use work');
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
@@ -761,5 +774,139 @@ describe('App', () => {
     await act(async () => resolveProviders([]));
 
     expect(screen.getByRole('button', { name: 'Edit Ollama' })).toBeInTheDocument();
+  });
+
+  it('sorts settings profiles alphabetically in a type-ahead and binds providers to the selected profile', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProfiles: vi.fn().mockResolvedValue({
+            default_profile: 'zeta',
+            profiles: [
+              testProfile('zeta', { provider: 'openai' }),
+              testProfile('alpha', { provider: 'ollama' }),
+              testProfile('beta', { provider: 'anthropic' }),
+            ],
+          }),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProfile: vi.fn(),
+          updateProfile: vi.fn(),
+          deleteProfile: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Settings' }));
+
+    const profile = await screen.findByRole('combobox', { name: 'Profile' });
+    expect(profile).toHaveValue('zeta');
+    expect(screen.getByRole('heading', { name: 'Providers' })).toBeInTheDocument();
+    expect(screen.getByText(/Provider credentials for profile zeta/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Profile provider')).toHaveValue('openai');
+
+    await user.click(profile);
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'alpha',
+      'beta',
+      'zeta',
+    ]);
+
+    await user.click(screen.getByRole('option', { name: 'alpha' }));
+    expect(profile).toHaveValue('alpha');
+    expect(screen.getByText(/Provider credentials for profile alpha/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Profile provider')).toHaveValue('ollama');
+    expect(screen.getByLabelText('Model')).toHaveValue('alpha-model');
+  });
+
+  it('filters settings profiles by typing ahead', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProfiles: vi.fn().mockResolvedValue({
+            default_profile: 'alpha',
+            profiles: [testProfile('alpha'), testProfile('beta'), testProfile('zeta')],
+          }),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProfile: vi.fn(),
+          updateProfile: vi.fn(),
+          deleteProfile: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Settings' }));
+    const profile = await screen.findByRole('combobox', { name: 'Profile' });
+    await user.clear(profile);
+    await user.type(profile, 'ze');
+
+    expect(screen.getByRole('option', { name: 'zeta' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'alpha' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'beta' })).not.toBeInTheDocument();
+
+    await user.keyboard('{Enter}');
+    expect(profile).toHaveValue('zeta');
+    expect(screen.getByText(/Provider credentials for profile zeta/)).toBeInTheDocument();
+  });
+
+  it('adds modifies and deletes profiles from settings', async () => {
+    const createProfile = vi.fn().mockImplementation(async (profile: Profile) => profile);
+    const updateProfile = vi.fn().mockImplementation(async (_name: string, profile: Profile) => profile);
+    const deleteProfile = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProfiles: vi.fn().mockResolvedValue({
+            default_profile: 'alpha',
+            profiles: [testProfile('alpha', { provider: 'ollama', model: 'qwen3:8b' })],
+          }),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProfile,
+          updateProfile,
+          deleteProfile,
+        }}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add profile' }));
+    await user.type(screen.getByLabelText('Name'), 'work');
+    await user.clear(screen.getByLabelText('Model'));
+    await user.type(screen.getByLabelText('Model'), 'gpt-5');
+    await user.clear(screen.getByLabelText('Profile provider'));
+    await user.type(screen.getByLabelText('Profile provider'), 'openai');
+    await user.keyboard('{Enter}');
+    await user.click(screen.getByRole('button', { name: 'Save profile' }));
+
+    expect(createProfile).toHaveBeenCalledWith({
+      name: 'work',
+      provider: 'openai',
+      model: 'gpt-5',
+      active_skills: [],
+      mcp_servers: [],
+      capabilities: [],
+    });
+    expect(await screen.findByRole('combobox', { name: 'Profile' })).toHaveValue('work');
+
+    await user.clear(screen.getByLabelText('Model'));
+    await user.type(screen.getByLabelText('Model'), 'gpt-5.2');
+    await user.click(screen.getByRole('button', { name: 'Save profile' }));
+    expect(updateProfile).toHaveBeenCalledWith('work', {
+      name: 'work',
+      provider: 'openai',
+      model: 'gpt-5.2',
+      active_skills: [],
+      mcp_servers: [],
+      capabilities: [],
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Delete profile' }));
+    expect(deleteProfile).toHaveBeenCalledWith('work');
+    expect(await screen.findByRole('combobox', { name: 'Profile' })).toHaveValue('alpha');
   });
 });

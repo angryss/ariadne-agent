@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
 import { ThemeToggle } from './components/theme-toggle';
+import { Typeahead } from './components/typeahead';
 import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
@@ -32,6 +33,14 @@ const PROVIDER_KINDS: readonly ConfiguredProvider['kind'][] = [
   'ollama',
   'openai',
 ];
+
+function sortedProfiles(profiles: Profile[]): Profile[] {
+  return [...profiles].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function profileProviderOptions(profiles: Profile[]): string[] {
+  return [...new Set([...PROVIDER_KINDS, ...profiles.map((profile) => profile.provider)])];
+}
 
 function conversationHistory(messages: DisplayMessage[]): Message[] {
   return messages.filter((message): message is Message => message.role !== 'thinking');
@@ -109,6 +118,11 @@ export function App({ client }: AppProps) {
   const [reuseExistingChatgpt, setReuseExistingChatgpt] = useState<boolean | null>(null);
   const [providerApiKey, setProviderApiKey] = useState('');
   const [savingProvider, setSavingProvider] = useState(false);
+  const [addingProfile, setAddingProfile] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileName, setProfileName] = useState('');
+  const [profileModel, setProfileModel] = useState('');
+  const [profileProvider, setProfileProvider] = useState('');
   const openAiAccountRequest = useRef(0);
   const providerMutationRevision = useRef(0);
 
@@ -214,6 +228,103 @@ export function App({ client }: AppProps) {
   }, [client]);
 
   const activeProfile = profiles.find((profile) => profile.name === selectedProfile);
+  const canEditProfiles = Boolean(client.createProfile || client.updateProfile || client.deleteProfile);
+  const canOpenSettings = Boolean(client.listProviders || canEditProfiles);
+
+  useEffect(() => {
+    if (addingProfile) {
+      return;
+    }
+    if (!activeProfile) {
+      setProfileName('');
+      setProfileModel('');
+      setProfileProvider('');
+      return;
+    }
+    setProfileName(activeProfile.name);
+    setProfileModel(activeProfile.model);
+    setProfileProvider(activeProfile.provider);
+  }, [activeProfile, addingProfile]);
+
+  function selectProfile(name: string) {
+    setSelectedProfile(name);
+    setAddingProfile(false);
+    setMessages([]);
+    setError(null);
+  }
+
+  function beginAddProfile() {
+    setAddingProfile(true);
+    setProfileName('');
+    setProfileModel(activeProfile?.model ?? 'qwen3:8b');
+    setProfileProvider(activeProfile?.provider ?? 'ollama');
+    setError(null);
+  }
+
+  function profileDraft(): Profile {
+    return {
+      name: profileName.trim(),
+      provider: profileProvider.trim(),
+      model: profileModel.trim(),
+      active_skills: addingProfile ? [] : (activeProfile?.active_skills ?? []),
+      mcp_servers: addingProfile ? [] : (activeProfile?.mcp_servers ?? []),
+      capabilities: addingProfile ? [] : (activeProfile?.capabilities ?? []),
+    };
+  }
+
+  async function saveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (savingProfile) return;
+    const draft = profileDraft();
+    if (!draft.name || !draft.provider || !draft.model) return;
+    const save = addingProfile ? client.createProfile : client.updateProfile;
+    if (!save) return;
+    setSavingProfile(true);
+    setError(null);
+    try {
+      const saved = addingProfile
+        ? await client.createProfile!(draft)
+        : await client.updateProfile!(selectedProfile ?? draft.name, draft);
+      setProfiles((current) => {
+        const withoutPrevious = addingProfile
+          ? current
+          : current.filter((profile) => profile.name !== selectedProfile);
+        return [...withoutPrevious.filter((profile) => profile.name !== saved.name), saved];
+      });
+      setSelectedProfile(saved.name);
+      setAddingProfile(false);
+      setProfileName(saved.name);
+      setProfileModel(saved.model);
+      setProfileProvider(saved.provider);
+    } catch (profileError) {
+      setError(
+        profileError instanceof Error ? profileError.message : 'Rynna could not save the profile',
+      );
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
+  async function removeProfile() {
+    if (!client.deleteProfile || savingProfile || addingProfile || !selectedProfile) return;
+    if (profiles.length <= 1) return;
+    setSavingProfile(true);
+    setError(null);
+    try {
+      await client.deleteProfile(selectedProfile);
+      const remaining = profiles.filter((profile) => profile.name !== selectedProfile);
+      setProfiles(remaining);
+      const next = remaining[0]?.name ?? null;
+      setSelectedProfile(next);
+      setMessages([]);
+    } catch (profileError) {
+      setError(
+        profileError instanceof Error ? profileError.message : 'Rynna could not delete the profile',
+      );
+    } finally {
+      setSavingProfile(false);
+    }
+  }
 
   async function connectOpenAi(method: 'chatgpt' | 'api_key') {
     if (!client.connectOpenAi || connectingOpenAi) return;
@@ -401,25 +512,16 @@ export function App({ client }: AppProps) {
           <h1>Rynna</h1>
         </div>
         <div className="header-actions">
-          {profiles.length > 0 ? (
+          {view === 'chat' && profiles.length > 0 ? (
             <label className="profile-picker" htmlFor="profile">
               <span>Profile</span>
-              <select
+              <Typeahead
                 disabled={pending}
                 id="profile"
-                onChange={(event) => {
-                  setSelectedProfile(event.target.value);
-                  setMessages([]);
-                  setError(null);
-                }}
+                onChange={selectProfile}
+                options={sortedProfiles(profiles).map((profile) => profile.name)}
                 value={selectedProfile ?? ''}
-              >
-                {profiles.map((profile) => (
-                  <option key={profile.name} value={profile.name}>
-                    {profile.name}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
           ) : null}
           {client.connectOpenAi ? (
@@ -439,7 +541,7 @@ export function App({ client }: AppProps) {
                 : 'Connect OpenAI'}
             </Button>
           ) : null}
-          {client.listProviders ? (
+          {canOpenSettings ? (
             <Button
               className="account-button"
               onClick={() => {
@@ -505,9 +607,97 @@ export function App({ client }: AppProps) {
 
       {view === 'settings' ? (
         <section className="settings-page" aria-label="Settings">
+          {canEditProfiles ? (
+            <>
+              <div className="settings-heading">
+                <div>
+                  <p className="eyebrow">Settings</p>
+                  <h2>Profiles</h2>
+                </div>
+                <div className="provider-actions">
+                  <Button disabled={savingProfile} onClick={beginAddProfile} type="button">
+                    Add profile
+                  </Button>
+                  <Button
+                    disabled={savingProfile || addingProfile || profiles.length <= 1}
+                    onClick={() => void removeProfile()}
+                    type="button"
+                    variant="ghost"
+                  >
+                    Delete profile
+                  </Button>
+                </div>
+              </div>
+              {profiles.length === 0 && !addingProfile ? (
+                <p className="settings-empty">No profiles configured.</p>
+              ) : (
+                <>
+                  {addingProfile ? null : (
+                    <label className="profile-picker" htmlFor="settings-profile">
+                      <span>Profile</span>
+                      <Typeahead
+                        disabled={savingProfile}
+                        id="settings-profile"
+                        onChange={selectProfile}
+                        options={sortedProfiles(profiles).map((profile) => profile.name)}
+                        value={selectedProfile ?? ''}
+                      />
+                    </label>
+                  )}
+                  <form className="provider-form" onSubmit={(event) => void saveProfile(event)}>
+                    <h3>{addingProfile ? 'Add profile' : 'Edit profile'}</h3>
+                    <label htmlFor="profile-name">Name</label>
+                    <Input
+                      id="profile-name"
+                      onChange={(event) => setProfileName(event.target.value)}
+                      required
+                      value={profileName}
+                    />
+                    <label htmlFor="profile-model">Model</label>
+                    <Input
+                      id="profile-model"
+                      onChange={(event) => setProfileModel(event.target.value)}
+                      required
+                      value={profileModel}
+                    />
+                    <label htmlFor="profile-provider">Profile provider</label>
+                    <Typeahead
+                      id="profile-provider"
+                      onChange={setProfileProvider}
+                      options={profileProviderOptions(profiles)}
+                      value={profileProvider}
+                    />
+                    <div className="provider-actions">
+                      <Button
+                        disabled={savingProfile || !profileName.trim() || !profileModel.trim() || !profileProvider.trim()}
+                        type="submit"
+                      >
+                        Save profile
+                      </Button>
+                      {addingProfile ? (
+                        <Button
+                          onClick={() => setAddingProfile(false)}
+                          type="button"
+                          variant="ghost"
+                        >
+                          Cancel
+                        </Button>
+                      ) : null}
+                    </div>
+                  </form>
+                </>
+              )}
+            </>
+          ) : (
+            <div className="settings-heading">
+              <div>
+                <p className="eyebrow">Settings</p>
+              </div>
+            </div>
+          )}
           <div className="settings-heading">
             <div>
-              <p className="eyebrow">Settings</p>
+              {canEditProfiles ? null : <p className="eyebrow">Settings</p>}
               <h2>Providers</h2>
             </div>
             <Button disabled={providerSettings.length >= 3} onClick={beginAddProvider} type="button">
@@ -515,8 +705,9 @@ export function App({ client }: AppProps) {
             </Button>
           </div>
           <p>
-            Provider credentials are stored here; runtime profiles and models load from rynna.toml
-            at startup.
+            {selectedProfile
+              ? `Provider credentials for profile ${selectedProfile}.`
+              : 'Provider credentials are stored here; runtime profiles and models load from rynna.toml at startup.'}
           </p>
           {providerSettings.length === 0 ? (
             <p className="settings-empty">No providers configured.</p>

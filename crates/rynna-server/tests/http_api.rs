@@ -5,14 +5,15 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use rynna_config::ProviderSettingsStore;
+use rynna_config::{ProfileCatalog, ProviderSettingsStore};
 use rynna_core::{
     Agent, AgentProfiles, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
     Profile, ProviderError,
 };
 use rynna_server::{
     router, router_with_profiles, router_with_profiles_and_provider_runtime,
-    router_with_profiles_and_provider_settings, router_with_web,
+    router_with_profiles_and_provider_settings, router_with_profiles_provider_settings_and_catalog,
+    router_with_web,
 };
 use serde_json::Value;
 use tower::ServiceExt;
@@ -696,4 +697,97 @@ async fn openai_provider_can_reuse_existing_chatgpt_credentials_without_starting
         std::fs::read_to_string(invocation_log).unwrap(),
         "login status\nunset\nlogin status\nunset\n"
     );
+}
+
+#[tokio::test]
+async fn profiles_endpoint_creates_updates_and_deletes_catalog_profiles() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+    let catalog = ProfileCatalog::load(&path).unwrap();
+    let profiles = AgentProfiles::new("alpha", vec![profile("alpha", "Alpha.")]).unwrap();
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    let app = router_with_profiles_provider_settings_and_catalog(profiles, settings, catalog);
+
+    let created = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::post("/v1/profiles")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "work",
+                        "provider": "ollama",
+                        "model": "gpt-5",
+                        "active_skills": [],
+                        "mcp_servers": [],
+                        "capabilities": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_body = to_bytes(created.into_body(), 4096).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&created_body).unwrap()["name"],
+        "work"
+    );
+
+    let updated = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::put("/v1/profiles/work")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "work",
+                        "provider": "ollama",
+                        "model": "gpt-5.2",
+                        "active_skills": [],
+                        "mcp_servers": [],
+                        "capabilities": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+
+    let deleted = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::delete("/v1/profiles/work")
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+    let listed = app
+        .oneshot(Request::get("/v1/profiles").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let listed_body = to_bytes(listed.into_body(), 4096).await.unwrap();
+    let listed: Value = serde_json::from_slice(&listed_body).unwrap();
+    assert_eq!(listed["profiles"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["profiles"][0]["name"], "alpha");
 }

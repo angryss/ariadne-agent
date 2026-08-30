@@ -48,6 +48,36 @@ async fn profile_catalog_dispatches_to_the_default_and_requested_profiles() {
 }
 
 #[test]
+fn profile_catalog_upserts_and_removes_profiles() {
+    let mut profiles = AgentProfiles::new("local", vec![profile("local", "Local reply")]).unwrap();
+    profiles
+        .upsert(
+            profile("work", "Work reply").0,
+            profile("work", "Work reply").1,
+        )
+        .unwrap();
+    assert_eq!(
+        profiles
+            .profiles()
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["local", "work"]
+    );
+
+    profiles.remove("work").unwrap();
+    assert_eq!(
+        profiles
+            .profiles()
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["local"]
+    );
+    assert!(profiles.remove("local").is_err());
+}
+
+#[test]
 fn profile_catalog_exposes_sorted_metadata_and_the_default_profile() {
     let profiles = AgentProfiles::new(
         "local",

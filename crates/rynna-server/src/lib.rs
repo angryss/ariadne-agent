@@ -5,7 +5,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, Path as AxumPath, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Path as AxumPath, State};
+use axum::http::request::Parts;
 use axum::http::{Request, StatusCode};
 use axum::middleware::{Next, from_fn};
 use axum::response::sse::{Event, Sse};
@@ -14,11 +15,12 @@ use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use rynna_config::{
-    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProviderSettingsError,
-    ProviderSettingsStore, secure_private_directory,
+    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
+    ProviderSettingsError, ProviderSettingsStore, secure_private_directory,
 };
 use rynna_core::{
     Agent, AgentError, AgentProfiles, CompletionDelta, Message, Profile, ProfileAgentError,
+    ProfileError,
 };
 use rynna_provider_anthropic::{
     CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, isolate_claude_subscription_environment,
@@ -33,7 +35,8 @@ use tower_http::services::{ServeDir, ServeFile};
 
 #[derive(Clone)]
 struct AppState {
-    profiles: Arc<AgentProfiles>,
+    profiles: Arc<Mutex<AgentProfiles>>,
+    catalog: Option<Arc<Mutex<ProfileCatalog>>>,
     provider_settings: Option<Arc<Mutex<ProviderSettingsStore>>>,
     codex_program: PathBuf,
     codex_home: PathBuf,
@@ -76,7 +79,7 @@ fn router_with_state(
         .map(PathBuf::from)
         .or_else(|| dirs::config_dir().map(|path| path.join("rynna").join("codex")))
         .unwrap_or_else(|| PathBuf::from(".rynna-codex"));
-    router_with_runtime(profiles, provider_settings, codex_program, codex_home)
+    router_with_runtime(profiles, provider_settings, None, codex_program, codex_home)
 }
 
 pub fn router_with_profiles_and_provider_runtime(
@@ -88,14 +91,37 @@ pub fn router_with_profiles_and_provider_runtime(
     router_with_runtime(
         profiles,
         Some(provider_settings),
+        None,
         codex_program.into(),
         codex_home.into(),
+    )
+}
+
+pub fn router_with_profiles_provider_settings_and_catalog(
+    profiles: AgentProfiles,
+    provider_settings: ProviderSettingsStore,
+    catalog: ProfileCatalog,
+) -> Router {
+    let codex_program = std::env::var_os("RYNNA_CODEX_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("codex"));
+    let codex_home = std::env::var_os("RYNNA_CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|path| path.join("rynna").join("codex")))
+        .unwrap_or_else(|| PathBuf::from(".rynna-codex"));
+    router_with_runtime(
+        profiles,
+        Some(provider_settings),
+        Some(catalog),
+        codex_program,
+        codex_home,
     )
 }
 
 fn router_with_runtime(
     profiles: AgentProfiles,
     provider_settings: Option<ProviderSettingsStore>,
+    catalog: Option<ProfileCatalog>,
     codex_program: PathBuf,
     codex_home: PathBuf,
 ) -> Router {
@@ -119,13 +145,21 @@ fn router_with_runtime(
                 .delete(delete_provider)
                 .fallback(api_method_not_allowed),
         )
+        .route(
+            "/v1/profiles/{name}",
+            axum::routing::put(update_saved_profile)
+                .delete(delete_saved_profile)
+                .fallback(api_method_not_allowed),
+        )
         .layer(from_fn(require_loopback_provider_admin));
 
     Router::new()
         .route("/healthz", get(health))
         .route(
             "/v1/profiles",
-            get(list_profiles).fallback(api_method_not_allowed),
+            get(list_profiles)
+                .post(create_profile)
+                .fallback(api_method_not_allowed),
         )
         .route(
             "/v1/respond",
@@ -139,7 +173,8 @@ fn router_with_runtime(
         .route("/v1", any(api_not_found))
         .route("/v1/{*path}", any(api_not_found))
         .with_state(AppState {
-            profiles: Arc::new(profiles),
+            profiles: Arc::new(Mutex::new(profiles)),
+            catalog: catalog.map(|catalog| Arc::new(Mutex::new(catalog))),
             provider_settings: provider_settings.map(|store| Arc::new(Mutex::new(store))),
             codex_program,
             codex_home,
@@ -193,10 +228,31 @@ pub fn router_with_profiles_provider_settings_and_web(
     provider_settings: ProviderSettingsStore,
     web_dir: impl AsRef<Path>,
 ) -> Router {
+    router_with_profiles_provider_settings_catalog_and_web(
+        profiles,
+        provider_settings,
+        None,
+        web_dir,
+    )
+}
+
+pub fn router_with_profiles_provider_settings_catalog_and_web(
+    profiles: AgentProfiles,
+    provider_settings: ProviderSettingsStore,
+    catalog: Option<ProfileCatalog>,
+    web_dir: impl AsRef<Path>,
+) -> Router {
     let web_dir = web_dir.as_ref();
     let index = web_dir.join("index.html");
     let assets = ServeDir::new(web_dir).fallback(ServeFile::new(index));
-    router_with_profiles_and_provider_settings(profiles, provider_settings).fallback_service(assets)
+    match catalog {
+        Some(catalog) => {
+            router_with_profiles_provider_settings_and_catalog(profiles, provider_settings, catalog)
+                .fallback_service(assets)
+        }
+        None => router_with_profiles_and_provider_settings(profiles, provider_settings)
+            .fallback_service(assets),
+    }
 }
 
 #[derive(Serialize)]
@@ -215,10 +271,125 @@ struct ProfilesResponse {
 }
 
 async fn list_profiles(State(state): State<AppState>) -> Json<ProfilesResponse> {
+    let profiles = state.profiles.lock().await;
     Json(ProfilesResponse {
-        default_profile: state.profiles.default_profile().to_owned(),
-        profiles: state.profiles.profiles(),
+        default_profile: profiles.default_profile().to_owned(),
+        profiles: profiles.profiles(),
     })
+}
+
+fn catalog_store(state: &AppState) -> Result<&Arc<Mutex<ProfileCatalog>>, ApiError> {
+    state.catalog.as_ref().ok_or_else(|| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "profile_catalog_unavailable",
+        message: "profile catalog is unavailable".to_owned(),
+    })
+}
+
+fn catalog_error(error: impl std::fmt::Display) -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_profile",
+        message: error.to_string(),
+    }
+}
+
+fn ensure_loopback_admin(LoopbackClient(is_loopback): LoopbackClient) -> Result<(), ApiError> {
+    if is_loopback {
+        Ok(())
+    } else {
+        Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "provider_admin_forbidden",
+            message: "provider administration is restricted to loopback clients".to_owned(),
+        })
+    }
+}
+
+struct LoopbackClient(bool);
+
+impl<S> FromRequestParts<S> for LoopbackClient
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .is_some_and(|ConnectInfo(address)| address.ip().is_loopback()),
+        ))
+    }
+}
+
+fn apply_saved_profile(
+    runtime: &mut AgentProfiles,
+    original_name: Option<&str>,
+    profile: Profile,
+    default_profile: &str,
+) -> Result<(), ProfileError> {
+    let agent = runtime
+        .clone_agent_for_provider(&profile.provider)
+        .ok_or_else(|| ProfileError::UnknownDefault(default_profile.to_owned()))?;
+    runtime.upsert(profile.clone(), agent)?;
+    if let Some(original) = original_name
+        && original != profile.name
+    {
+        runtime.remove(original)?;
+    }
+    runtime.set_default(default_profile)
+}
+
+async fn create_profile(
+    peer: LoopbackClient,
+    State(state): State<AppState>,
+    request: Result<Json<Profile>, JsonRejection>,
+) -> Result<Json<Profile>, ApiError> {
+    ensure_loopback_admin(peer)?;
+    let Json(profile) = request.map_err(ApiError::from)?;
+    let mut catalog = catalog_store(&state)?.lock().await;
+    let saved = catalog.add_profile(profile).map_err(catalog_error)?;
+    let mut runtime = state.profiles.lock().await;
+    apply_saved_profile(&mut runtime, None, saved.clone(), catalog.default_profile())
+        .map_err(catalog_error)?;
+    Ok(Json(saved))
+}
+
+async fn update_saved_profile(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    request: Result<Json<Profile>, JsonRejection>,
+) -> Result<Json<Profile>, ApiError> {
+    let Json(profile) = request.map_err(ApiError::from)?;
+    let mut catalog = catalog_store(&state)?.lock().await;
+    let saved = catalog
+        .update_profile(&name, profile)
+        .map_err(catalog_error)?;
+    let mut runtime = state.profiles.lock().await;
+    apply_saved_profile(
+        &mut runtime,
+        Some(&name),
+        saved.clone(),
+        catalog.default_profile(),
+    )
+    .map_err(catalog_error)?;
+    Ok(Json(saved))
+}
+
+async fn delete_saved_profile(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<StatusCode, ApiError> {
+    let mut catalog = catalog_store(&state)?.lock().await;
+    catalog.delete_profile(&name).map_err(catalog_error)?;
+    let mut runtime = state.profiles.lock().await;
+    runtime.remove(&name).map_err(catalog_error)?;
+    runtime
+        .set_default(catalog.default_profile())
+        .map_err(catalog_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Serialize)]
@@ -562,8 +733,8 @@ async fn respond(
     request: Result<Json<RespondRequest>, JsonRejection>,
 ) -> Result<Json<RespondResponse>, ApiError> {
     let Json(request) = request.map_err(ApiError::from)?;
-    let message = state
-        .profiles
+    let profiles = state.profiles.lock().await;
+    let message = profiles
         .respond(
             request.profile.as_deref(),
             &request.history,
@@ -601,7 +772,7 @@ async fn respond_stream(
     request: Result<Json<RespondRequest>, JsonRejection>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let Json(request) = request.map_err(ApiError::from)?;
-    let profiles = Arc::clone(&state.profiles);
+    let profiles = state.profiles.lock().await.clone();
     let (sender, receiver) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {

@@ -505,18 +505,20 @@ pub fn list_profiles(profiles: &AgentProfiles) -> ProfilesResponse {
 
 #[tauri::command]
 async fn respond(
-    profiles: State<'_, AgentProfiles>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
     request: RespondRequest,
 ) -> Result<RespondResponse, String> {
+    let profiles = profiles.lock().await;
     respond_with_profiles(&profiles, request).await
 }
 
 #[tauri::command]
 async fn respond_stream(
-    profiles: State<'_, AgentProfiles>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
     request: RespondRequest,
     on_event: Channel<CompletionDeltaEvent>,
 ) -> Result<RespondResponse, String> {
+    let profiles = profiles.lock().await.clone();
     let mut on_delta = |delta: &CompletionDelta| {
         let _ = on_event.send(CompletionDeltaEvent::from(delta));
     };
@@ -524,8 +526,87 @@ async fn respond_stream(
 }
 
 #[tauri::command]
-fn profiles(profiles: State<'_, AgentProfiles>) -> ProfilesResponse {
-    list_profiles(&profiles)
+async fn profiles(profiles: State<'_, Mutex<AgentProfiles>>) -> Result<ProfilesResponse, String> {
+    let profiles = profiles.lock().await;
+    Ok(list_profiles(&profiles))
+}
+
+#[tauri::command]
+async fn create_profile(
+    catalog: State<'_, Mutex<ProfileCatalog>>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
+    profile: Profile,
+) -> Result<Profile, String> {
+    let mut catalog = catalog.lock().await;
+    let saved = catalog
+        .add_profile(profile)
+        .map_err(|error| error.to_string())?;
+    let mut runtime = profiles.lock().await;
+    apply_saved_profile(&mut runtime, None, saved.clone(), catalog.default_profile())?;
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn update_profile(
+    catalog: State<'_, Mutex<ProfileCatalog>>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
+    name: String,
+    profile: Profile,
+) -> Result<Profile, String> {
+    let mut catalog = catalog.lock().await;
+    let saved = catalog
+        .update_profile(&name, profile)
+        .map_err(|error| error.to_string())?;
+    let mut runtime = profiles.lock().await;
+    apply_saved_profile(
+        &mut runtime,
+        Some(&name),
+        saved.clone(),
+        catalog.default_profile(),
+    )?;
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn delete_profile(
+    catalog: State<'_, Mutex<ProfileCatalog>>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
+    name: String,
+) -> Result<(), String> {
+    let mut catalog = catalog.lock().await;
+    catalog
+        .delete_profile(&name)
+        .map_err(|error| error.to_string())?;
+    let mut runtime = profiles.lock().await;
+    runtime.remove(&name).map_err(|error| error.to_string())?;
+    runtime
+        .set_default(catalog.default_profile())
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn apply_saved_profile(
+    runtime: &mut AgentProfiles,
+    original_name: Option<&str>,
+    profile: Profile,
+    default_profile: &str,
+) -> Result<(), String> {
+    let agent = runtime
+        .clone_agent_for_provider(&profile.provider)
+        .ok_or_else(|| format!("default profile `{default_profile}` is not defined"))?;
+    runtime
+        .upsert(profile.clone(), agent)
+        .map_err(|error| error.to_string())?;
+    if let Some(original) = original_name
+        && original != profile.name
+    {
+        runtime
+            .remove(original)
+            .map_err(|error| error.to_string())?;
+    }
+    runtime
+        .set_default(default_profile)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -760,11 +841,14 @@ pub fn run() {
     let credential_selection = OpenAiCredentialSelection::new(
         openai_account_reuses_existing_credentials(&provider_settings),
     );
-    let configured = configured_profiles(credential_selection.clone())
+    let catalog = configured_catalog()
+        .unwrap_or_else(|error| panic!("failed to load Rynna configuration: {error}"));
+    let configured = configured_profiles(credential_selection.clone(), &catalog)
         .unwrap_or_else(|error| panic!("failed to configure Rynna model provider: {error}"));
 
     tauri::Builder::default()
-        .manage(configured)
+        .manage(Mutex::new(configured))
+        .manage(Mutex::new(catalog))
         .manage(credential_selection)
         .manage(Mutex::new(provider_settings))
         .manage(OpenAiAuthenticationLock::default())
@@ -772,6 +856,9 @@ pub fn run() {
             respond,
             respond_stream,
             profiles,
+            create_profile,
+            update_profile,
+            delete_profile,
             openai_account,
             existing_openai_account,
             connect_openai,
@@ -792,14 +879,18 @@ fn configured_provider_settings() -> Result<ProviderSettingsStore, String> {
     .map_err(|error| error.to_string())
 }
 
-fn configured_profiles(
-    credential_selection: OpenAiCredentialSelection,
-) -> Result<AgentProfiles, String> {
-    let catalog = match optional_env("RYNNA_CONFIG")? {
+fn configured_catalog() -> Result<ProfileCatalog, String> {
+    match optional_env("RYNNA_CONFIG")? {
         Some(path) => ProfileCatalog::load(path),
         None => ProfileCatalog::load_default(),
     }
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())
+}
+
+fn configured_profiles(
+    credential_selection: OpenAiCredentialSelection,
+    catalog: &ProfileCatalog,
+) -> Result<AgentProfiles, String> {
     let default_profile =
         optional_env("RYNNA_PROFILE")?.unwrap_or_else(|| catalog.default_profile().to_owned());
     catalog
