@@ -550,6 +550,94 @@ pub trait ModelProvider: Send + Sync {
     }
 }
 
+pub struct FallbackProvider {
+    providers: Vec<Arc<dyn ModelProvider>>,
+}
+
+impl FallbackProvider {
+    pub fn new(providers: Vec<Arc<dyn ModelProvider>>) -> Result<Self, ProviderError> {
+        if providers.is_empty() {
+            return Err(ProviderError::new(
+                "at least one model provider must be configured",
+            ));
+        }
+        Ok(Self { providers })
+    }
+}
+
+#[async_trait]
+impl ModelProvider for FallbackProvider {
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+        let mut last_error = None;
+        for provider in &self.providers {
+            match provider.complete(request.clone()).await {
+                Ok(completion) => return Ok(completion),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("fallback providers cannot be empty"))
+    }
+
+    async fn complete_managed(&self, plan: ContextPlan) -> Result<Completion, ProviderError> {
+        let mut last_error = None;
+        for provider in &self.providers {
+            match provider.complete_managed(plan.clone()).await {
+                Ok(completion) => return Ok(completion),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("fallback providers cannot be empty"))
+    }
+
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+    ) -> Result<Completion, ProviderError> {
+        let mut last_error = None;
+        for provider in &self.providers {
+            let mut deltas = Vec::new();
+            match provider
+                .complete_stream(request.clone(), &mut |delta| deltas.push(delta.clone()))
+                .await
+            {
+                Ok(completion) => {
+                    for delta in &deltas {
+                        on_delta(delta);
+                    }
+                    return Ok(completion);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("fallback providers cannot be empty"))
+    }
+
+    async fn complete_stream_managed(
+        &self,
+        plan: ContextPlan,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+    ) -> Result<Completion, ProviderError> {
+        let mut last_error = None;
+        for provider in &self.providers {
+            let mut deltas = Vec::new();
+            match provider
+                .complete_stream_managed(plan.clone(), &mut |delta| deltas.push(delta.clone()))
+                .await
+            {
+                Ok(completion) => {
+                    for delta in &deltas {
+                        on_delta(delta);
+                    }
+                    return Ok(completion);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("fallback providers cannot be empty"))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AgentError {
     #[error("user input must not be blank")]
@@ -869,10 +957,15 @@ impl Agent {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Profile {
-    pub name: String,
+pub struct ProfileProvider {
     pub provider: String,
     pub model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Profile {
+    pub name: String,
+    pub providers: Vec<ProfileProvider>,
     #[serde(default)]
     pub active_skills: Vec<String>,
     #[serde(default)]
@@ -889,6 +982,10 @@ pub enum ProfileError {
     Duplicate(String),
     #[error("default profile `{0}` is not defined")]
     UnknownDefault(String),
+    #[error("profile `{0}` is not defined")]
+    UnknownProfile(String),
+    #[error("the last profile cannot be deleted")]
+    LastProfile,
 }
 
 #[derive(Debug, Error)]
@@ -940,6 +1037,62 @@ impl AgentProfiles {
             .values()
             .map(|(profile, _)| profile.clone())
             .collect()
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.profiles.contains_key(name)
+    }
+
+    pub fn len(&self) -> usize {
+        self.profiles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.profiles.is_empty()
+    }
+
+    pub fn clone_agent(&self, name: &str) -> Option<Agent> {
+        self.profiles.get(name).map(|(_, agent)| agent.clone())
+    }
+
+    pub fn upsert(&mut self, profile: Profile, agent: Agent) -> Result<(), ProfileError> {
+        if profile.name.trim().is_empty() {
+            return Err(ProfileError::BlankName);
+        }
+        let mut indexed = (*self.profiles).clone();
+        indexed.insert(profile.name.clone(), (profile, agent));
+        self.profiles = Arc::new(indexed);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, name: &str) -> Result<Profile, ProfileError> {
+        if !self.profiles.contains_key(name) {
+            return Err(ProfileError::UnknownProfile(name.to_owned()));
+        }
+        if self.profiles.len() <= 1 {
+            return Err(ProfileError::LastProfile);
+        }
+        let mut indexed = (*self.profiles).clone();
+        let (profile, _) = indexed.remove(name).expect("profile exists");
+        if self.default_profile.as_ref() == name {
+            self.default_profile = indexed
+                .keys()
+                .next()
+                .cloned()
+                .expect("a remaining profile exists")
+                .into();
+        }
+        self.profiles = Arc::new(indexed);
+        Ok(profile)
+    }
+
+    pub fn set_default(&mut self, name: impl Into<String>) -> Result<(), ProfileError> {
+        let name = name.into();
+        if !self.profiles.contains_key(&name) {
+            return Err(ProfileError::UnknownDefault(name));
+        }
+        self.default_profile = name.into();
+        Ok(())
     }
 
     pub async fn respond(

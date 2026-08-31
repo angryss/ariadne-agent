@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
 import { ThemeToggle } from './components/theme-toggle';
+import { Typeahead } from './components/typeahead';
 import { Badge } from './components/ui/badge';
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
@@ -12,6 +13,7 @@ import type {
   Message,
   OpenAiAccount,
   Profile,
+  ProfileProvider,
   ProviderInput,
 } from './contracts';
 
@@ -32,6 +34,14 @@ const PROVIDER_KINDS: readonly ConfiguredProvider['kind'][] = [
   'ollama',
   'openai',
 ];
+
+function sortedProfiles(profiles: Profile[]): Profile[] {
+  return [...profiles].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function profileProviderOptions(providerIds: readonly string[]): string[] {
+  return [...new Set(providerIds)];
+}
 
 function conversationHistory(messages: DisplayMessage[]): Message[] {
   return messages.filter((message): message is Message => message.role !== 'thinking');
@@ -86,6 +96,7 @@ export function App({ client }: AppProps) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [profileProviderIds, setProfileProviderIds] = useState<string[]>([]);
   const [selectedProfile, setSelectedProfile] = useState<string | null>(null);
   const [openAiAccount, setOpenAiAccount] = useState<OpenAiAccount | null>(null);
   const [existingOpenAiAccount, setExistingOpenAiAccount] = useState<OpenAiAccount | null>(null);
@@ -109,6 +120,15 @@ export function App({ client }: AppProps) {
   const [reuseExistingChatgpt, setReuseExistingChatgpt] = useState<boolean | null>(null);
   const [providerApiKey, setProviderApiKey] = useState('');
   const [savingProvider, setSavingProvider] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<'profiles' | 'provider-credentials'>(
+    client.createProfile || client.updateProfile || client.deleteProfile
+      ? 'profiles'
+      : 'provider-credentials',
+  );
+  const [addingProfile, setAddingProfile] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileName, setProfileName] = useState('');
+  const [profileProviders, setProfileProviders] = useState<ProfileProvider[]>([]);
   const openAiAccountRequest = useRef(0);
   const providerMutationRevision = useRef(0);
 
@@ -127,6 +147,7 @@ export function App({ client }: AppProps) {
           return;
         }
         setProfiles(catalog.profiles);
+        setProfileProviderIds(catalog.provider_ids);
         setSelectedProfile(catalog.default_profile);
       })
       .catch((profileError: unknown) => {
@@ -214,6 +235,129 @@ export function App({ client }: AppProps) {
   }, [client]);
 
   const activeProfile = profiles.find((profile) => profile.name === selectedProfile);
+  const canEditProfiles = Boolean(client.createProfile || client.updateProfile || client.deleteProfile);
+  const canOpenSettings = Boolean(client.listProviders || canEditProfiles);
+
+  useEffect(() => {
+    if (addingProfile) {
+      return;
+    }
+    if (!activeProfile) {
+      setProfileName('');
+      setProfileProviders([]);
+      return;
+    }
+    setProfileName(activeProfile.name);
+    setProfileProviders(activeProfile.providers.map((provider) => ({ ...provider })));
+  }, [activeProfile, addingProfile]);
+
+  function selectProfile(name: string) {
+    setSelectedProfile(name);
+    setAddingProfile(false);
+    setMessages([]);
+    setError(null);
+  }
+
+  function beginAddProfile() {
+    setAddingProfile(true);
+    setProfileName('');
+    setProfileProviders([
+      activeProfile?.providers[0]
+        ? { ...activeProfile.providers[0] }
+        : { provider: 'ollama', model: 'qwen3:8b' },
+    ]);
+    setError(null);
+  }
+
+  function updateProfileProvider(
+    index: number,
+    field: keyof ProfileProvider,
+    value: string,
+  ) {
+    setProfileProviders((current) =>
+      current.map((provider, providerIndex) =>
+        providerIndex === index ? { ...provider, [field]: value } : provider,
+      ),
+    );
+  }
+
+  function addProfileProvider() {
+    setProfileProviders((current) => [...current, { provider: '', model: '' }]);
+  }
+
+  function removeProfileProvider(index: number) {
+    setProfileProviders((current) => current.filter((_, providerIndex) => providerIndex !== index));
+  }
+
+  function profileDraft(): Profile {
+    return {
+      name: profileName.trim(),
+      providers: profileProviders.map((provider) => ({
+        provider: provider.provider.trim(),
+        model: provider.model.trim(),
+      })),
+      active_skills: addingProfile ? [] : (activeProfile?.active_skills ?? []),
+      mcp_servers: addingProfile ? [] : (activeProfile?.mcp_servers ?? []),
+      capabilities: addingProfile ? [] : (activeProfile?.capabilities ?? []),
+    };
+  }
+
+  async function saveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (savingProfile) return;
+    const draft = profileDraft();
+    if (
+      !draft.name ||
+      draft.providers.length === 0 ||
+      draft.providers.some((provider) => !provider.provider || !provider.model)
+    ) return;
+    const save = addingProfile ? client.createProfile : client.updateProfile;
+    if (!save) return;
+    setSavingProfile(true);
+    setError(null);
+    try {
+      const saved = addingProfile
+        ? await client.createProfile!(draft)
+        : await client.updateProfile!(selectedProfile ?? draft.name, draft);
+      setProfiles((current) => {
+        const withoutPrevious = addingProfile
+          ? current
+          : current.filter((profile) => profile.name !== selectedProfile);
+        return [...withoutPrevious.filter((profile) => profile.name !== saved.name), saved];
+      });
+      setSelectedProfile(saved.name);
+      setAddingProfile(false);
+      setProfileName(saved.name);
+      setProfileProviders(saved.providers.map((provider) => ({ ...provider })));
+    } catch (profileError) {
+      setError(
+        profileError instanceof Error ? profileError.message : 'Rynna could not save the profile',
+      );
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
+  async function removeProfile() {
+    if (!client.deleteProfile || savingProfile || addingProfile || !selectedProfile) return;
+    if (profiles.length <= 1) return;
+    setSavingProfile(true);
+    setError(null);
+    try {
+      await client.deleteProfile(selectedProfile);
+      const remaining = profiles.filter((profile) => profile.name !== selectedProfile);
+      setProfiles(remaining);
+      const next = remaining[0]?.name ?? null;
+      setSelectedProfile(next);
+      setMessages([]);
+    } catch (profileError) {
+      setError(
+        profileError instanceof Error ? profileError.message : 'Rynna could not delete the profile',
+      );
+    } finally {
+      setSavingProfile(false);
+    }
+  }
 
   async function connectOpenAi(method: 'chatgpt' | 'api_key') {
     if (!client.connectOpenAi || connectingOpenAi) return;
@@ -401,25 +545,16 @@ export function App({ client }: AppProps) {
           <h1>Rynna</h1>
         </div>
         <div className="header-actions">
-          {profiles.length > 0 ? (
+          {view === 'chat' && profiles.length > 0 ? (
             <label className="profile-picker" htmlFor="profile">
               <span>Profile</span>
-              <select
+              <Typeahead
                 disabled={pending}
                 id="profile"
-                onChange={(event) => {
-                  setSelectedProfile(event.target.value);
-                  setMessages([]);
-                  setError(null);
-                }}
+                onChange={selectProfile}
+                options={sortedProfiles(profiles).map((profile) => profile.name)}
                 value={selectedProfile ?? ''}
-              >
-                {profiles.map((profile) => (
-                  <option key={profile.name} value={profile.name}>
-                    {profile.name}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
           ) : null}
           {client.connectOpenAi ? (
@@ -439,7 +574,7 @@ export function App({ client }: AppProps) {
                 : 'Connect OpenAI'}
             </Button>
           ) : null}
-          {client.listProviders ? (
+          {canOpenSettings ? (
             <Button
               className="account-button"
               onClick={() => {
@@ -489,8 +624,12 @@ export function App({ client }: AppProps) {
 
       {view === 'chat' && activeProfile ? (
         <aside className="profile-summary" aria-label="Active profile">
-          <strong>{activeProfile.model}</strong>
-          <Badge>{activeProfile.provider}</Badge>
+          {activeProfile.providers.map((provider, index) => (
+            <span className="profile-provider-summary" key={`${provider.provider}-${provider.model}-${index}`}>
+              <strong>{provider.model}</strong>
+              <Badge>{provider.provider}</Badge>
+            </span>
+          ))}
           {activeProfile.active_skills.map((skill) => (
             <Badge key={`skill-${skill}`}>{skill} skill</Badge>
           ))}
@@ -505,19 +644,163 @@ export function App({ client }: AppProps) {
 
       {view === 'settings' ? (
         <section className="settings-page" aria-label="Settings">
-          <div className="settings-heading">
-            <div>
-              <p className="eyebrow">Settings</p>
-              <h2>Providers</h2>
-            </div>
-            <Button disabled={providerSettings.length >= 3} onClick={beginAddProvider} type="button">
-              Add provider
-            </Button>
-          </div>
-          <p>
-            Provider credentials are stored here; runtime profiles and models load from rynna.toml
-            at startup.
-          </p>
+          <aside className="settings-sidebar">
+            <p className="eyebrow">Settings</p>
+            <nav aria-label="Settings">
+              {canEditProfiles ? (
+                <Button
+                  aria-current={settingsSection === 'profiles' ? 'page' : undefined}
+                  onClick={() => setSettingsSection('profiles')}
+                  type="button"
+                  variant="ghost"
+                >
+                  Profiles
+                </Button>
+              ) : null}
+              {client.listProviders ? (
+                <Button
+                  aria-current={settingsSection === 'provider-credentials' ? 'page' : undefined}
+                  onClick={() => setSettingsSection('provider-credentials')}
+                  type="button"
+                  variant="ghost"
+                >
+                  Provider credentials
+                </Button>
+              ) : null}
+            </nav>
+          </aside>
+          <div className="settings-content">
+            {settingsSection === 'profiles' && canEditProfiles ? (
+              <>
+                <div className="settings-heading">
+                  <div>
+                    <h2>Profiles</h2>
+                    <p>Group ordered providers and models for each workflow.</p>
+                  </div>
+                  <div className="provider-actions">
+                    <Button disabled={savingProfile} onClick={beginAddProfile} type="button">
+                      Add profile
+                    </Button>
+                    <Button
+                      disabled={savingProfile || addingProfile || profiles.length <= 1}
+                      onClick={() => void removeProfile()}
+                      type="button"
+                      variant="ghost"
+                    >
+                      Delete profile
+                    </Button>
+                  </div>
+                </div>
+                {profiles.length === 0 && !addingProfile ? (
+                  <p className="settings-empty">No profiles configured.</p>
+                ) : (
+                  <>
+                    {addingProfile ? null : (
+                      <label className="profile-picker" htmlFor="settings-profile">
+                        <span>Profile</span>
+                        <Typeahead
+                          disabled={savingProfile}
+                          id="settings-profile"
+                          onChange={selectProfile}
+                          options={sortedProfiles(profiles).map((profile) => profile.name)}
+                          value={selectedProfile ?? ''}
+                        />
+                      </label>
+                    )}
+                    <form className="provider-form profile-form" onSubmit={(event) => void saveProfile(event)}>
+                      <h3>{addingProfile ? 'Add profile' : 'Edit profile'}</h3>
+                      <label htmlFor="profile-name">Name</label>
+                      <Input
+                        id="profile-name"
+                        onChange={(event) => setProfileName(event.target.value)}
+                        required
+                        value={profileName}
+                      />
+                      <div className="profile-provider-heading">
+                        <div>
+                          <h4>Providers</h4>
+                          <p>
+                            Rynna tries these providers in order when a request fails. Restart Rynna before using saved profile changes.
+                          </p>
+                        </div>
+                        <Button onClick={addProfileProvider} size="sm" type="button" variant="outline">
+                          Add profile provider
+                        </Button>
+                      </div>
+                      <div className="profile-provider-list">
+                        {profileProviders.map((provider, index) => (
+                          <fieldset className="profile-provider-row" key={index}>
+                            <legend>Provider {index + 1}</legend>
+                            <div>
+                              <label htmlFor={`profile-provider-${index}`}>Provider</label>
+                              <Typeahead
+                                id={`profile-provider-${index}`}
+                                onChange={(value) => updateProfileProvider(index, 'provider', value)}
+                                options={profileProviderOptions(profileProviderIds)}
+                                value={provider.provider}
+                              />
+                            </div>
+                            <div>
+                              <label htmlFor={`profile-model-${index}`}>Model</label>
+                              <Input
+                                id={`profile-model-${index}`}
+                                onChange={(event) => updateProfileProvider(index, 'model', event.target.value)}
+                                required
+                                value={provider.model}
+                              />
+                            </div>
+                            <Button
+                              aria-label={`Remove provider ${index + 1}`}
+                              disabled={profileProviders.length <= 1}
+                              onClick={() => removeProfileProvider(index)}
+                              size="sm"
+                              type="button"
+                              variant="ghost"
+                            >
+                              Remove
+                            </Button>
+                          </fieldset>
+                        ))}
+                      </div>
+                      <div className="provider-actions">
+                        <Button
+                          disabled={
+                            savingProfile ||
+                            !profileName.trim() ||
+                            profileProviders.length === 0 ||
+                            profileProviders.some(
+                              (provider) => !provider.provider.trim() || !provider.model.trim(),
+                            )
+                          }
+                          type="submit"
+                        >
+                          Save profile
+                        </Button>
+                        {addingProfile ? (
+                          <Button onClick={() => setAddingProfile(false)} type="button" variant="ghost">
+                            Cancel
+                          </Button>
+                        ) : null}
+                      </div>
+                    </form>
+                  </>
+                )}
+              </>
+            ) : null}
+            {settingsSection === 'provider-credentials' && client.listProviders ? (
+              <>
+                <div className="settings-heading">
+                  <div>
+                    <h2>Provider credentials</h2>
+                    <p>Manage authentication shared by provider-backed profiles.</p>
+                  </div>
+                  <Button disabled={providerSettings.length >= 3} onClick={beginAddProvider} type="button">
+                    Add provider
+                  </Button>
+                </div>
+                <p>
+                  Provider credentials are stored here; runtime profiles and models load from config.toml at startup.
+                </p>
           {providerSettings.length === 0 ? (
             <p className="settings-empty">No providers configured.</p>
           ) : (
@@ -591,7 +874,12 @@ export function App({ client }: AppProps) {
                     aria-expanded={providerTypeOpen}
                     autoComplete="off"
                     id="provider-type"
-                    onBlur={() => setProviderTypeOpen(false)}
+                    onBlur={() => {
+                      setProviderTypeQuery(providerTitle(providerKind));
+                      setProviderTypeOpen(false);
+                      setProviderTypeDirty(false);
+                      setActiveProviderKind(providerKind);
+                    }}
                     onChange={(event) => {
                       const query = event.target.value;
                       setProviderTypeQuery(query);
@@ -607,7 +895,10 @@ export function App({ client }: AppProps) {
                     }}
                     onKeyDown={(event) => {
                       if (event.key === 'Escape') {
+                        setProviderTypeQuery(providerTitle(providerKind));
                         setProviderTypeOpen(false);
+                        setProviderTypeDirty(false);
+                        setActiveProviderKind(providerKind);
                         return;
                       }
                       const matches = matchingProviderKinds(providerTypeQuery);
@@ -779,7 +1070,10 @@ export function App({ client }: AppProps) {
               </div>
             </form>
           ) : null}
+              </>
+            ) : null}
           {error ? <p className="request-error" role="alert">{error}</p> : null}
+          </div>
         </section>
       ) : null}
 

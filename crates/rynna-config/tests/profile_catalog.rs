@@ -2,6 +2,7 @@ use rynna_config::{
     AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
     ProviderKind, ProviderSettingsStore, ResolvedCapability, secure_private_directory,
 };
+use rynna_core::{Profile, ProfileProvider};
 
 #[test]
 fn parses_anthropic_api_and_subscription_profiles() {
@@ -27,12 +28,21 @@ model = "sonnet"
     .unwrap();
 
     let api = catalog.resolve("api").unwrap();
-    assert_eq!(api.provider_kind, ProviderKind::AnthropicMessages);
-    assert_eq!(api.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
-    let subscription = catalog.resolve("subscription").unwrap();
-    assert_eq!(subscription.provider_kind, ProviderKind::ClaudeSubscription);
     assert_eq!(
-        subscription.claude_program.to_string_lossy(),
+        api.providers[0].provider_kind,
+        ProviderKind::AnthropicMessages
+    );
+    assert_eq!(
+        api.providers[0].api_key_env.as_deref(),
+        Some("ANTHROPIC_API_KEY")
+    );
+    let subscription = catalog.resolve("subscription").unwrap();
+    assert_eq!(
+        subscription.providers[0].provider_kind,
+        ProviderKind::ClaudeSubscription
+    );
+    assert_eq!(
+        subscription.providers[0].claude_program.to_string_lossy(),
         "/usr/local/bin/claude"
     );
 }
@@ -146,8 +156,8 @@ args = ["/workspace"]
 
     assert_eq!(catalog.default_profile(), "work");
     assert_eq!(profile.profile.name, "work");
-    assert_eq!(profile.profile.provider, "ollama");
-    assert_eq!(profile.profile.model, "qwen3:14b");
+    assert_eq!(profile.profile.providers[0].provider, "ollama");
+    assert_eq!(profile.profile.providers[0].model, "qwen3:14b");
     assert_eq!(profile.profile.active_skills, ["rust", "github"]);
     assert_eq!(profile.profile.mcp_servers, ["filesystem"]);
     assert_eq!(profile.profile.capabilities, ["workspace"]);
@@ -163,14 +173,58 @@ args = ["/workspace"]
     assert_eq!(filesystem.max_traversal_files, Some(200));
     assert_eq!(filesystem.max_traversal_depth, Some(12));
     assert_eq!(filesystem.max_search_bytes, Some(4096));
-    assert_eq!(profile.provider_kind, ProviderKind::OpenAiCompatible);
-    assert_eq!(profile.api_base, "http://127.0.0.1:11434/v1");
-    assert_eq!(profile.api_key_env.as_deref(), Some("OLLAMA_API_KEY"));
+    assert_eq!(
+        profile.providers[0].provider_kind,
+        ProviderKind::OpenAiCompatible
+    );
+    assert_eq!(profile.providers[0].api_base, "http://127.0.0.1:11434/v1");
+    assert_eq!(
+        profile.providers[0].api_key_env.as_deref(),
+        Some("OLLAMA_API_KEY")
+    );
     assert_eq!(profile.system_prompt, "You are Rynna at work.");
     assert_eq!(catalog.resolve_all().unwrap(), vec![profile]);
     assert_eq!(
         catalog.mcp_server("filesystem").unwrap()["command"].as_str(),
         Some("mcp-filesystem")
+    );
+}
+
+#[test]
+fn parses_ordered_profile_providers_for_runtime_fallback() {
+    let catalog = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "work"
+
+[providers.primary]
+kind = "openai-compatible"
+api_base = "https://primary.example/v1"
+
+[providers.secondary]
+kind = "anthropic-messages"
+api_base = "https://secondary.example"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[profiles.work]
+providers = [
+  { provider = "primary", model = "primary-model" },
+  { provider = "secondary", model = "secondary-model" },
+]
+"#,
+    )
+    .unwrap();
+
+    let profile = catalog.resolve("work").unwrap();
+
+    assert_eq!(profile.profile.providers.len(), 2);
+    assert_eq!(profile.profile.providers[0].provider, "primary");
+    assert_eq!(profile.profile.providers[0].model, "primary-model");
+    assert_eq!(profile.providers[1].name, "secondary");
+    assert_eq!(profile.providers[1].model, "secondary-model");
+    assert_eq!(
+        profile.providers[1].provider_kind,
+        ProviderKind::AnthropicMessages
     );
 }
 
@@ -223,9 +277,9 @@ fn built_in_catalog_preserves_the_existing_local_ollama_defaults() {
     let profile = catalog.resolve(catalog.default_profile()).unwrap();
 
     assert_eq!(catalog.default_profile(), "default");
-    assert_eq!(profile.profile.provider, "ollama");
-    assert_eq!(profile.profile.model, "qwen3:8b");
-    assert_eq!(profile.api_base, "http://127.0.0.1:11434/v1");
+    assert_eq!(profile.profile.providers[0].provider, "ollama");
+    assert_eq!(profile.profile.providers[0].model, "qwen3:8b");
+    assert_eq!(profile.providers[0].api_base, "http://127.0.0.1:11434/v1");
     assert!(profile.profile.active_skills.is_empty());
     assert!(profile.profile.mcp_servers.is_empty());
 }
@@ -254,7 +308,7 @@ model = "test-model"
     let catalog = ProfileCatalog::load(&path).unwrap();
 
     assert_eq!(
-        catalog.resolve("local").unwrap().profile.model,
+        catalog.resolve("local").unwrap().profile.providers[0].model,
         "test-model"
     );
 }
@@ -756,4 +810,238 @@ fn provider_settings_support_a_bare_relative_filename() {
     );
     std::fs::remove_file(file_name).unwrap();
     std::fs::remove_file(lock_name).unwrap();
+}
+
+fn editable_profile(name: &str, model: &str) -> Profile {
+    Profile {
+        name: name.to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "ollama".to_owned(),
+            model: model.to_owned(),
+        }],
+        active_skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        capabilities: Vec::new(),
+    }
+}
+
+#[test]
+fn adds_updates_and_deletes_profiles_and_persists_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+    catalog
+        .add_profile(editable_profile("zeta", "gpt-5"))
+        .unwrap();
+    catalog
+        .update_profile("zeta", editable_profile("work", "gpt-5.2"))
+        .unwrap();
+    catalog.delete_profile("work").unwrap();
+
+    let reloaded = ProfileCatalog::load(&path).unwrap();
+    let names: Vec<_> = reloaded
+        .resolve_all()
+        .unwrap()
+        .into_iter()
+        .map(|profile| profile.profile.name)
+        .collect();
+    assert_eq!(names, vec!["alpha".to_owned()]);
+    assert_eq!(
+        reloaded.resolve("alpha").unwrap().profile.providers[0].model,
+        "qwen3:8b"
+    );
+}
+
+#[test]
+fn adding_a_profile_does_not_change_memory_when_persistence_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    let error = catalog
+        .add_profile(editable_profile("work", "gpt-5"))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("failed to write"));
+    let names: Vec<_> = catalog
+        .resolve_all()
+        .unwrap()
+        .into_iter()
+        .map(|profile| profile.profile.name)
+        .collect();
+    assert_eq!(names, vec!["alpha".to_owned()]);
+}
+
+#[test]
+fn profile_catalog_merges_mutations_from_separate_instances() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+    let mut first = ProfileCatalog::load(&path).unwrap();
+    let mut second = ProfileCatalog::load(&path).unwrap();
+
+    first
+        .add_profile(editable_profile("work", "gpt-5"))
+        .unwrap();
+    second
+        .add_profile(editable_profile("personal", "qwen3:14b"))
+        .unwrap();
+
+    let names: Vec<_> = ProfileCatalog::load(path)
+        .unwrap()
+        .resolve_all()
+        .unwrap()
+        .into_iter()
+        .map(|profile| profile.profile.name)
+        .collect();
+    assert_eq!(names, ["alpha", "personal", "work"]);
+}
+
+#[test]
+fn profile_catalog_lists_all_catalog_provider_identifiers() {
+    let catalog = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[providers.unused_custom]
+kind = "openai-compatible"
+api_base = "https://custom.example/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(catalog.provider_ids(), ["ollama", "unused_custom"]);
+}
+
+#[test]
+fn reserved_runtime_profile_name_is_rejected_by_catalog_crud() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+[profiles.openai-account]
+provider = "ollama"
+model = "legacy"
+"#,
+    )
+    .unwrap();
+    let original = std::fs::read_to_string(&path).unwrap();
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+
+    assert!(
+        catalog
+            .add_profile(editable_profile("openai-account", "new"))
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+    assert!(
+        catalog
+            .update_profile("alpha", editable_profile("openai-account", "renamed"))
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+    assert!(
+        catalog
+            .update_profile(
+                "openai-account",
+                editable_profile("openai-account", "edited")
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+    assert!(
+        catalog
+            .delete_profile("openai-account")
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+}
+
+#[test]
+fn rejects_deleting_the_last_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+    let error = catalog.delete_profile("alpha").unwrap_err();
+    assert!(error.to_string().contains("last profile"));
 }

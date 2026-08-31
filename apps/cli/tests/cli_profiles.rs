@@ -46,7 +46,7 @@ active_skills = ["github"]
     assert_eq!(value["default_profile"], "local");
     assert_eq!(value["profiles"][0]["name"], "local");
     assert_eq!(value["profiles"][1]["name"], "work");
-    assert_eq!(value["profiles"][1]["model"], "qwen3:14b");
+    assert_eq!(value["profiles"][1]["providers"][0]["model"], "qwen3:14b");
     assert_eq!(value["profiles"][1]["active_skills"][0], "github");
 }
 
@@ -94,8 +94,14 @@ model = "work-model"
     assert!(output.status.success());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["default_profile"], "work");
-    assert_eq!(value["profiles"][0]["model"], "catalog-model");
-    assert_eq!(value["profiles"][1]["model"], "effective-model");
+    assert_eq!(
+        value["profiles"][0]["providers"][0]["model"],
+        "catalog-model"
+    );
+    assert_eq!(
+        value["profiles"][1]["providers"][0]["model"],
+        "effective-model"
+    );
 }
 
 #[test]

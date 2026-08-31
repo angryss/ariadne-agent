@@ -98,21 +98,57 @@ export class HttpAgentClient implements AgentClient {
       method: 'GET',
       headers: { accept: 'application/json' },
     });
+    return this.readProfileCatalog(response);
+  }
+
+  async createProfile(profile: Profile): Promise<Profile> {
+    return this.savedProfile(this.profilesEndpoint, 'POST', profile);
+  }
+
+  async updateProfile(name: string, profile: Profile): Promise<Profile> {
+    return this.savedProfile(`${this.profilesEndpoint}/${encodeURIComponent(name)}`, 'PUT', profile);
+  }
+
+  async deleteProfile(name: string): Promise<void> {
+    const response = await this.fetcher(`${this.profilesEndpoint}/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) throw new Error(`Rynna API returned ${response.status}`);
+  }
+
+  private async savedProfile(endpoint: string, method: 'POST' | 'PUT', profile: Profile): Promise<Profile> {
+    const response = await this.fetcher(endpoint, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(profile),
+    });
+    const body = await this.readJson(response);
+    if (!isProfile(body)) {
+      throw new Error('Rynna API returned invalid profile data');
+    }
+    return body;
+  }
+
+  private async readProfileCatalog(response: Response): Promise<ProfileCatalog> {
+    const body = await this.readJson(response);
+    if (!isProfileCatalog(body)) {
+      throw new Error('Rynna API returned invalid profile data');
+    }
+    return body;
+  }
+
+  private async readJson(response: Response): Promise<unknown> {
     let body: unknown;
     try {
+      if (response.status === 204) return null;
       body = await response.json();
     } catch {
       throw new Error(
-        response.ok
-          ? 'Rynna API returned invalid profile data'
-          : `Rynna API returned ${response.status}`,
+        response.ok ? 'Rynna API returned invalid profile data' : `Rynna API returned ${response.status}`,
       );
     }
     if (!response.ok) {
       throw new Error(readApiError(body) ?? `Rynna API returned ${response.status}`);
-    }
-    if (!isProfileCatalog(body)) {
-      throw new Error('Rynna API returned invalid profile data');
     }
     return body;
   }
@@ -312,6 +348,9 @@ function isProfileCatalog(value: unknown): value is ProfileCatalog {
       typeof value === 'object' &&
       'default_profile' in value &&
       typeof value.default_profile === 'string' &&
+      'provider_ids' in value &&
+      Array.isArray(value.provider_ids) &&
+      value.provider_ids.every((provider) => typeof provider === 'string') &&
       'profiles' in value &&
       Array.isArray(value.profiles) &&
       value.profiles.every(isProfile),
@@ -324,10 +363,18 @@ function isProfile(value: unknown): value is Profile {
       typeof value === 'object' &&
       'name' in value &&
       typeof value.name === 'string' &&
-      'provider' in value &&
-      typeof value.provider === 'string' &&
-      'model' in value &&
-      typeof value.model === 'string' &&
+      'providers' in value &&
+      Array.isArray(value.providers) &&
+      value.providers.length > 0 &&
+      value.providers.every(
+        (provider) =>
+          provider &&
+          typeof provider === 'object' &&
+          'provider' in provider &&
+          typeof provider.provider === 'string' &&
+          'model' in provider &&
+          typeof provider.model === 'string',
+      ) &&
       'active_skills' in value &&
       Array.isArray(value.active_skills) &&
       value.active_skills.every((skill) => typeof skill === 'string') &&

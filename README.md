@@ -94,7 +94,7 @@ cargo run -p rynna-cli -- serve
 npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Vite proxies API requests to port 3000. Open **Settings**, then **Providers**, to manage Ollama and OpenAI provider settings. Press Enter in the composer to submit; use Shift-Enter or Alt-Enter to insert a newline. The browser streams typed thinking and content events from the server, keeps the active thinking section open, and collapses it when the user-facing answer begins. Select the Thinking summary to expand or collapse it later.
+Open <http://127.0.0.1:5173>. Vite proxies API requests to port 3000. The header profile picker selects the active profile. Open **Settings** to add, edit, or delete profiles, arrange each profile's ordered provider/model fallback chain, and manage shared provider credentials from the left navigation. Press Enter in the composer to submit; use Shift-Enter or Alt-Enter to insert a newline. The browser streams typed thinking and content events from the server, keeps the active thinking section open, and collapses it when the user-facing answer begins. Select the Thinking summary to expand or collapse it manually.
 
 To exercise the production topology, build the SPA and serve it from the Rust process:
 
@@ -112,7 +112,7 @@ npm install
 npm run desktop:dev
 ```
 
-The desktop frontend uses narrow Tauri commands and a typed IPC channel instead of opening the HTTP server. Its shared **Settings** → **Providers** page provides the same blank-by-default provider CRUD as the browser and CLI. Its shared composer submits with Enter and inserts newlines with Shift-Enter or Alt-Enter. It provides the same streaming, collapsible thinking display as the browser, loads the same configured profile catalog as the CLI plus the reserved `openai-account` desktop profile, and shows the selected model, provider, active skills, and MCP servers.
+The desktop frontend uses narrow Tauri commands and a typed IPC channel instead of opening the HTTP server. Its shared **Settings** navigation provides the same profile editor and blank-by-default provider-credential CRUD as the browser and CLI. Its shared composer submits with Enter and inserts newlines with Shift-Enter or Alt-Enter. It provides the same streaming, collapsible thinking display as the browser, loads the same configured profile catalog as the CLI plus the reserved `openai-account` desktop profile, and exposes profile metadata and selection through the shared UI contract.
 
 The desktop app also exposes **Connect OpenAI**. Choose **Use ChatGPT subscription** to complete Codex's supported browser sign-in, or enter an OpenAI API key for usage-based API billing. When adding a ChatGPT-backed OpenAI provider later, Rynna checks the user's existing Codex account and asks whether to reuse those ChatGPT credentials or complete a new browser sign-in in Rynna's private Codex configuration directory. Rynna verifies reused credentials with `codex login status`, passes API keys to Codex over stdin, and never returns credentials through Tauri IPC. After connecting, select the `openai-account` profile to send prompts through that account. This account-backed profile does not receive Rynna tools. Its ephemeral Codex thread has no execution environment; shell, image, planning, and web-search tools are disabled, any tool lifecycle item aborts the response, and the model is instructed to answer only from the supplied conversation. The provider is pinned to the reviewed `codex-cli 0.149.1` protocol/tool surface; upgrading Codex requires an Rynna compatibility review and release.
 
@@ -148,8 +148,8 @@ See [`rynna.example.toml`](rynna.example.toml) for the complete version 1 schema
 
 - `providers.<name>` may use `openai-compatible`, `anthropic-messages`, or `claude-subscription`. Direct Anthropic profiles use `api_key_env` (normally `ANTHROPIC_API_KEY`); store the secret only in that environment variable, never in TOML.
 - `claude-subscription` uses Claude Code's supported headless interface after `claude auth login --claudeai` (or an explicit `CLAUDE_CODE_OAUTH_TOKEN` created by `claude setup-token`). Claude subscription / usage bundle billing is handled by Claude. Rynna removes competing API, profile, gateway, and cloud-provider environment overrides; disables Claude Code tools, MCP, customizations, and persistence; and rejects profiles that declare Rynna capabilities, skills, or MCP servers.
-- Provider settings in the CLI, web app, and desktop app store credential readiness only. Runtime provider, model, and profile routing remains authoritative in `rynna.toml` and is loaded at process startup.
-- `profiles.<name>` selects a provider and model and may define `system_prompt`, `capabilities`, `active_skills`, and `mcp_servers`.
+- Provider settings in the CLI, web app, and desktop app store shared credential readiness only. Runtime provider, model, and profile routing remains authoritative in `config.toml` and is loaded at process startup.
+- `profiles.<name>` selects an ordered, non-empty list of provider/model entries and may define `system_prompt`, `capabilities`, `active_skills`, and `mcp_servers`. The first entry is primary; later entries are attempted as fallbacks.
 - `capabilities.<name>` defines an in-process native capability. `kind = "filesystem"` supplies eight workspace-scoped tools: read, write, exact edit, list, find, search, create directory, and file metadata. `kind = "command"` supplies one bounded `run_command` tool over an explicit alias-to-executable map.
 - `mcp_servers.<name>` stores a structured MCP server definition. Every profile reference is validated when the catalog loads.
 - `default_profile` selects the profile used when a request or process does not specify one.
@@ -164,7 +164,7 @@ Profile-scoped skill and MCP activation is represented and exposed consistently,
 
 ## HTTP API
 
-`GET /v1/profiles` returns the process default and safe profile metadata. It never returns API keys, API-key environment-variable names, provider base URLs, system prompts, or MCP command definitions.
+`GET /v1/profiles` returns the process default, safe catalog provider identifiers, and safe profile metadata. It never returns API keys, API-key environment-variable names, provider base URLs, system prompts, or MCP command definitions. `POST /v1/profiles` and `PUT`/`DELETE /v1/profiles/{name}` add, update, and delete catalog profiles for loopback clients. Profile mutations persist to `config.toml`, but they never attach an existing runtime agent to changed metadata: metadata for currently running profiles remains the startup snapshot, while new catalog-only profiles have no runtime agent. Restart the process before using a new or renamed profile or relying on changed providers, models, prompts, or capabilities.
 
 `GET /v1/providers`, `POST /v1/providers`, and `PUT`/`DELETE /v1/providers/{kind}` provide provider settings CRUD for the browser. The persisted TOML contains only Ollama's API base URL or the selected OpenAI/Anthropic authentication method. OpenAI API keys are piped to Codex and are never stored in this file or returned by the API.
 

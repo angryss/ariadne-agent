@@ -21,10 +21,14 @@ export type CompletionDelta =
 
 export type CompletionDeltaHandler = (delta: CompletionDelta) => void;
 
-export interface Profile {
-  name: string;
+export interface ProfileProvider {
   provider: string;
   model: string;
+}
+
+export interface Profile {
+  name: string;
+  providers: ProfileProvider[];
   active_skills: string[];
   mcp_servers: string[];
   capabilities: string[];
@@ -32,6 +36,7 @@ export interface Profile {
 
 export interface ProfileCatalog {
   default_profile: string;
+  provider_ids: string[];
   profiles: Profile[];
 }
 
@@ -58,6 +63,9 @@ export type ProviderInput =
 export interface AgentClient {
   respond(request: RespondRequest, onDelta?: CompletionDeltaHandler): Promise<RespondResponse>;
   listProfiles?(): Promise<ProfileCatalog>;
+  createProfile?(profile: Profile): Promise<Profile>;
+  updateProfile?(name: string, profile: Profile): Promise<Profile>;
+  deleteProfile?(name: string): Promise<void>;
   getOpenAiAccount?(): Promise<OpenAiAccount>;
   getExistingOpenAiAccount?(): Promise<OpenAiAccount>;
   connectOpenAi?(request: ConnectOpenAiRequest): Promise<OpenAiAccount>;
