@@ -8,8 +8,9 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use rynna_config::{
     ProfileCatalog, ProviderKind, ProviderSettingsStore, ResolvedCapability, ResolvedProfile,
+    ResolvedProvider,
 };
-use rynna_core::{Agent, AgentProfiles, ModelProvider, Tool};
+use rynna_core::{Agent, AgentProfiles, FallbackProvider, ModelProvider, Tool};
 use rynna_provider_anthropic::{AnthropicMessagesProvider, ClaudeCodeProvider};
 use rynna_provider_openai::OpenAiCompatibleProvider;
 use rynna_tools_command::{CommandConfig, CommandTool};
@@ -163,8 +164,9 @@ fn list_profiles(
             let mut profile = profile.profile;
             if profile.name == default_profile
                 && let Some(model) = model_override
+                && let Some(provider) = profile.providers.first_mut()
             {
-                profile.model = model.to_owned();
+                provider.model = model.to_owned();
             }
             profile
         })
@@ -185,11 +187,16 @@ fn list_profiles(
                 } else {
                     " "
                 };
+                let providers = profile
+                    .providers
+                    .iter()
+                    .map(|provider| format!("{}:{}", provider.provider, provider.model))
+                    .collect::<Vec<_>>()
+                    .join(",");
                 println!(
-                    "{marker} {}\tprovider={}\tmodel={}\tskills={}\tmcp_servers={}\tcapabilities={}",
+                    "{marker} {}\tproviders={}\tskills={}\tmcp_servers={}\tcapabilities={}",
                     profile.name,
-                    profile.provider,
-                    profile.model,
+                    providers,
                     profile.active_skills.join(","),
                     profile.mcp_servers.join(","),
                     profile.capabilities.join(",")
@@ -218,10 +225,17 @@ fn configured_profiles(
     for mut profile in resolved {
         let api_key_override = if profile.profile.name == default_profile {
             if let Some(api_base) = &overrides.api_base {
-                profile.api_base.clone_from(api_base);
+                if let Some(provider) = profile.providers.first_mut() {
+                    provider.api_base.clone_from(api_base);
+                }
             }
             if let Some(model) = &overrides.model {
-                profile.profile.model.clone_from(model);
+                if let Some(provider) = profile.providers.first_mut() {
+                    provider.model.clone_from(model);
+                }
+                if let Some(provider) = profile.profile.providers.first_mut() {
+                    provider.model.clone_from(model);
+                }
             }
             if let Some(system_prompt) = &overrides.system_prompt {
                 profile.system_prompt.clone_from(system_prompt);
@@ -238,59 +252,28 @@ fn configured_profiles(
 }
 
 fn configured_agent(profile: &ResolvedProfile, api_key_override: Option<String>) -> Result<Agent> {
-    let api_key = match api_key_override {
-        Some(api_key) => Some(api_key),
-        None => profile
-            .api_key_env
-            .as_deref()
-            .map(|name| {
-                env::var(name).with_context(|| {
-                    format!(
-                        "profile `{}` requires provider API key environment variable `{name}`",
-                        profile.profile.name
-                    )
-                })
-            })
-            .transpose()?,
-    };
-    let provider: Arc<dyn ModelProvider> = match profile.provider_kind {
-        ProviderKind::OpenAiCompatible => Arc::new(
-            OpenAiCompatibleProvider::new(&profile.api_base, &profile.profile.model, api_key)
-                .with_context(|| {
-                    format!(
-                        "invalid model provider configuration for profile `{}`",
-                        profile.profile.name
-                    )
-                })?,
-        ),
-        ProviderKind::AnthropicMessages => Arc::new(
-            AnthropicMessagesProvider::with_base_url(
-                &profile.api_base,
-                &profile.profile.model,
-                api_key.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "profile `{}` requires an Anthropic API key",
-                        profile.profile.name
-                    )
-                })?,
+    let mut providers = profile
+        .providers
+        .iter()
+        .enumerate()
+        .map(|(index, provider)| {
+            configured_provider(
+                &profile.profile.name,
+                provider,
+                if index == 0 {
+                    api_key_override.clone()
+                } else {
+                    None
+                },
             )
-            .with_context(|| {
-                format!(
-                    "invalid Anthropic provider configuration for profile `{}`",
-                    profile.profile.name
-                )
-            })?,
-        ),
-        ProviderKind::ClaudeSubscription => Arc::new(ClaudeCodeProvider::new(
-            &profile.claude_program,
-            &profile.profile.model,
-        )),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let provider: Arc<dyn ModelProvider> = if providers.len() == 1 {
+        providers.remove(0)
+    } else {
+        Arc::new(FallbackProvider::new(providers).map_err(anyhow::Error::msg)?)
     };
 
-    if profile.provider_kind == ProviderKind::ClaudeSubscription && !profile.capabilities.is_empty()
-    {
-        anyhow::bail!("Claude subscription profiles do not support Rynna capabilities");
-    }
     let tools = configured_tools(profile)?;
     if tools.is_empty() {
         Ok(Agent::new(provider, profile.system_prompt.clone()))
@@ -298,6 +281,62 @@ fn configured_agent(profile: &ResolvedProfile, api_key_override: Option<String>)
         Agent::with_tools(provider, profile.system_prompt.clone(), tools)
             .context("invalid profile tool configuration")
     }
+}
+
+fn configured_provider(
+    profile_name: &str,
+    provider: &ResolvedProvider,
+    api_key_override: Option<String>,
+) -> Result<Arc<dyn ModelProvider>> {
+    let api_key = match api_key_override {
+        Some(api_key) => Some(api_key),
+        None => provider
+            .api_key_env
+            .as_deref()
+            .map(|name| {
+                env::var(name).with_context(|| {
+                    format!(
+                        "profile `{}` requires provider API key environment variable `{name}`",
+                        profile_name
+                    )
+                })
+            })
+            .transpose()?,
+    };
+    let configured: Arc<dyn ModelProvider> = match provider.provider_kind {
+        ProviderKind::OpenAiCompatible => Arc::new(
+            OpenAiCompatibleProvider::new(&provider.api_base, &provider.model, api_key)
+                .with_context(|| {
+                    format!(
+                        "invalid model provider configuration for profile `{}`",
+                        profile_name
+                    )
+                })?,
+        ),
+        ProviderKind::AnthropicMessages => Arc::new(
+            AnthropicMessagesProvider::with_base_url(
+                &provider.api_base,
+                &provider.model,
+                api_key.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "profile `{}` requires an Anthropic API key",
+                        profile_name
+                    )
+                })?,
+            )
+            .with_context(|| {
+                format!(
+                    "invalid Anthropic provider configuration for profile `{}`",
+                    profile_name
+                )
+            })?,
+        ),
+        ProviderKind::ClaudeSubscription => Arc::new(ClaudeCodeProvider::new(
+            &provider.claude_program,
+            &provider.model,
+        )),
+    };
+    Ok(configured)
 }
 
 fn configured_tools(profile: &ResolvedProfile) -> Result<Vec<Arc<dyn Tool>>> {
@@ -357,7 +396,7 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
             .profiles()
             .into_iter()
             .find(|candidate| candidate.name == profile)
-            .map(|candidate| candidate.model)
+            .and_then(|candidate| candidate.providers.first().map(|provider| provider.model.clone()))
             .with_context(|| format!("profile `{profile}` is not configured"))?;
         return chat_ui::run(profiles, profile, &model).await;
     }

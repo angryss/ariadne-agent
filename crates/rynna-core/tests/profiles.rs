@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rynna_core::{
     Agent, AgentProfiles, Completion, CompletionRequest, Message, ModelProvider, Profile,
-    ProviderError,
+    ProfileProvider, ProviderError,
 };
 
 struct FixedProvider(&'static str);
@@ -19,8 +19,10 @@ fn profile(name: &str, reply: &'static str) -> (Profile, Agent) {
     (
         Profile {
             name: name.to_owned(),
-            provider: "ollama".to_owned(),
-            model: format!("{name}-model"),
+            providers: vec![ProfileProvider {
+                provider: "ollama".to_owned(),
+                model: format!("{name}-model"),
+            }],
             active_skills: Vec::new(),
             mcp_servers: Vec::new(),
             capabilities: Vec::new(),

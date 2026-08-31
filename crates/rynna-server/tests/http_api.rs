@@ -8,7 +8,7 @@ use axum::http::{Request, StatusCode};
 use rynna_config::{ProfileCatalog, ProviderSettingsStore};
 use rynna_core::{
     Agent, AgentProfiles, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
-    Profile, ProviderError,
+    Profile, ProfileProvider, ProviderError,
 };
 use rynna_server::{
     router, router_with_profiles, router_with_profiles_and_provider_runtime,
@@ -89,8 +89,10 @@ fn profile(name: &str, reply: &'static str) -> (Profile, Agent) {
     (
         Profile {
             name: name.to_owned(),
-            provider: format!("{name}-provider"),
-            model: format!("{name}-model"),
+            providers: vec![ProfileProvider {
+                provider: format!("{name}-provider"),
+                model: format!("{name}-model"),
+            }],
             active_skills: vec![format!("{name}-skill")],
             mcp_servers: vec![format!("{name}-mcp")],
             capabilities: Vec::new(),

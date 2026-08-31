@@ -550,6 +550,94 @@ pub trait ModelProvider: Send + Sync {
     }
 }
 
+pub struct FallbackProvider {
+    providers: Vec<Arc<dyn ModelProvider>>,
+}
+
+impl FallbackProvider {
+    pub fn new(providers: Vec<Arc<dyn ModelProvider>>) -> Result<Self, ProviderError> {
+        if providers.is_empty() {
+            return Err(ProviderError::new(
+                "at least one model provider must be configured",
+            ));
+        }
+        Ok(Self { providers })
+    }
+}
+
+#[async_trait]
+impl ModelProvider for FallbackProvider {
+    async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
+        let mut last_error = None;
+        for provider in &self.providers {
+            match provider.complete(request.clone()).await {
+                Ok(completion) => return Ok(completion),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("fallback providers cannot be empty"))
+    }
+
+    async fn complete_managed(&self, plan: ContextPlan) -> Result<Completion, ProviderError> {
+        let mut last_error = None;
+        for provider in &self.providers {
+            match provider.complete_managed(plan.clone()).await {
+                Ok(completion) => return Ok(completion),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("fallback providers cannot be empty"))
+    }
+
+    async fn complete_stream(
+        &self,
+        request: CompletionRequest,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+    ) -> Result<Completion, ProviderError> {
+        let mut last_error = None;
+        for provider in &self.providers {
+            let mut deltas = Vec::new();
+            match provider
+                .complete_stream(request.clone(), &mut |delta| deltas.push(delta.clone()))
+                .await
+            {
+                Ok(completion) => {
+                    for delta in &deltas {
+                        on_delta(delta);
+                    }
+                    return Ok(completion);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("fallback providers cannot be empty"))
+    }
+
+    async fn complete_stream_managed(
+        &self,
+        plan: ContextPlan,
+        on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
+    ) -> Result<Completion, ProviderError> {
+        let mut last_error = None;
+        for provider in &self.providers {
+            let mut deltas = Vec::new();
+            match provider
+                .complete_stream_managed(plan.clone(), &mut |delta| deltas.push(delta.clone()))
+                .await
+            {
+                Ok(completion) => {
+                    for delta in &deltas {
+                        on_delta(delta);
+                    }
+                    return Ok(completion);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("fallback providers cannot be empty"))
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AgentError {
     #[error("user input must not be blank")]
@@ -869,10 +957,15 @@ impl Agent {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Profile {
-    pub name: String,
+pub struct ProfileProvider {
     pub provider: String,
     pub model: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Profile {
+    pub name: String,
+    pub providers: Vec<ProfileProvider>,
     #[serde(default)]
     pub active_skills: Vec<String>,
     #[serde(default)]
@@ -953,7 +1046,12 @@ impl AgentProfiles {
     pub fn clone_agent_for_provider(&self, provider: &str) -> Option<Agent> {
         self.profiles
             .values()
-            .find(|(profile, _)| profile.provider == provider)
+            .find(|(profile, _)| {
+                profile
+                    .providers
+                    .first()
+                    .is_some_and(|candidate| candidate.provider == provider)
+            })
             .map(|(_, agent)| agent.clone())
             .or_else(|| {
                 self.profiles

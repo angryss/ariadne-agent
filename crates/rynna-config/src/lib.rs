@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs2::FileExt;
-use rynna_core::Profile;
+use rynna_core::{Profile, ProfileProvider};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -546,12 +546,19 @@ pub enum ProviderKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedProfile {
     pub profile: Profile,
+    pub providers: Vec<ResolvedProvider>,
+    pub system_prompt: String,
+    pub capabilities: Vec<ResolvedCapability>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedProvider {
+    pub name: String,
+    pub model: String,
     pub provider_kind: ProviderKind,
     pub api_base: String,
     pub api_key_env: Option<String>,
     pub claude_program: PathBuf,
-    pub system_prompt: String,
-    pub capabilities: Vec<ResolvedCapability>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -609,8 +616,12 @@ impl ProfileCatalog {
             profiles: BTreeMap::from([(
                 DEFAULT_PROFILE.to_owned(),
                 ProfileConfig {
-                    provider: DEFAULT_PROVIDER.to_owned(),
-                    model: DEFAULT_MODEL.to_owned(),
+                    providers: vec![ProfileProvider {
+                        provider: DEFAULT_PROVIDER.to_owned(),
+                        model: DEFAULT_MODEL.to_owned(),
+                    }],
+                    provider: None,
+                    model: None,
                     system_prompt: Some(DEFAULT_SYSTEM_PROMPT.to_owned()),
                     active_skills: Vec::new(),
                     mcp_servers: Vec::new(),
@@ -728,8 +739,9 @@ impl ProfileCatalog {
         file.profiles.insert(
             profile.name.clone(),
             ProfileConfig {
-                provider: profile.provider.clone(),
-                model: profile.model.clone(),
+                providers: profile.providers.clone(),
+                provider: None,
+                model: None,
                 system_prompt,
                 active_skills: profile.active_skills.clone(),
                 mcp_servers: profile.mcp_servers.clone(),
@@ -805,27 +817,36 @@ impl ProfileCatalog {
             .profiles
             .get(name)
             .ok_or_else(|| ConfigError::UnknownProfile(name.to_owned()))?;
-        let provider =
-            self.providers
-                .get(&profile.provider)
-                .ok_or_else(|| ConfigError::UnknownProvider {
-                    profile: name.to_owned(),
-                    provider: profile.provider.clone(),
+        let providers = profile
+            .providers
+            .iter()
+            .map(|entry| {
+                let provider = self.providers.get(&entry.provider).ok_or_else(|| {
+                    ConfigError::UnknownProvider {
+                        profile: name.to_owned(),
+                        provider: entry.provider.clone(),
+                    }
                 })?;
+                Ok(ResolvedProvider {
+                    name: entry.provider.clone(),
+                    model: entry.model.clone(),
+                    provider_kind: provider.kind,
+                    api_base: provider.api_base.clone(),
+                    api_key_env: provider.api_key_env.clone(),
+                    claude_program: provider.claude_program.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, ConfigError>>()?;
 
         Ok(ResolvedProfile {
             profile: Profile {
                 name: name.to_owned(),
-                provider: profile.provider.clone(),
-                model: profile.model.clone(),
+                providers: profile.providers.clone(),
                 active_skills: profile.active_skills.clone(),
                 mcp_servers: profile.mcp_servers.clone(),
                 capabilities: profile.capabilities.clone(),
             },
-            provider_kind: provider.kind,
-            api_base: provider.api_base.clone(),
-            api_key_env: provider.api_key_env.clone(),
-            claude_program: provider.claude_program.clone(),
+            providers,
             system_prompt: profile
                 .system_prompt
                 .clone()
@@ -845,9 +866,17 @@ impl ProfileCatalog {
         })
     }
 
-    fn from_file(file: ConfigFile) -> Result<Self, ConfigError> {
+    fn from_file(mut file: ConfigFile) -> Result<Self, ConfigError> {
         if file.version != CONFIG_VERSION {
             return Err(ConfigError::UnsupportedVersion(file.version));
+        }
+        for profile in file.profiles.values_mut() {
+            if profile.providers.is_empty()
+                && let (Some(provider), Some(model)) =
+                    (profile.provider.take(), profile.model.take())
+            {
+                profile.providers.push(ProfileProvider { provider, model });
+            }
         }
         if !file.profiles.contains_key(&file.default_profile) {
             return Err(ConfigError::UnknownDefault(file.default_profile));
@@ -915,15 +944,22 @@ impl ProfileCatalog {
 
         for (name, profile) in &file.profiles {
             ensure_not_blank("profile name", name)?;
-            ensure_not_blank("profile provider", &profile.provider)?;
-            ensure_not_blank("profile model", &profile.model)?;
-            if !file.providers.contains_key(&profile.provider) {
-                return Err(ConfigError::UnknownProvider {
-                    profile: name.clone(),
-                    provider: profile.provider.clone(),
-                });
+            if profile.providers.is_empty() {
+                return Err(ConfigError::BlankValue("profile providers"));
             }
-            if file.providers[&profile.provider].kind == ProviderKind::ClaudeSubscription
+            for provider in &profile.providers {
+                ensure_not_blank("profile provider", &provider.provider)?;
+                ensure_not_blank("profile model", &provider.model)?;
+                if !file.providers.contains_key(&provider.provider) {
+                    return Err(ConfigError::UnknownProvider {
+                        profile: name.clone(),
+                        provider: provider.provider.clone(),
+                    });
+                }
+            }
+            if profile.providers.iter().any(|provider| {
+                file.providers[&provider.provider].kind == ProviderKind::ClaudeSubscription
+            })
                 && (!profile.active_skills.is_empty()
                     || !profile.mcp_servers.is_empty()
                     || !profile.capabilities.is_empty())
@@ -1026,8 +1062,12 @@ fn default_claude_program() -> PathBuf {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileConfig {
-    provider: String,
-    model: String,
+    #[serde(default)]
+    providers: Vec<ProfileProvider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
