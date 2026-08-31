@@ -960,6 +960,14 @@ impl Agent {
 pub struct ProfileProvider {
     pub provider: String,
     pub model: String,
+    #[serde(default = "profile_provider_enabled")]
+    pub enabled: bool,
+    #[serde(default, rename = "default")]
+    pub is_default: bool,
+}
+
+const fn profile_provider_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

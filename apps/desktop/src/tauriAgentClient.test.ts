@@ -53,6 +53,18 @@ describe('TauriAgentClient', () => {
           capabilities: ['workspace'],
         },
       ],
+      configured_profiles: [
+        {
+          name: 'local',
+          providers: [
+            { provider: 'ollama', model: 'qwen3:8b', enabled: true, default: true },
+            { provider: 'ollama', model: 'qwen3:14b', enabled: false, default: false },
+          ],
+          active_skills: [],
+          mcp_servers: ['filesystem'],
+          capabilities: ['workspace'],
+        },
+      ],
     });
     const client = new TauriAgentClient(invoke);
 
@@ -62,11 +74,13 @@ describe('TauriAgentClient', () => {
     expect(profiles.default_profile).toBe('local');
     expect(profiles.provider_ids).toEqual(['ollama', 'unused-custom']);
     expect(profiles.profiles[0]!.mcp_servers).toEqual(['filesystem']);
+    expect(profiles.configured_profiles[0]!.providers[1]!.enabled).toBe(false);
   });
 
-  it('rejects profile metadata that omits catalog provider identifiers', async () => {
+  it('rejects profile metadata that omits configured profiles', async () => {
     const invoke = vi.fn().mockResolvedValue({
       default_profile: 'local',
+      provider_ids: ['ollama'],
       profiles: [
         {
           name: 'local',
@@ -153,18 +167,23 @@ describe('TauriAgentClient', () => {
       .mockResolvedValueOnce(undefined);
     const client = new TauriAgentClient(invoke);
 
-    await client.listProviders();
-    await client.createProvider({ kind: 'openai', authentication: 'chatgpt' });
-    await client.updateProvider({ kind: 'openai', authentication: 'api_key', api_key: 'sk-secret' });
-    await client.deleteProvider('openai');
+    await client.listProviders('work');
+    await client.createProvider({ kind: 'openai', authentication: 'chatgpt' }, 'work');
+    await client.updateProvider({ kind: 'openai', authentication: 'api_key', api_key: 'sk-secret' }, 'work');
+    await client.deleteProvider('openai', 'work');
 
-    expect(invoke).toHaveBeenNthCalledWith(1, 'list_providers', {});
+    expect(invoke).toHaveBeenNthCalledWith(1, 'list_providers', { profile: 'work' });
     expect(invoke).toHaveBeenNthCalledWith(2, 'create_provider', {
+      profile: 'work',
       provider: { kind: 'openai', authentication: 'chatgpt' },
     });
     expect(invoke).toHaveBeenNthCalledWith(3, 'update_provider', {
+      profile: 'work',
       provider: { kind: 'openai', authentication: 'api_key', api_key: 'sk-secret' },
     });
-    expect(invoke).toHaveBeenNthCalledWith(4, 'delete_provider', { kind: 'openai' });
+    expect(invoke).toHaveBeenNthCalledWith(4, 'delete_provider', {
+      kind: 'openai',
+      profile: 'work',
+    });
   });
 });

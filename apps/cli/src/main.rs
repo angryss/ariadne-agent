@@ -104,9 +104,6 @@ async fn main() -> Result<()> {
         None => ProviderSettingsStore::default_path()
             .context("failed to locate Rynna provider settings")?,
     };
-    if cli.configure_providers {
-        return provider_ui::run(provider_config);
-    }
     let catalog = match &cli.config {
         Some(path) => ProfileCatalog::load(path)
             .with_context(|| format!("failed to load configuration from {}", path.display()))?,
@@ -116,6 +113,12 @@ async fn main() -> Result<()> {
         .profile
         .clone()
         .unwrap_or_else(|| catalog.default_profile().to_owned());
+    if cli.configure_providers {
+        catalog
+            .resolve(&default_profile)
+            .with_context(|| format!("failed to resolve profile `{default_profile}`"))?;
+        return provider_ui::run(provider_config, &default_profile);
+    }
     let command = cli.command.unwrap_or(Command::Chat);
     if let Command::Profiles { output } = command {
         return list_profiles(&catalog, &default_profile, cli.model.as_deref(), output);

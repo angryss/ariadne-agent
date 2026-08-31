@@ -17,12 +17,16 @@ api_key_env = "ANTHROPIC_API_KEY"
 [providers.claude_subscription]
 kind = "claude-subscription"
 claude_program = "/usr/local/bin/claude"
-[profiles.api]
+[[profiles.api.providers]]
 provider = "anthropic_api"
 model = "claude-sonnet-4-5"
-[profiles.subscription]
+enabled = true
+default = true
+[[profiles.subscription.providers]]
 provider = "claude_subscription"
 model = "sonnet"
+enabled = true
+default = true
 "#,
     )
     .unwrap();
@@ -53,9 +57,12 @@ fn anthropic_provider_settings_never_serialize_credentials() {
     let path = directory.path().join("providers.toml");
     let mut store = ProviderSettingsStore::load(&path).unwrap();
     store
-        .add(ConfiguredProvider::Anthropic {
-            authentication: AnthropicAuthentication::Subscription,
-        })
+        .add(
+            "work",
+            ConfiguredProvider::Anthropic {
+                authentication: AnthropicAuthentication::Subscription,
+            },
+        )
         .unwrap();
     let encoded = std::fs::read_to_string(path).unwrap();
     assert!(encoded.contains("kind = \"anthropic\""));
@@ -73,9 +80,12 @@ default_profile = "subscription"
 [providers.claude_subscription]
 kind = "claude-subscription"
 
-[profiles.subscription]
+[[profiles.subscription.providers]]
 provider = "claude_subscription"
 model = "sonnet"
+enabled = true
+default = true
+[profiles.subscription]
 active_skills = ["rust"]
 "#,
     )
@@ -100,9 +110,11 @@ kind = "claude-subscription"
 api_base = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 
-[profiles.claude]
+[[profiles.claude.providers]]
 provider = "claude"
 model = "sonnet"
+enabled = true
+default = true
 "#,
     )
     .expect_err("subscription and direct API configuration must remain separate");
@@ -127,9 +139,12 @@ kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
 api_key_env = "OLLAMA_API_KEY"
 
-[profiles.work]
+[[profiles.work.providers]]
 provider = "ollama"
 model = "qwen3:14b"
+enabled = true
+default = true
+[profiles.work]
 system_prompt = "You are Rynna at work."
 active_skills = ["rust", "github"]
 mcp_servers = ["filesystem"]
@@ -208,8 +223,8 @@ api_key_env = "ANTHROPIC_API_KEY"
 
 [profiles.work]
 providers = [
-  { provider = "primary", model = "primary-model" },
-  { provider = "secondary", model = "secondary-model" },
+  { provider = "primary", model = "primary-model", enabled = true, default = true },
+  { provider = "secondary", model = "secondary-model", enabled = true, default = false },
 ]
 "#,
     )
@@ -229,6 +244,92 @@ providers = [
 }
 
 #[test]
+fn resolves_only_enabled_models_with_the_default_model_first() {
+    let catalog = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "work"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[providers.openai]
+kind = "openai-compatible"
+api_base = "https://api.openai.com/v1"
+
+[profiles.work]
+providers = [
+  { provider = "local", model = "qwen3:8b", enabled = false },
+  { provider = "local", model = "qwen3:14b", enabled = true },
+  { provider = "openai", model = "gpt-5", enabled = true, default = true },
+]
+"#,
+    )
+    .unwrap();
+
+    let profile = catalog.resolve("work").unwrap();
+
+    assert_eq!(profile.profile.providers.len(), 3);
+    assert!(!profile.profile.providers[0].enabled);
+    assert_eq!(profile.providers.len(), 2);
+    assert_eq!(profile.providers[0].model, "gpt-5");
+    assert_eq!(profile.providers[1].model, "qwen3:14b");
+}
+
+#[test]
+fn rejects_multiple_default_models_for_one_profile() {
+    let error = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "work"
+
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.work]
+providers = [
+  { provider = "local", model = "qwen3:8b", default = true },
+  { provider = "local", model = "qwen3:14b", default = true },
+]
+"#,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("one default model"));
+}
+
+#[test]
+fn rejects_duplicate_models_within_one_profile() {
+    let error = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "local"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://localhost:11434/v1"
+[[profiles.local.providers]]
+provider = "ollama"
+model = "qwen3:8b"
+enabled = true
+default = true
+[[profiles.local.providers]]
+provider = "ollama"
+model = "qwen3:8b"
+enabled = false
+"#,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate model `ollama/qwen3:8b`")
+    );
+}
+
+#[test]
 fn parses_a_bounded_command_capability() {
     let catalog = ProfileCatalog::from_toml(
         r#"
@@ -239,9 +340,12 @@ default_profile = "local"
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
 
-[profiles.local]
+[[profiles.local.providers]]
 provider = "local"
 model = "test-model"
+enabled = true
+default = true
+[profiles.local]
 capabilities = ["host-commands"]
 
 [capabilities.host-commands]
@@ -298,9 +402,11 @@ default_profile = "local"
 kind = "openai-compatible"
 api_base = "http://localhost:1234/v1"
 
-[profiles.local]
+[[profiles.local.providers]]
 provider = "local"
 model = "test-model"
+enabled = true
+default = true
 "#,
     )
     .unwrap();
@@ -328,9 +434,11 @@ version = 1
 default_profile = "broken"
 providers = {}
 
-[profiles.broken]
+[[profiles.broken.providers]]
 provider = "missing"
 model = "model"
+enabled = true
+default = true
 "#,
     )
     .unwrap_err();
@@ -349,9 +457,12 @@ default_profile = "broken"
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
 
-[profiles.broken]
+[[profiles.broken.providers]]
 provider = "local"
 model = "model"
+enabled = true
+default = true
+[profiles.broken]
 mcp_servers = ["missing"]
 "#,
     )
@@ -374,9 +485,12 @@ default_profile = "broken"
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
 
-[profiles.broken]
+[[profiles.broken.providers]]
 provider = "local"
 model = "model"
+enabled = true
+default = true
+[profiles.broken]
 capabilities = ["missing"]
 "#,
     )
@@ -400,14 +514,20 @@ default_profile = "one"
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
 
-[profiles.one]
+[[profiles.one.providers]]
 provider = "local"
 model = "model"
+enabled = true
+default = true
+[profiles.one]
 capabilities = ["workspace-one"]
 
-[profiles.two]
+[[profiles.two.providers]]
 provider = "local"
 model = "model"
+enabled = true
+default = true
+[profiles.two]
 capabilities = ["workspace-two"]
 
 [capabilities.workspace-one]
@@ -431,9 +551,12 @@ default_profile = "broken"
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
 
-[profiles.broken]
+[[profiles.broken.providers]]
 provider = "local"
 model = "model"
+enabled = true
+default = true
+[profiles.broken]
 capabilities = ["workspace-one", "workspace-two"]
 
 [capabilities.workspace-one]
@@ -464,9 +587,12 @@ default_profile = "broken"
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
 
-[profiles.broken]
+[[profiles.broken.providers]]
 provider = "local"
 model = "model"
+enabled = true
+default = true
+[profiles.broken]
 capabilities = ["commands-one", "commands-two"]
 
 [capabilities.commands-one]
@@ -519,9 +645,12 @@ default_profile = "broken"
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
 
-[profiles.broken]
+[[profiles.broken.providers]]
 provider = "local"
 model = "model"
+enabled = true
+default = true
+[profiles.broken]
 capabilities = ["commands"]
 
 [capabilities.commands]
@@ -547,9 +676,12 @@ default_profile = "broken"
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
 
-[profiles.broken]
+[[profiles.broken.providers]]
 provider = "local"
 model = "model"
+enabled = true
+default = true
+[profiles.broken]
 capabilities = ["commands"]
 
 [capabilities.commands]
@@ -576,9 +708,11 @@ default_profile = "unsafe"
 kind = "openai-compatible"
 api_base = "http://user:password@remote.example/v1"
 
-[profiles.unsafe]
+[[profiles.unsafe.providers]]
 provider = "remote"
 model = "model"
+enabled = true
+default = true
 "#,
     )
     .unwrap_err();
@@ -596,23 +730,29 @@ fn provider_settings_start_blank_and_support_add_update_and_delete() {
     let path = directory.path().join("providers.toml");
     let mut store = ProviderSettingsStore::load(&path).unwrap();
 
-    assert!(store.list().is_empty());
+    assert!(store.list("work").is_empty());
     assert!(!path.exists());
 
     store
-        .add(ConfiguredProvider::Ollama {
-            api_base: "http://127.0.0.1:11434/v1".to_owned(),
-        })
+        .add(
+            "work",
+            ConfiguredProvider::Ollama {
+                api_base: "http://127.0.0.1:11434/v1".to_owned(),
+            },
+        )
         .unwrap();
     store
-        .add(ConfiguredProvider::OpenAi {
-            authentication: OpenAiAuthentication::Chatgpt,
-            reuse_existing: true,
-        })
+        .add(
+            "work",
+            ConfiguredProvider::OpenAi {
+                authentication: OpenAiAuthentication::Chatgpt,
+                reuse_existing: true,
+            },
+        )
         .unwrap();
 
     assert_eq!(
-        ProviderSettingsStore::load(&path).unwrap().list(),
+        ProviderSettingsStore::load(&path).unwrap().list("work"),
         vec![
             ConfiguredProvider::Ollama {
                 api_base: "http://127.0.0.1:11434/v1".to_owned(),
@@ -625,22 +765,25 @@ fn provider_settings_start_blank_and_support_add_update_and_delete() {
     );
 
     store
-        .update(ConfiguredProvider::OpenAi {
-            authentication: OpenAiAuthentication::ApiKey,
-            reuse_existing: false,
-        })
+        .update(
+            "work",
+            ConfiguredProvider::OpenAi {
+                authentication: OpenAiAuthentication::ApiKey,
+                reuse_existing: false,
+            },
+        )
         .unwrap();
     assert_eq!(
-        store.get("openai"),
+        store.get("work", "openai"),
         Some(&ConfiguredProvider::OpenAi {
             authentication: OpenAiAuthentication::ApiKey,
             reuse_existing: false,
         })
     );
 
-    store.delete("ollama").unwrap();
+    store.delete("work", "ollama").unwrap();
     assert_eq!(
-        ProviderSettingsStore::load(path).unwrap().list(),
+        ProviderSettingsStore::load(path).unwrap().list("work"),
         vec![ConfiguredProvider::OpenAi {
             authentication: OpenAiAuthentication::ApiKey,
             reuse_existing: false,
@@ -649,31 +792,146 @@ fn provider_settings_start_blank_and_support_add_update_and_delete() {
 }
 
 #[test]
+fn provider_settings_are_isolated_by_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.toml");
+    let mut store = ProviderSettingsStore::load(&path).unwrap();
+
+    store
+        .add(
+            "alpha",
+            ConfiguredProvider::Ollama {
+                api_base: "http://127.0.0.1:11434/v1".to_owned(),
+            },
+        )
+        .unwrap();
+    store
+        .add(
+            "beta",
+            ConfiguredProvider::Ollama {
+                api_base: "http://127.0.0.1:22434/v1".to_owned(),
+            },
+        )
+        .unwrap();
+
+    let reloaded = ProviderSettingsStore::load(path).unwrap();
+    assert_eq!(
+        reloaded.list("alpha"),
+        vec![ConfiguredProvider::Ollama {
+            api_base: "http://127.0.0.1:11434/v1".to_owned(),
+        }]
+    );
+    assert_eq!(
+        reloaded.list("beta"),
+        vec![ConfiguredProvider::Ollama {
+            api_base: "http://127.0.0.1:22434/v1".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn provider_settings_follow_profile_rename_and_delete() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.toml");
+    let mut store = ProviderSettingsStore::load(&path).unwrap();
+    store
+        .add(
+            "work",
+            ConfiguredProvider::Ollama {
+                api_base: "http://localhost:11434/v1".to_owned(),
+            },
+        )
+        .unwrap();
+
+    store.rename_profile("work", "renamed-work").unwrap();
+    assert!(store.list("work").is_empty());
+    assert_eq!(store.list("renamed-work").len(), 1);
+
+    store.delete_profile("renamed-work").unwrap();
+    assert!(store.list("renamed-work").is_empty());
+}
+
+#[test]
+fn provider_settings_reject_the_obsolete_global_provider_format() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+providers = [{ kind = "ollama", api_base = "http://localhost:11434/v1" }]
+"#,
+    )
+    .unwrap();
+
+    let error = ProviderSettingsStore::load(path).unwrap_err();
+
+    assert!(error.to_string().contains("unknown field `providers`"));
+}
+
+#[test]
+fn profile_catalog_migrates_the_legacy_single_provider_format() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"version = 1
+default_profile = "alpha"
+
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+
+    let catalog = ProfileCatalog::load(&path).unwrap();
+    let resolved = catalog.resolve("alpha").unwrap();
+
+    assert_eq!(resolved.profile.providers.len(), 1);
+    assert!(resolved.profile.providers[0].enabled);
+    assert!(resolved.profile.providers[0].is_default);
+}
+
+#[test]
 fn provider_settings_reject_duplicates_unknown_updates_and_invalid_ollama_urls() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("providers.toml");
     let mut store = ProviderSettingsStore::load(path).unwrap();
     store
-        .add(ConfiguredProvider::Ollama {
-            api_base: "http://localhost:11434/v1".to_owned(),
-        })
+        .add(
+            "work",
+            ConfiguredProvider::Ollama {
+                api_base: "http://localhost:11434/v1".to_owned(),
+            },
+        )
         .unwrap();
 
     assert!(
         store
-            .add(ConfiguredProvider::Ollama {
-                api_base: "http://localhost:11434/v1".to_owned(),
-            })
+            .add(
+                "work",
+                ConfiguredProvider::Ollama {
+                    api_base: "http://localhost:11434/v1".to_owned(),
+                }
+            )
             .unwrap_err()
             .to_string()
             .contains("already configured")
     );
     assert!(
         store
-            .update(ConfiguredProvider::OpenAi {
-                authentication: OpenAiAuthentication::Chatgpt,
-                reuse_existing: false,
-            })
+            .update(
+                "work",
+                ConfiguredProvider::OpenAi {
+                    authentication: OpenAiAuthentication::Chatgpt,
+                    reuse_existing: false,
+                }
+            )
             .unwrap_err()
             .to_string()
             .contains("is not configured")
@@ -681,9 +939,12 @@ fn provider_settings_reject_duplicates_unknown_updates_and_invalid_ollama_urls()
     assert!(
         ProviderSettingsStore::load(directory.path().join("invalid.toml"))
             .unwrap()
-            .add(ConfiguredProvider::Ollama {
-                api_base: "not a URL".to_owned(),
-            })
+            .add(
+                "work",
+                ConfiguredProvider::Ollama {
+                    api_base: "not a URL".to_owned(),
+                }
+            )
             .unwrap_err()
             .to_string()
             .contains("URL is invalid")
@@ -699,20 +960,26 @@ fn provider_settings_do_not_change_in_memory_when_persistence_fails() {
 
     assert!(
         store
-            .add(ConfiguredProvider::Ollama {
-                api_base: "http://localhost:11434/v1".to_owned(),
-            })
+            .add(
+                "work",
+                ConfiguredProvider::Ollama {
+                    api_base: "http://localhost:11434/v1".to_owned(),
+                }
+            )
             .is_err()
     );
-    assert!(store.list().is_empty());
+    assert!(store.list("work").is_empty());
 
     std::fs::remove_dir(&settings_path).unwrap();
     store
-        .add(ConfiguredProvider::Ollama {
-            api_base: "http://localhost:11434/v1".to_owned(),
-        })
+        .add(
+            "work",
+            ConfiguredProvider::Ollama {
+                api_base: "http://localhost:11434/v1".to_owned(),
+            },
+        )
         .expect("a failed replacement must not poison future writes");
-    assert_eq!(store.list().len(), 1);
+    assert_eq!(store.list("work").len(), 1);
 }
 
 #[cfg(unix)]
@@ -729,12 +996,15 @@ fn provider_settings_ignore_stale_temporary_file_symlinks() {
     let mut store = ProviderSettingsStore::load(&settings_path).unwrap();
 
     store
-        .add(ConfiguredProvider::Ollama {
-            api_base: "http://localhost:11434/v1".to_owned(),
-        })
+        .add(
+            "work",
+            ConfiguredProvider::Ollama {
+                api_base: "http://localhost:11434/v1".to_owned(),
+            },
+        )
         .unwrap();
     assert_eq!(std::fs::read_to_string(victim_path).unwrap(), "keep me");
-    assert_eq!(store.list().len(), 1);
+    assert_eq!(store.list("work").len(), 1);
 }
 
 #[cfg(unix)]
@@ -769,19 +1039,26 @@ fn provider_settings_merge_mutations_from_separate_store_instances() {
     let mut second = ProviderSettingsStore::load(&settings_path).unwrap();
 
     first
-        .add(ConfiguredProvider::Ollama {
-            api_base: "http://localhost:11434/v1".to_owned(),
-        })
+        .add(
+            "alpha",
+            ConfiguredProvider::Ollama {
+                api_base: "http://localhost:11434/v1".to_owned(),
+            },
+        )
         .unwrap();
     second
-        .add(ConfiguredProvider::OpenAi {
-            authentication: OpenAiAuthentication::Chatgpt,
-            reuse_existing: false,
-        })
+        .add(
+            "beta",
+            ConfiguredProvider::OpenAi {
+                authentication: OpenAiAuthentication::Chatgpt,
+                reuse_existing: false,
+            },
+        )
         .unwrap();
 
     let reloaded = ProviderSettingsStore::load(settings_path).unwrap();
-    assert_eq!(reloaded.list().len(), 2);
+    assert_eq!(reloaded.list("alpha").len(), 1);
+    assert_eq!(reloaded.list("beta").len(), 1);
 }
 
 #[test]
@@ -796,15 +1073,18 @@ fn provider_settings_support_a_bare_relative_filename() {
     let mut store = ProviderSettingsStore::load(&file_name).unwrap();
 
     store
-        .add(ConfiguredProvider::Ollama {
-            api_base: "http://localhost:11434/v1".to_owned(),
-        })
+        .add(
+            "work",
+            ConfiguredProvider::Ollama {
+                api_base: "http://localhost:11434/v1".to_owned(),
+            },
+        )
         .unwrap();
 
     assert_eq!(
         ProviderSettingsStore::load(&file_name)
             .unwrap()
-            .list()
+            .list("work")
             .len(),
         1
     );
@@ -818,6 +1098,8 @@ fn editable_profile(name: &str, model: &str) -> Profile {
         providers: vec![ProfileProvider {
             provider: "ollama".to_owned(),
             model: model.to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
@@ -837,9 +1119,11 @@ default_profile = "alpha"
 [providers.ollama]
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
-[profiles.alpha]
+[[profiles.alpha.providers]]
 provider = "ollama"
 model = "qwen3:8b"
+enabled = true
+default = true
 "#,
     )
     .unwrap();
@@ -879,9 +1163,11 @@ default_profile = "alpha"
 [providers.ollama]
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
-[profiles.alpha]
+[[profiles.alpha.providers]]
 provider = "ollama"
 model = "qwen3:8b"
+enabled = true
+default = true
 "#,
     )
     .unwrap();
@@ -916,9 +1202,11 @@ default_profile = "alpha"
 [providers.ollama]
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
-[profiles.alpha]
+[[profiles.alpha.providers]]
 provider = "ollama"
 model = "qwen3:8b"
+enabled = true
+default = true
 "#,
     )
     .unwrap();
@@ -954,9 +1242,11 @@ api_base = "http://127.0.0.1:11434/v1"
 [providers.unused_custom]
 kind = "openai-compatible"
 api_base = "https://custom.example/v1"
-[profiles.alpha]
+[[profiles.alpha.providers]]
 provider = "ollama"
 model = "qwen3:8b"
+enabled = true
+default = true
 "#,
     )
     .unwrap();
@@ -976,12 +1266,16 @@ default_profile = "alpha"
 [providers.ollama]
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
-[profiles.alpha]
+[[profiles.alpha.providers]]
 provider = "ollama"
 model = "qwen3:8b"
-[profiles.openai-account]
+enabled = true
+default = true
+[[profiles.openai-account.providers]]
 provider = "ollama"
 model = "legacy"
+enabled = true
+default = true
 "#,
     )
     .unwrap();
@@ -1034,9 +1328,11 @@ default_profile = "alpha"
 [providers.ollama]
 kind = "openai-compatible"
 api_base = "http://127.0.0.1:11434/v1"
-[profiles.alpha]
+[[profiles.alpha.providers]]
 provider = "ollama"
 model = "qwen3:8b"
+enabled = true
+default = true
 "#,
     )
     .unwrap();

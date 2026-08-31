@@ -89,6 +89,18 @@ describe('HttpAgentClient', () => {
               capabilities: ['workspace'],
             },
           ],
+          configured_profiles: [
+            {
+              name: 'local',
+              providers: [
+                { provider: 'ollama', model: 'qwen3:8b', enabled: true, default: true },
+                { provider: 'ollama', model: 'qwen3:14b', enabled: false, default: false },
+              ],
+              active_skills: ['rust'],
+              mcp_servers: [],
+              capabilities: ['workspace'],
+            },
+          ],
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
@@ -104,12 +116,14 @@ describe('HttpAgentClient', () => {
     expect(profiles.default_profile).toBe('local');
     expect(profiles.provider_ids).toEqual(['ollama', 'unused-custom']);
     expect(profiles.profiles[0]!.active_skills).toEqual(['rust']);
+    expect(profiles.configured_profiles[0]!.providers[1]!.enabled).toBe(false);
   });
 
-  it('rejects profile metadata that omits catalog provider identifiers', async () => {
+  it('rejects profile metadata that omits configured profiles', async () => {
     const fetcher = vi.fn().mockResolvedValue(
       jsonResponse({
         default_profile: 'local',
+        provider_ids: ['ollama'],
         profiles: [
           {
             name: 'local',
@@ -165,15 +179,15 @@ describe('HttpAgentClient', () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const client = new HttpAgentClient('/v1/respond', fetcher);
 
-    await expect(client.listProviders()).resolves.toEqual([]);
-    await client.createProvider({ kind: 'ollama', api_base: 'http://localhost:11434/v1' });
-    await client.updateProvider({ kind: 'ollama', api_base: 'http://localhost:22434/v1' });
-    await client.deleteProvider('ollama');
+    await expect(client.listProviders('work')).resolves.toEqual([]);
+    await client.createProvider({ kind: 'ollama', api_base: 'http://localhost:11434/v1' }, 'work');
+    await client.updateProvider({ kind: 'ollama', api_base: 'http://localhost:22434/v1' }, 'work');
+    await client.deleteProvider('ollama', 'work');
 
-    expect(fetcher).toHaveBeenNthCalledWith(1, '/v1/providers', expect.objectContaining({ method: 'GET' }));
-    expect(fetcher).toHaveBeenNthCalledWith(2, '/v1/providers', expect.objectContaining({ method: 'POST' }));
-    expect(fetcher).toHaveBeenNthCalledWith(3, '/v1/providers/ollama', expect.objectContaining({ method: 'PUT' }));
-    expect(fetcher).toHaveBeenNthCalledWith(4, '/v1/providers/ollama', expect.objectContaining({ method: 'DELETE' }));
+    expect(fetcher).toHaveBeenNthCalledWith(1, '/v1/profiles/work/providers', expect.objectContaining({ method: 'GET' }));
+    expect(fetcher).toHaveBeenNthCalledWith(2, '/v1/profiles/work/providers', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenNthCalledWith(3, '/v1/profiles/work/providers/ollama', expect.objectContaining({ method: 'PUT' }));
+    expect(fetcher).toHaveBeenNthCalledWith(4, '/v1/profiles/work/providers/ollama', expect.objectContaining({ method: 'DELETE' }));
   });
 
   it('discovers an existing ChatGPT subscription through the providers API', async () => {

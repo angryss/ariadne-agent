@@ -83,28 +83,32 @@ export class TauriAgentClient implements AgentClient {
     return account;
   }
 
-  async listProviders(): Promise<ConfiguredProvider[]> {
-    const providers = await this.invoke('list_providers', {});
+  async listProviders(profile: string): Promise<ConfiguredProvider[]> {
+    const providers = await this.invoke('list_providers', { profile });
     if (!Array.isArray(providers) || !providers.every(isConfiguredProvider)) {
       throw new Error('Rynna desktop returned invalid provider data');
     }
     return providers;
   }
 
-  async createProvider(provider: ProviderInput): Promise<ConfiguredProvider> {
-    return this.saveProvider('create_provider', provider);
+  async createProvider(provider: ProviderInput, profile: string): Promise<ConfiguredProvider> {
+    return this.saveProvider('create_provider', provider, profile);
   }
 
-  async updateProvider(provider: ProviderInput): Promise<ConfiguredProvider> {
-    return this.saveProvider('update_provider', provider);
+  async updateProvider(provider: ProviderInput, profile: string): Promise<ConfiguredProvider> {
+    return this.saveProvider('update_provider', provider, profile);
   }
 
-  async deleteProvider(kind: ConfiguredProvider['kind']): Promise<void> {
-    await this.invoke('delete_provider', { kind });
+  async deleteProvider(kind: ConfiguredProvider['kind'], profile: string): Promise<void> {
+    await this.invoke('delete_provider', { kind, profile });
   }
 
-  private async saveProvider(command: string, provider: ProviderInput): Promise<ConfiguredProvider> {
-    const saved = await this.invoke(command, { provider });
+  private async saveProvider(
+    command: string,
+    provider: ProviderInput,
+    profile: string,
+  ): Promise<ConfiguredProvider> {
+    const saved = await this.invoke(command, { provider, profile });
     if (!isConfiguredProvider(saved)) {
       throw new Error('Rynna desktop returned invalid provider data');
     }
@@ -179,7 +183,10 @@ function isProfileCatalog(value: unknown): value is ProfileCatalog {
       value.provider_ids.every((provider) => typeof provider === 'string') &&
       'profiles' in value &&
       Array.isArray(value.profiles) &&
-      value.profiles.every(isProfile),
+      value.profiles.every(isProfile) &&
+      'configured_profiles' in value &&
+      Array.isArray(value.configured_profiles) &&
+      value.configured_profiles.every(isProfile),
   );
 }
 

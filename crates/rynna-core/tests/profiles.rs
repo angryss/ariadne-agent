@@ -22,6 +22,8 @@ fn profile(name: &str, reply: &'static str) -> (Profile, Agent) {
             providers: vec![ProfileProvider {
                 provider: "ollama".to_owned(),
                 model: format!("{name}-model"),
+                enabled: true,
+                is_default: true,
             }],
             active_skills: Vec::new(),
             mcp_servers: Vec::new(),

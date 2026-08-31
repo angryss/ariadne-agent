@@ -135,23 +135,23 @@ impl ProviderUi {
         self.providers.iter().any(|provider| provider.id() == id)
     }
 
-    fn refresh(&mut self, store: &ProviderSettingsStore) {
-        self.providers = store.list();
+    fn refresh(&mut self, store: &ProviderSettingsStore, profile: &str) {
+        self.providers = store.list(profile);
         self.selected = self.selected.min(self.providers.len().saturating_sub(1));
     }
 }
 
-pub fn run(path: PathBuf) -> Result<()> {
+pub fn run(path: PathBuf, profile: &str) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("provider configuration requires an interactive terminal");
     }
     let mut store =
         ProviderSettingsStore::load(path).context("failed to load Rynna provider settings")?;
-    let mut ui = ProviderUi::new(store.list());
+    let mut ui = ProviderUi::new(store.list(profile));
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
-    let result = run_loop(&mut ui, &mut store, &mut stdout);
+    let result = run_loop(&mut ui, &mut store, profile, &mut stdout);
     let _ = disable_raw_mode();
     let _ = execute!(stdout, LeaveAlternateScreen);
     result
@@ -160,6 +160,7 @@ pub fn run(path: PathBuf) -> Result<()> {
 fn run_loop(
     ui: &mut ProviderUi,
     store: &mut ProviderSettingsStore,
+    profile: &str,
     stdout: &mut io::Stdout,
 ) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
@@ -169,7 +170,7 @@ fn run_loop(
             store
                 .refresh()
                 .context("failed to refresh provider settings")?;
-            ui.refresh(store);
+            ui.refresh(store, profile);
         }
         terminal.draw(|frame| draw(frame, ui))?;
         let Event::Key(key) = event::read().context("failed to read terminal input")? else {
@@ -211,7 +212,9 @@ fn run_loop(
                     ui.input.pop();
                 }
                 KeyCode::Char(character) => ui.input.push(character),
-                KeyCode::Enter => save_provider_with_terminal_suspended(&mut terminal, ui, store)?,
+                KeyCode::Enter => {
+                    save_provider_with_terminal_suspended(&mut terminal, ui, store, profile)?
+                }
                 _ => {}
             }
             continue;
@@ -222,10 +225,10 @@ fn run_loop(
             KeyCode::Char('e') | KeyCode::Enter => ui.begin_edit(),
             KeyCode::Char('d') => {
                 if let Some(provider) = ui.providers.get(ui.selected) {
-                    if let Err(error) = store.delete(provider.id()) {
+                    if let Err(error) = store.delete(profile, provider.id()) {
                         ui.error = Some(error.to_string());
                     } else {
-                        ui.refresh(store);
+                        ui.refresh(store, profile);
                     }
                 }
             }
@@ -243,12 +246,13 @@ fn save_provider_with_terminal_suspended(
     terminal: &mut Terminal<CrosstermBackend<&mut io::Stdout>>,
     ui: &mut ProviderUi,
     store: &mut ProviderSettingsStore,
+    profile: &str,
 ) -> Result<()> {
     disable_raw_mode().context("failed to suspend terminal raw mode")?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .context("failed to suspend alternate screen")?;
 
-    save_provider(ui, store);
+    save_provider(ui, store, profile);
 
     execute!(terminal.backend_mut(), EnterAlternateScreen)
         .context("failed to restore alternate screen")?;
@@ -259,7 +263,7 @@ fn save_provider_with_terminal_suspended(
     Ok(())
 }
 
-fn save_provider(ui: &mut ProviderUi, store: &mut ProviderSettingsStore) {
+fn save_provider(ui: &mut ProviderUi, store: &mut ProviderSettingsStore, profile: &str) {
     let provider = match ui.choice {
         ProviderChoice::Ollama => ConfiguredProvider::Ollama {
             api_base: ui.input.trim().to_owned(),
@@ -290,13 +294,13 @@ fn save_provider(ui: &mut ProviderUi, store: &mut ProviderSettingsStore) {
         }
     };
     let result = if ui.existing {
-        store.update(provider)
+        store.update(profile, provider)
     } else {
-        store.add(provider)
+        store.add(profile, provider)
     };
     match result {
         Ok(()) => {
-            ui.refresh(store);
+            ui.refresh(store, profile);
             ui.editing = false;
             ui.input.clear();
             ui.error = None;
@@ -551,7 +555,7 @@ mod tests {
 
     use super::{ChildProcess, ProviderUi, draw, wait_for_child, wait_for_child_process};
     use ratatui::{Terminal, backend::TestBackend};
-    use rynna_config::ConfiguredProvider;
+    use rynna_config::{ConfiguredProvider, ProviderSettingsStore};
 
     #[cfg(unix)]
     #[test]
@@ -619,6 +623,26 @@ mod tests {
         });
         ui.begin_add();
         assert_eq!(ui.choice.id(), "openai");
+    }
+
+    #[test]
+    fn provider_ui_refreshes_the_selected_profile_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store =
+            ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+        store
+            .add(
+                "work",
+                ConfiguredProvider::Ollama {
+                    api_base: "http://localhost:11434/v1".to_owned(),
+                },
+            )
+            .unwrap();
+        let mut ui = ProviderUi::new(Vec::new());
+
+        ui.refresh(&store, "work");
+
+        assert_eq!(ui.providers.len(), 1);
     }
 
     #[test]

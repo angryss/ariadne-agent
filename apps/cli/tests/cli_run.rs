@@ -227,13 +227,18 @@ api_base = "http://127.0.0.1:11434/v1"
 kind = "openai-compatible"
 api_base = "{server}/v1"
 
-[profiles.local]
+[[profiles.local.providers]]
 provider = "local"
 model = "local-model"
+enabled = true
+default = true
 
-[profiles.work]
+[[profiles.work.providers]]
 provider = "work"
 model = "work-model"
+enabled = true
+default = true
+[profiles.work]
 system_prompt = "Work profile policy"
 active_skills = ["rust"]
 mcp_servers = ["filesystem"]
@@ -295,13 +300,17 @@ kind = "openai-compatible"
 api_base = "https://example.com/v1"
 api_key_env = "RYNNA_TEST_MISSING_REMOTE_KEY"
 
-[profiles.local]
+[[profiles.local.providers]]
 provider = "local"
 model = "local-model"
+enabled = true
+default = true
 
-[profiles.remote]
+[[profiles.remote.providers]]
 provider = "remote"
 model = "remote-model"
+enabled = true
+default = true
 "#,
             server = server.uri()
         ),
@@ -376,9 +385,12 @@ default_profile = "local"
 kind = "openai-compatible"
 api_base = "{server}/v1"
 
-[profiles.local]
+[[profiles.local.providers]]
 provider = "local"
 model = "test-model"
+enabled = true
+default = true
+[profiles.local]
 capabilities = ["workspace"]
 
 [capabilities.workspace]
@@ -466,9 +478,12 @@ default_profile = "local"
 kind = "openai-compatible"
 api_base = "{server}/v1"
 
-[profiles.local]
+[[profiles.local.providers]]
 provider = "local"
 model = "test-model"
+enabled = true
+default = true
+[profiles.local]
 capabilities = ["host-commands"]
 
 [capabilities.host-commands]

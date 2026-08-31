@@ -80,14 +80,14 @@ impl ConfiguredProvider {
 #[serde(deny_unknown_fields)]
 struct ProviderSettingsFile {
     version: u32,
-    #[serde(default)]
-    providers: Vec<ConfiguredProvider>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    profiles: BTreeMap<String, Vec<ConfiguredProvider>>,
 }
 
 #[derive(Debug)]
 pub struct ProviderSettingsStore {
     path: PathBuf,
-    providers: Vec<ConfiguredProvider>,
+    providers: BTreeMap<String, Vec<ConfiguredProvider>>,
 }
 
 impl ProviderSettingsStore {
@@ -113,35 +113,53 @@ impl ProviderSettingsStore {
         Ok(())
     }
 
-    pub fn list(&self) -> Vec<ConfiguredProvider> {
-        self.providers.clone()
+    pub fn list(&self, profile: &str) -> Vec<ConfiguredProvider> {
+        self.providers.get(profile).cloned().unwrap_or_default()
     }
 
-    pub fn get(&self, id: &str) -> Option<&ConfiguredProvider> {
-        self.providers.iter().find(|provider| provider.id() == id)
+    pub fn get(&self, profile: &str, id: &str) -> Option<&ConfiguredProvider> {
+        self.providers
+            .get(profile)
+            .and_then(|providers| providers.iter().find(|provider| provider.id() == id))
     }
 
-    pub fn add(&mut self, provider: ConfiguredProvider) -> Result<(), ProviderSettingsError> {
+    pub fn add(
+        &mut self,
+        profile: &str,
+        provider: ConfiguredProvider,
+    ) -> Result<(), ProviderSettingsError> {
+        ensure_not_blank_provider_profile(profile)?;
         provider.validate()?;
         let _lock = self.lock_exclusive()?;
         let mut providers = read_provider_settings(&self.path)?;
+        let profile_providers = providers.entry(profile.to_owned()).or_default();
         let id = provider.id();
-        if providers.iter().any(|candidate| candidate.id() == id) {
+        if profile_providers
+            .iter()
+            .any(|candidate| candidate.id() == id)
+        {
             return Err(ProviderSettingsError::Duplicate(id.to_owned()));
         }
-        providers.push(provider);
+        profile_providers.push(provider);
         self.save(&providers)?;
         self.providers = providers;
         Ok(())
     }
 
-    pub fn update(&mut self, provider: ConfiguredProvider) -> Result<(), ProviderSettingsError> {
+    pub fn update(
+        &mut self,
+        profile: &str,
+        provider: ConfiguredProvider,
+    ) -> Result<(), ProviderSettingsError> {
+        ensure_not_blank_provider_profile(profile)?;
         provider.validate()?;
         let _lock = self.lock_exclusive()?;
         let mut providers = read_provider_settings(&self.path)?;
         let id = provider.id();
         let existing = providers
-            .iter_mut()
+            .get_mut(profile)
+            .into_iter()
+            .flatten()
             .find(|candidate| candidate.id() == id)
             .ok_or_else(|| ProviderSettingsError::NotConfigured(id.to_owned()))?;
         *existing = provider;
@@ -150,15 +168,61 @@ impl ProviderSettingsStore {
         Ok(())
     }
 
-    pub fn delete(&mut self, id: &str) -> Result<(), ProviderSettingsError> {
+    pub fn delete(&mut self, profile: &str, id: &str) -> Result<(), ProviderSettingsError> {
+        ensure_not_blank_provider_profile(profile)?;
         let _lock = self.lock_exclusive()?;
         let mut providers = read_provider_settings(&self.path)?;
-        let index = providers
+        let profile_providers = providers
+            .get_mut(profile)
+            .ok_or_else(|| ProviderSettingsError::NotConfigured(id.to_owned()))?;
+        let index = profile_providers
             .iter()
             .position(|provider| provider.id() == id)
             .ok_or_else(|| ProviderSettingsError::NotConfigured(id.to_owned()))?;
-        providers.remove(index);
+        profile_providers.remove(index);
+        if profile_providers.is_empty() {
+            providers.remove(profile);
+        }
         self.save(&providers)?;
+        self.providers = providers;
+        Ok(())
+    }
+
+    pub fn rename_profile(
+        &mut self,
+        original_name: &str,
+        new_name: &str,
+    ) -> Result<(), ProviderSettingsError> {
+        ensure_not_blank_provider_profile(original_name)?;
+        ensure_not_blank_provider_profile(new_name)?;
+        let _lock = self.lock_exclusive()?;
+        let mut providers = read_provider_settings(&self.path)?;
+        if original_name == new_name {
+            self.providers = providers;
+            return Ok(());
+        }
+        let Some(profile_providers) = providers.remove(original_name) else {
+            self.providers = providers;
+            return Ok(());
+        };
+        if providers.contains_key(new_name) {
+            return Err(ProviderSettingsError::ProfileAlreadyConfigured(
+                new_name.to_owned(),
+            ));
+        }
+        providers.insert(new_name.to_owned(), profile_providers);
+        self.save(&providers)?;
+        self.providers = providers;
+        Ok(())
+    }
+
+    pub fn delete_profile(&mut self, profile: &str) -> Result<(), ProviderSettingsError> {
+        ensure_not_blank_provider_profile(profile)?;
+        let _lock = self.lock_exclusive()?;
+        let mut providers = read_provider_settings(&self.path)?;
+        if providers.remove(profile).is_some() {
+            self.save(&providers)?;
+        }
         self.providers = providers;
         Ok(())
     }
@@ -200,7 +264,10 @@ impl ProviderSettingsStore {
         Ok(file)
     }
 
-    fn save(&self, providers: &[ConfiguredProvider]) -> Result<(), ProviderSettingsError> {
+    fn save(
+        &self,
+        providers: &BTreeMap<String, Vec<ConfiguredProvider>>,
+    ) -> Result<(), ProviderSettingsError> {
         let parent = self
             .path
             .parent()
@@ -217,7 +284,7 @@ impl ProviderSettingsStore {
         })?;
         let encoded = toml::to_string_pretty(&ProviderSettingsFile {
             version: PROVIDER_SETTINGS_VERSION,
-            providers: providers.to_vec(),
+            profiles: providers.clone(),
         })?;
         let temporary =
             write_private_temporary_file(&self.path, encoded.as_bytes()).map_err(|source| {
@@ -234,9 +301,11 @@ impl ProviderSettingsStore {
     }
 }
 
-fn read_provider_settings(path: &Path) -> Result<Vec<ConfiguredProvider>, ProviderSettingsError> {
+fn read_provider_settings(
+    path: &Path,
+) -> Result<BTreeMap<String, Vec<ConfiguredProvider>>, ProviderSettingsError> {
     let providers = match path.try_exists() {
-        Ok(false) => Vec::new(),
+        Ok(false) => BTreeMap::new(),
         Ok(true) => {
             let source =
                 fs::read_to_string(path).map_err(|source| ProviderSettingsError::Read {
@@ -247,7 +316,7 @@ fn read_provider_settings(path: &Path) -> Result<Vec<ConfiguredProvider>, Provid
             if file.version != PROVIDER_SETTINGS_VERSION {
                 return Err(ProviderSettingsError::UnsupportedVersion(file.version));
             }
-            file.providers
+            file.profiles
         }
         Err(source) => {
             return Err(ProviderSettingsError::Inspect {
@@ -256,14 +325,24 @@ fn read_provider_settings(path: &Path) -> Result<Vec<ConfiguredProvider>, Provid
             });
         }
     };
-    let mut seen = BTreeSet::new();
-    for provider in &providers {
-        provider.validate()?;
-        if !seen.insert(provider.id()) {
-            return Err(ProviderSettingsError::Duplicate(provider.id().to_owned()));
+    for (profile, profile_providers) in &providers {
+        ensure_not_blank_provider_profile(profile)?;
+        let mut seen = BTreeSet::new();
+        for provider in profile_providers {
+            provider.validate()?;
+            if !seen.insert(provider.id()) {
+                return Err(ProviderSettingsError::Duplicate(provider.id().to_owned()));
+            }
         }
     }
     Ok(providers)
+}
+
+fn ensure_not_blank_provider_profile(profile: &str) -> Result<(), ProviderSettingsError> {
+    if profile.trim().is_empty() {
+        return Err(ProviderSettingsError::BlankProfile);
+    }
+    Ok(())
 }
 
 struct TemporaryFileCleanup(PathBuf);
@@ -511,6 +590,10 @@ pub enum ProviderSettingsError {
     Duplicate(String),
     #[error("provider `{0}` is not configured")]
     NotConfigured(String),
+    #[error("provider settings profile must not be blank")]
+    BlankProfile,
+    #[error("provider settings for profile `{0}` are already configured")]
+    ProfileAlreadyConfigured(String),
     #[error("Ollama API base URL is invalid: {0}")]
     InvalidOllamaUrl(url::ParseError),
     #[error("Ollama API base URL must use HTTP or HTTPS and contain no credentials")]
@@ -620,6 +703,8 @@ impl ProfileCatalog {
                     providers: vec![ProfileProvider {
                         provider: DEFAULT_PROVIDER.to_owned(),
                         model: DEFAULT_MODEL.to_owned(),
+                        enabled: true,
+                        is_default: true,
                     }],
                     provider: None,
                     model: None,
@@ -738,8 +823,16 @@ impl ProfileCatalog {
         &mut self,
         mut file: ConfigFile,
         original_name: Option<&str>,
-        profile: Profile,
+        mut profile: Profile,
     ) -> Result<Profile, ConfigError> {
+        if !profile.providers.iter().any(|provider| provider.is_default)
+            && let Some(provider) = profile
+                .providers
+                .iter_mut()
+                .find(|provider| provider.enabled)
+        {
+            provider.is_default = true;
+        }
         let system_prompt = original_name
             .and_then(|name| file.profiles.get(name))
             .and_then(|existing| existing.system_prompt.clone());
@@ -879,9 +972,14 @@ impl ProfileCatalog {
             .profiles
             .get(name)
             .ok_or_else(|| ConfigError::UnknownProfile(name.to_owned()))?;
-        let providers = profile
+        let mut enabled_providers = profile
             .providers
             .iter()
+            .filter(|entry| entry.enabled)
+            .collect::<Vec<_>>();
+        enabled_providers.sort_by_key(|entry| !entry.is_default);
+        let providers = enabled_providers
+            .into_iter()
             .map(|entry| {
                 let provider = self.providers.get(&entry.provider).ok_or_else(|| {
                     ConfigError::UnknownProvider {
@@ -937,7 +1035,20 @@ impl ProfileCatalog {
                 && let (Some(provider), Some(model)) =
                     (profile.provider.take(), profile.model.take())
             {
-                profile.providers.push(ProfileProvider { provider, model });
+                profile.providers.push(ProfileProvider {
+                    provider,
+                    model,
+                    enabled: true,
+                    is_default: true,
+                });
+            }
+            if !profile.providers.iter().any(|provider| provider.is_default)
+                && let Some(provider) = profile
+                    .providers
+                    .iter_mut()
+                    .find(|provider| provider.enabled)
+            {
+                provider.is_default = true;
             }
         }
         if !file.profiles.contains_key(&file.default_profile) {
@@ -1009,9 +1120,37 @@ impl ProfileCatalog {
             if profile.providers.is_empty() {
                 return Err(ConfigError::BlankValue("profile providers"));
             }
+            if !profile.providers.iter().any(|provider| provider.enabled) {
+                return Err(ConfigError::NoEnabledModels {
+                    profile: name.clone(),
+                });
+            }
+            if profile
+                .providers
+                .iter()
+                .filter(|provider| provider.is_default)
+                .count()
+                != 1
+                || profile
+                    .providers
+                    .iter()
+                    .any(|provider| provider.is_default && !provider.enabled)
+            {
+                return Err(ConfigError::InvalidDefaultModels {
+                    profile: name.clone(),
+                });
+            }
+            let mut seen_models = BTreeSet::new();
             for provider in &profile.providers {
                 ensure_not_blank("profile provider", &provider.provider)?;
                 ensure_not_blank("profile model", &provider.model)?;
+                if !seen_models.insert((&provider.provider, &provider.model)) {
+                    return Err(ConfigError::DuplicateProfileModel {
+                        profile: name.clone(),
+                        provider: provider.provider.clone(),
+                        model: provider.model.clone(),
+                    });
+                }
                 if !file.providers.contains_key(&provider.provider) {
                     return Err(ConfigError::UnknownProvider {
                         profile: name.clone(),
@@ -1220,6 +1359,16 @@ pub enum ConfigError {
     UnknownProfile(String),
     #[error("profile `{profile}` references unknown provider `{provider}`")]
     UnknownProvider { profile: String, provider: String },
+    #[error("profile `{profile}` must have at least one enabled model")]
+    NoEnabledModels { profile: String },
+    #[error("profile `{profile}` must have exactly one default model, and it must be enabled")]
+    InvalidDefaultModels { profile: String },
+    #[error("profile `{profile}` contains duplicate model `{provider}/{model}`")]
+    DuplicateProfileModel {
+        profile: String,
+        provider: String,
+        model: String,
+    },
     #[error("provider `{provider}` base URL is invalid: {source}")]
     InvalidProviderUrl {
         provider: String,
