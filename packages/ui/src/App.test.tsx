@@ -8,8 +8,7 @@ import type { AgentClient, Profile } from './contracts';
 function testProfile(name: string, overrides: Partial<Profile> = {}): Profile {
   return {
     name,
-    provider: `${name}-provider`,
-    model: `${name}-model`,
+    providers: [{ provider: `${name}-provider`, model: `${name}-model` }],
     active_skills: [],
     mcp_servers: [],
     capabilities: [],
@@ -199,19 +198,18 @@ describe('App', () => {
     const client: AgentClient = {
       listProfiles: vi.fn().mockResolvedValue({
         default_profile: 'local',
+        provider_ids: ['ollama', 'openai'],
         profiles: [
           {
             name: 'local',
-            provider: 'ollama',
-            model: 'qwen3:8b',
+            providers: [{ provider: 'ollama', model: 'qwen3:8b' }],
             active_skills: [],
             mcp_servers: [],
             capabilities: ['workspace'],
           },
           {
             name: 'work',
-            provider: 'openai',
-            model: 'gpt-5',
+            providers: [{ provider: 'openai', model: 'gpt-5' }],
             active_skills: ['github'],
             mcp_servers: ['github'],
             capabilities: [],
@@ -403,9 +401,9 @@ describe('App', () => {
     );
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
-    expect(await screen.findByRole('heading', { name: 'Providers' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Provider credentials' })).toBeInTheDocument();
     expect(
-      screen.getByText(/Provider credentials are stored here; runtime profiles and models load from rynna.toml/),
+      screen.getByText(/Provider credentials are stored here; runtime profiles and models load from config.toml/),
     ).toBeInTheDocument();
     expect(screen.getByText('No providers configured.')).toBeInTheDocument();
 
@@ -776,7 +774,7 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: 'Edit Ollama' })).toBeInTheDocument();
   });
 
-  it('sorts settings profiles alphabetically in a type-ahead and binds providers to the selected profile', async () => {
+  it('uses left navigation and shows each selected profile unique provider list', async () => {
     const user = userEvent.setup();
     render(
       <App
@@ -784,10 +782,18 @@ describe('App', () => {
           respond: vi.fn(),
           listProfiles: vi.fn().mockResolvedValue({
             default_profile: 'zeta',
+            provider_ids: ['anthropic', 'beta-provider', 'ollama', 'openai'],
             profiles: [
-              testProfile('zeta', { provider: 'openai' }),
-              testProfile('alpha', { provider: 'ollama' }),
-              testProfile('beta', { provider: 'anthropic' }),
+              testProfile('zeta', {
+                providers: [
+                  { provider: 'openai', model: 'gpt-5' },
+                  { provider: 'ollama', model: 'qwen3:8b' },
+                ],
+              }),
+              testProfile('alpha', {
+                providers: [{ provider: 'anthropic', model: 'claude-sonnet-4-6' }],
+              }),
+              testProfile('beta'),
             ],
           }),
           listProviders: vi.fn().mockResolvedValue([]),
@@ -800,11 +806,19 @@ describe('App', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Settings' }));
 
+    expect(screen.getByRole('navigation', { name: 'Settings' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Profiles' })).toHaveAttribute('aria-current', 'page');
     const profile = await screen.findByRole('combobox', { name: 'Profile' });
     expect(profile).toHaveValue('zeta');
-    expect(screen.getByRole('heading', { name: 'Providers' })).toBeInTheDocument();
-    expect(screen.getByText(/Provider credentials for profile zeta/)).toBeInTheDocument();
-    expect(screen.getByLabelText('Profile provider')).toHaveValue('openai');
+    expect(screen.getByRole('heading', { name: 'Profiles' })).toBeInTheDocument();
+    expect(screen.getAllByLabelText('Provider').map((input) => input.getAttribute('value'))).toEqual([
+      'openai',
+      'ollama',
+    ]);
+    expect(screen.getAllByLabelText('Model').map((input) => input.getAttribute('value'))).toEqual([
+      'gpt-5',
+      'qwen3:8b',
+    ]);
 
     await user.click(profile);
     expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
@@ -815,9 +829,17 @@ describe('App', () => {
 
     await user.click(screen.getByRole('option', { name: 'alpha' }));
     expect(profile).toHaveValue('alpha');
-    expect(screen.getByText(/Provider credentials for profile alpha/)).toBeInTheDocument();
-    expect(screen.getByLabelText('Profile provider')).toHaveValue('ollama');
-    expect(screen.getByLabelText('Model')).toHaveValue('alpha-model');
+    expect(screen.getAllByLabelText('Provider')).toHaveLength(1);
+    expect(screen.getByLabelText('Provider')).toHaveValue('anthropic');
+    expect(screen.getByLabelText('Model')).toHaveValue('claude-sonnet-4-6');
+
+    await user.click(screen.getByRole('button', { name: 'Provider credentials' }));
+    expect(screen.getByRole('button', { name: 'Provider credentials' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(screen.getByRole('heading', { name: 'Provider credentials' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Name')).not.toBeInTheDocument();
   });
 
   it('filters settings profiles by typing ahead', async () => {
@@ -828,6 +850,7 @@ describe('App', () => {
           respond: vi.fn(),
           listProfiles: vi.fn().mockResolvedValue({
             default_profile: 'alpha',
+            provider_ids: ['alpha-provider', 'beta-provider', 'zeta-provider'],
             profiles: [testProfile('alpha'), testProfile('beta'), testProfile('zeta')],
           }),
           listProviders: vi.fn().mockResolvedValue([]),
@@ -849,7 +872,65 @@ describe('App', () => {
 
     await user.keyboard('{Enter}');
     expect(profile).toHaveValue('zeta');
-    expect(screen.getByText(/Provider credentials for profile zeta/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Provider')).toHaveValue('zeta-provider');
+  });
+
+  it('restores the selected profile text when typeahead editing is cancelled or blurred', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProfiles: vi.fn().mockResolvedValue({
+            default_profile: 'alpha',
+            provider_ids: ['alpha-provider', 'zeta-provider'],
+            profiles: [testProfile('alpha'), testProfile('zeta')],
+          }),
+          createProfile: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Settings' }));
+    const profile = await screen.findByRole('combobox', { name: 'Profile' });
+    await user.clear(profile);
+    await user.type(profile, 'ze');
+    await user.keyboard('{Escape}');
+    expect(profile).toHaveValue('alpha');
+
+    await user.clear(profile);
+    await user.type(profile, 'ze');
+    await user.tab();
+    expect(profile).toHaveValue('alpha');
+  });
+
+  it('offers unused custom catalog provider identifiers in profile typeahead', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProfiles: vi.fn().mockResolvedValue({
+            default_profile: 'alpha',
+            provider_ids: ['ollama', 'unused-custom'],
+            profiles: [
+              testProfile('alpha', {
+                providers: [{ provider: 'ollama', model: 'qwen3:8b' }],
+              }),
+            ],
+          }),
+          createProfile: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add profile' }));
+    const provider = screen.getByRole('combobox', { name: 'Provider' });
+    await user.click(provider);
+
+    expect(screen.getByRole('option', { name: 'unused-custom' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'anthropic' })).not.toBeInTheDocument();
   });
 
   it('adds modifies and deletes profiles from settings', async () => {
@@ -863,7 +944,12 @@ describe('App', () => {
           respond: vi.fn(),
           listProfiles: vi.fn().mockResolvedValue({
             default_profile: 'alpha',
-            profiles: [testProfile('alpha', { provider: 'ollama', model: 'qwen3:8b' })],
+            provider_ids: ['anthropic', 'ollama', 'openai'],
+            profiles: [
+              testProfile('alpha', {
+                providers: [{ provider: 'ollama', model: 'qwen3:8b' }],
+              }),
+            ],
           }),
           listProviders: vi.fn().mockResolvedValue([]),
           createProfile,
@@ -876,30 +962,42 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Add profile' }));
     await user.type(screen.getByLabelText('Name'), 'work');
+    await user.clear(screen.getByLabelText('Provider'));
+    await user.type(screen.getByLabelText('Provider'), 'openai');
+    await user.keyboard('{Enter}');
     await user.clear(screen.getByLabelText('Model'));
     await user.type(screen.getByLabelText('Model'), 'gpt-5');
-    await user.clear(screen.getByLabelText('Profile provider'));
-    await user.type(screen.getByLabelText('Profile provider'), 'openai');
+    await user.click(screen.getByRole('button', { name: 'Add profile provider' }));
+    const providers = screen.getAllByLabelText('Provider');
+    const models = screen.getAllByLabelText('Model');
+    await user.clear(providers[1]!);
+    await user.type(providers[1]!, 'anthropic');
     await user.keyboard('{Enter}');
+    await user.type(models[1]!, 'claude-sonnet-4-6');
     await user.click(screen.getByRole('button', { name: 'Save profile' }));
 
     expect(createProfile).toHaveBeenCalledWith({
       name: 'work',
-      provider: 'openai',
-      model: 'gpt-5',
+      providers: [
+        { provider: 'openai', model: 'gpt-5' },
+        { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+      ],
       active_skills: [],
       mcp_servers: [],
       capabilities: [],
     });
     expect(await screen.findByRole('combobox', { name: 'Profile' })).toHaveValue('work');
 
-    await user.clear(screen.getByLabelText('Model'));
-    await user.type(screen.getByLabelText('Model'), 'gpt-5.2');
+    const savedModels = screen.getAllByLabelText('Model');
+    await user.clear(savedModels[1]!);
+    await user.type(savedModels[1]!, 'claude-opus-4-6');
     await user.click(screen.getByRole('button', { name: 'Save profile' }));
     expect(updateProfile).toHaveBeenCalledWith('work', {
       name: 'work',
-      provider: 'openai',
-      model: 'gpt-5.2',
+      providers: [
+        { provider: 'openai', model: 'gpt-5' },
+        { provider: 'anthropic', model: 'claude-opus-4-6' },
+      ],
       active_skills: [],
       mcp_servers: [],
       capabilities: [],

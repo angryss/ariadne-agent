@@ -2,15 +2,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use rynna_config::ProfileCatalog;
 use rynna_core::{
     Agent, AgentProfiles, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
-    Profile, ProviderError, ToolCall,
+    Profile, ProfileProvider, ProviderError, ToolCall,
 };
 use rynna_desktop::{
     CodexAppServerProvider, OpenAiConnectRequest, RespondRequest, compose_agent,
-    connect_openai_with_program, connect_openai_with_program_and_home, list_profiles,
-    openai_account_with_program, openai_account_with_program_and_home, prepare_codex_home,
-    respond_stream_with_profiles, respond_with_agent, respond_with_profiles,
+    connect_openai_with_program, connect_openai_with_program_and_home, create_saved_profile,
+    delete_saved_profile, list_profiles, openai_account_with_program,
+    openai_account_with_program_and_home, prepare_codex_home, respond_stream_with_profiles,
+    respond_with_agent, respond_with_locked_profiles, respond_with_profiles, update_saved_profile,
 };
 
 #[derive(Default)]
@@ -62,8 +64,10 @@ fn profile(name: &str, reply: &'static str) -> (Profile, Agent) {
     (
         Profile {
             name: name.to_owned(),
-            provider: format!("{name}-provider"),
-            model: format!("{name}-model"),
+            providers: vec![ProfileProvider {
+                provider: format!("{name}-provider"),
+                model: format!("{name}-model"),
+            }],
             active_skills: vec![format!("{name}-skill")],
             mcp_servers: vec![format!("{name}-mcp")],
             capabilities: Vec::new(),
@@ -83,7 +87,7 @@ async fn desktop_profile_commands_list_and_dispatch_profiles() {
     )
     .unwrap();
 
-    let catalog = list_profiles(&profiles);
+    let catalog = list_profiles(&profiles, None).unwrap();
     let response = respond_with_profiles(
         &profiles,
         RespondRequest {
@@ -98,6 +102,171 @@ async fn desktop_profile_commands_list_and_dispatch_profiles() {
     assert_eq!(catalog.default_profile, "local");
     assert_eq!(catalog.profiles[1].name, "work");
     assert_eq!(response.message, Message::assistant("Work reply"));
+}
+
+#[test]
+fn desktop_profile_mutations_do_not_attach_existing_agents_and_preserve_runtime_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+[profiles.work]
+provider = "ollama"
+model = "qwen3:14b"
+"#,
+    )
+    .unwrap();
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+    let mut runtime = AgentProfiles::new(
+        "work",
+        vec![
+            profile("alpha", "Alpha reply"),
+            profile("work", "Sensitive work reply"),
+            profile("openai-account", "Runtime fallback"),
+        ],
+    )
+    .unwrap();
+    let new_profile = Profile {
+        name: "new".to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "ollama".to_owned(),
+            model: "other".to_owned(),
+        }],
+        active_skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        capabilities: Vec::new(),
+    };
+
+    create_saved_profile(&mut catalog, &mut runtime, new_profile.clone()).unwrap();
+    assert_eq!(runtime.default_profile(), "work");
+    assert!(runtime.clone_agent("new").is_none());
+    update_saved_profile(
+        &mut catalog,
+        &mut runtime,
+        "new",
+        Profile {
+            name: "renamed".to_owned(),
+            ..new_profile
+        },
+    )
+    .unwrap();
+    assert!(runtime.clone_agent("renamed").is_none());
+    assert_eq!(runtime.default_profile(), "work");
+
+    delete_saved_profile(&mut catalog, &mut runtime, "work").unwrap();
+    assert_eq!(runtime.default_profile(), "alpha");
+    assert!(runtime.clone_agent("work").is_none());
+}
+
+#[test]
+fn desktop_profile_catalog_lists_unused_custom_provider_ids_and_runtime_only_profiles() {
+    let catalog = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[providers.unused-custom]
+kind = "openai-compatible"
+api_base = "https://custom.example/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+    let runtime = AgentProfiles::new(
+        "alpha",
+        vec![
+            profile("alpha", "Alpha"),
+            profile("openai-account", "OpenAI"),
+        ],
+    )
+    .unwrap();
+
+    let response = list_profiles(&runtime, Some(&catalog)).unwrap();
+
+    assert_eq!(response.provider_ids, ["ollama", "unused-custom"]);
+    assert!(
+        response
+            .profiles
+            .iter()
+            .any(|profile| profile.name == "openai-account")
+    );
+}
+
+#[tokio::test]
+async fn desktop_non_streaming_response_releases_profiles_lock_while_provider_is_pending() {
+    use tokio::sync::{Mutex as AsyncMutex, Notify};
+    use tokio::time::{Duration, timeout};
+
+    struct BlockingProvider {
+        started: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl ModelProvider for BlockingProvider {
+        async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(Completion::new(Message::assistant("released")))
+        }
+    }
+
+    let provider = Arc::new(BlockingProvider {
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    let runtime_profile = Profile {
+        name: "alpha".to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "test".to_owned(),
+            model: "test".to_owned(),
+        }],
+        active_skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        capabilities: Vec::new(),
+    };
+    let profiles = Arc::new(AsyncMutex::new(
+        AgentProfiles::new(
+            "alpha",
+            [(runtime_profile, Agent::new(provider.clone(), "policy"))],
+        )
+        .unwrap(),
+    ));
+    let request_profiles = profiles.clone();
+    let pending = tokio::spawn(async move {
+        respond_with_locked_profiles(
+            &request_profiles,
+            RespondRequest {
+                profile: None,
+                prompt: "wait".to_owned(),
+                history: Vec::new(),
+            },
+        )
+        .await
+    });
+    provider.started.notified().await;
+
+    let acquired = timeout(Duration::from_millis(200), profiles.lock()).await;
+    provider.release.notify_one();
+    let _ = pending.await.unwrap().unwrap();
+
+    assert!(
+        acquired.is_ok(),
+        "profiles lock remained held across provider await"
+    );
 }
 
 #[tokio::test]
@@ -123,8 +292,10 @@ async fn desktop_stream_command_forwards_typed_deltas() {
 
     let profile = Profile {
         name: "local".to_owned(),
-        provider: "test".to_owned(),
-        model: "test".to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "test".to_owned(),
+            model: "test".to_owned(),
+        }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
         capabilities: Vec::new(),

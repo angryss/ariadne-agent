@@ -348,6 +348,9 @@ function isProfileCatalog(value: unknown): value is ProfileCatalog {
       typeof value === 'object' &&
       'default_profile' in value &&
       typeof value.default_profile === 'string' &&
+      'provider_ids' in value &&
+      Array.isArray(value.provider_ids) &&
+      value.provider_ids.every((provider) => typeof provider === 'string') &&
       'profiles' in value &&
       Array.isArray(value.profiles) &&
       value.profiles.every(isProfile),
@@ -360,10 +363,18 @@ function isProfile(value: unknown): value is Profile {
       typeof value === 'object' &&
       'name' in value &&
       typeof value.name === 'string' &&
-      'provider' in value &&
-      typeof value.provider === 'string' &&
-      'model' in value &&
-      typeof value.model === 'string' &&
+      'providers' in value &&
+      Array.isArray(value.providers) &&
+      value.providers.length > 0 &&
+      value.providers.every(
+        (provider) =>
+          provider &&
+          typeof provider === 'object' &&
+          'provider' in provider &&
+          typeof provider.provider === 'string' &&
+          'model' in provider &&
+          typeof provider.model === 'string',
+      ) &&
       'active_skills' in value &&
       Array.isArray(value.active_skills) &&
       value.active_skills.every((skill) => typeof skill === 'string') &&

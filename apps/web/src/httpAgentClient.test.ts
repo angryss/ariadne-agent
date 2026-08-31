@@ -79,11 +79,11 @@ describe('HttpAgentClient', () => {
       new Response(
         JSON.stringify({
           default_profile: 'local',
+          provider_ids: ['ollama', 'unused-custom'],
           profiles: [
             {
               name: 'local',
-              provider: 'ollama',
-              model: 'qwen3:8b',
+              providers: [{ provider: 'ollama', model: 'qwen3:8b' }],
               active_skills: ['rust'],
               mcp_servers: [],
               capabilities: ['workspace'],
@@ -102,14 +102,35 @@ describe('HttpAgentClient', () => {
       headers: { accept: 'application/json' },
     });
     expect(profiles.default_profile).toBe('local');
+    expect(profiles.provider_ids).toEqual(['ollama', 'unused-custom']);
     expect(profiles.profiles[0]!.active_skills).toEqual(['rust']);
+  });
+
+  it('rejects profile metadata that omits catalog provider identifiers', async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      jsonResponse({
+        default_profile: 'local',
+        profiles: [
+          {
+            name: 'local',
+            providers: [{ provider: 'ollama', model: 'qwen3:8b' }],
+            active_skills: [],
+            mcp_servers: [],
+            capabilities: [],
+          },
+        ],
+      }),
+    );
+
+    await expect(new HttpAgentClient('/v1/respond', fetcher).listProfiles()).rejects.toThrow(
+      'invalid profile data',
+    );
   });
 
   it('creates updates and deletes profiles through the profiles API', async () => {
     const profile = {
       name: 'work',
-      provider: 'openai',
-      model: 'gpt-5',
+      providers: [{ provider: 'openai', model: 'gpt-5' }],
       active_skills: [],
       mcp_servers: [],
       capabilities: [],
@@ -117,12 +138,17 @@ describe('HttpAgentClient', () => {
     const fetcher = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(profile))
-      .mockResolvedValueOnce(jsonResponse({ ...profile, model: 'gpt-5.2' }))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...profile, providers: [{ provider: 'openai', model: 'gpt-5.2' }] }),
+      )
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const client = new HttpAgentClient('/v1/respond', fetcher);
 
     await client.createProfile(profile);
-    await client.updateProfile('work', { ...profile, model: 'gpt-5.2' });
+    await client.updateProfile('work', {
+      ...profile,
+      providers: [{ provider: 'openai', model: 'gpt-5.2' }],
+    });
     await client.deleteProfile('work');
 
     expect(fetcher).toHaveBeenNthCalledWith(1, '/v1/profiles', expect.objectContaining({ method: 'POST' }));

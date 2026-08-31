@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
@@ -17,6 +18,9 @@ use rynna_server::{
 };
 use serde_json::Value;
 use tower::ServiceExt;
+
+use tokio::sync::Notify;
+use tokio::time::{Duration, timeout};
 
 fn local_provider_request(mut request: Request<Body>) -> Request<Body> {
     request.extensions_mut().insert(ConnectInfo(
@@ -732,8 +736,7 @@ model = "qwen3:8b"
                 .body(Body::from(
                     serde_json::json!({
                         "name": "work",
-                        "provider": "ollama",
-                        "model": "gpt-5",
+                        "providers": [{ "provider": "ollama", "model": "gpt-5" }],
                         "active_skills": [],
                         "mcp_servers": [],
                         "capabilities": []
@@ -759,8 +762,7 @@ model = "qwen3:8b"
                 .body(Body::from(
                     serde_json::json!({
                         "name": "work",
-                        "provider": "ollama",
-                        "model": "gpt-5.2",
+                        "providers": [{ "provider": "ollama", "model": "gpt-5.2" }],
                         "active_skills": [],
                         "mcp_servers": [],
                         "capabilities": []
@@ -792,4 +794,398 @@ model = "qwen3:8b"
     let listed: Value = serde_json::from_slice(&listed_body).unwrap();
     assert_eq!(listed["profiles"].as_array().unwrap().len(), 1);
     assert_eq!(listed["profiles"][0]["name"], "alpha");
+}
+
+#[tokio::test]
+async fn created_profile_metadata_is_not_attached_to_an_existing_runtime_agent() {
+    struct CountingProvider(AtomicUsize);
+
+    #[async_trait]
+    impl ModelProvider for CountingProvider {
+        async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Completion::new(Message::assistant("sensitive runtime")))
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+    let catalog = ProfileCatalog::load(path).unwrap();
+    let provider = Arc::new(CountingProvider(AtomicUsize::new(0)));
+    let runtime_profile = Profile {
+        name: "alpha".to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "ollama".to_owned(),
+            model: "qwen3:8b".to_owned(),
+        }],
+        active_skills: vec!["sensitive-skill".to_owned()],
+        mcp_servers: Vec::new(),
+        capabilities: vec!["sensitive-capability".to_owned()],
+    };
+    let profiles = AgentProfiles::new(
+        "alpha",
+        [(
+            runtime_profile,
+            Agent::new(provider.clone(), "sensitive system prompt"),
+        )],
+    )
+    .unwrap();
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    let app = router_with_profiles_provider_settings_and_catalog(profiles, settings, catalog);
+    let new_profile = serde_json::json!({
+        "name": "new",
+        "providers": [{"provider": "ollama", "model": "other"}],
+        "active_skills": [],
+        "mcp_servers": [],
+        "capabilities": []
+    });
+
+    let created = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::post("/v1/profiles")
+                .header("content-type", "application/json")
+                .body(Body::from(new_profile.to_string()))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let response = app
+        .oneshot(
+            Request::post("/v1/respond")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"profile":"new","prompt":"run"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn updated_catalog_metadata_does_not_replace_running_profile_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+    let catalog = ProfileCatalog::load(path).unwrap();
+    let runtime_profile = Profile {
+        name: "alpha".to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "ollama".to_owned(),
+            model: "runtime-model".to_owned(),
+        }],
+        active_skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        capabilities: vec!["runtime-capability".to_owned()],
+    };
+    let profiles = AgentProfiles::new(
+        "alpha",
+        [(
+            runtime_profile,
+            Agent::new(Arc::new(FixedProvider), "runtime policy"),
+        )],
+    )
+    .unwrap();
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    let app = router_with_profiles_provider_settings_and_catalog(profiles, settings, catalog);
+
+    let updated = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::put("/v1/profiles/alpha")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"alpha","providers":[{"provider":"ollama","model":"saved-model"}],"active_skills":[],"mcp_servers":[],"capabilities":[]}"#,
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let listed = app
+        .oneshot(Request::get("/v1/profiles").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let listed: Value =
+        serde_json::from_slice(&to_bytes(listed.into_body(), 4096).await.unwrap()).unwrap();
+
+    assert_eq!(
+        listed["profiles"][0]["providers"][0]["model"],
+        "runtime-model"
+    );
+    assert_eq!(
+        listed["profiles"][0]["capabilities"],
+        serde_json::json!(["runtime-capability"])
+    );
+}
+
+#[tokio::test]
+async fn profile_catalog_response_includes_unused_custom_provider_ids() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[providers.unused-custom]
+kind = "openai-compatible"
+api_base = "https://custom.example/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+    let catalog = ProfileCatalog::load(path).unwrap();
+    let profiles = AgentProfiles::new("alpha", vec![profile("alpha", "Alpha.")]).unwrap();
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    let response = router_with_profiles_provider_settings_and_catalog(profiles, settings, catalog)
+        .oneshot(Request::get("/v1/profiles").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        value["provider_ids"],
+        serde_json::json!(["ollama", "unused-custom"])
+    );
+}
+
+#[tokio::test]
+async fn profile_mutations_preserve_runtime_default_and_active_delete_selects_a_runtime_fallback() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+[profiles.work]
+provider = "ollama"
+model = "qwen3:14b"
+"#,
+    )
+    .unwrap();
+    let catalog = ProfileCatalog::load(path).unwrap();
+    let profiles = AgentProfiles::new(
+        "work",
+        vec![
+            profile("alpha", "Alpha."),
+            profile("work", "Work."),
+            profile("runtime-only", "Runtime fallback."),
+        ],
+    )
+    .unwrap();
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    let app = router_with_profiles_provider_settings_and_catalog(profiles, settings, catalog);
+
+    let created = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::post("/v1/profiles")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"personal","providers":[{"provider":"ollama","model":"qwen3"}],"active_skills":[],"mcp_servers":[],"capabilities":[]}"#,
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let listed = app
+        .clone()
+        .oneshot(Request::get("/v1/profiles").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let listed: Value =
+        serde_json::from_slice(&to_bytes(listed.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(listed["default_profile"], "work");
+
+    let deleted = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::delete("/v1/profiles/work")
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let listed = app
+        .oneshot(Request::get("/v1/profiles").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let listed: Value =
+        serde_json::from_slice(&to_bytes(listed.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(listed["default_profile"], "alpha");
+}
+
+#[tokio::test]
+async fn profile_persistence_errors_are_5xx_and_validation_errors_remain_4xx() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+    let catalog = ProfileCatalog::load(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let profiles = AgentProfiles::new("alpha", vec![profile("alpha", "Alpha.")]).unwrap();
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    let app = router_with_profiles_provider_settings_and_catalog(profiles, settings, catalog);
+    let body = r#"{"name":"new","providers":[{"provider":"ollama","model":"qwen3"}],"active_skills":[],"mcp_servers":[],"capabilities":[]}"#;
+    let persistence = app
+        .oneshot(local_provider_request(
+            Request::post("/v1/profiles")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(persistence.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+    let catalog = ProfileCatalog::load(&path).unwrap();
+    let profiles = AgentProfiles::new("alpha", vec![profile("alpha", "Alpha.")]).unwrap();
+    let settings =
+        ProviderSettingsStore::load(directory.path().join("other-providers.toml")).unwrap();
+    let validation = router_with_profiles_provider_settings_and_catalog(profiles, settings, catalog)
+        .oneshot(local_provider_request(
+            Request::post("/v1/profiles")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"alpha","providers":[{"provider":"ollama","model":"qwen3"}],"active_skills":[],"mcp_servers":[],"capabilities":[]}"#,
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(validation.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn non_streaming_response_releases_profiles_lock_while_provider_is_pending() {
+    struct BlockingProvider {
+        started: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl ModelProvider for BlockingProvider {
+        async fn complete(&self, _request: CompletionRequest) -> Result<Completion, ProviderError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(Completion::new(Message::assistant("released")))
+        }
+    }
+
+    let provider = Arc::new(BlockingProvider {
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    let runtime_profile = Profile {
+        name: "alpha".to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "test".to_owned(),
+            model: "test".to_owned(),
+        }],
+        active_skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        capabilities: Vec::new(),
+    };
+    let profiles = AgentProfiles::new(
+        "alpha",
+        [(runtime_profile, Agent::new(provider.clone(), "policy"))],
+    )
+    .unwrap();
+    let app = router_with_profiles(profiles);
+    let pending = tokio::spawn(
+        app.clone().oneshot(
+            Request::post("/v1/respond")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"prompt":"wait"}"#))
+                .unwrap(),
+        ),
+    );
+    provider.started.notified().await;
+
+    let listed = timeout(
+        Duration::from_millis(200),
+        app.oneshot(Request::get("/v1/profiles").body(Body::empty()).unwrap()),
+    )
+    .await;
+    provider.release.notify_one();
+    let _ = pending.await.unwrap().unwrap();
+
+    assert!(
+        listed.is_ok(),
+        "profiles lock remained held across provider await"
+    );
 }

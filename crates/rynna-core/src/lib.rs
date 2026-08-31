@@ -1039,25 +1039,20 @@ impl AgentProfiles {
             .collect()
     }
 
-    pub fn clone_agent(&self, name: &str) -> Option<Agent> {
-        self.profiles.get(name).map(|(_, agent)| agent.clone())
+    pub fn contains(&self, name: &str) -> bool {
+        self.profiles.contains_key(name)
     }
 
-    pub fn clone_agent_for_provider(&self, provider: &str) -> Option<Agent> {
-        self.profiles
-            .values()
-            .find(|(profile, _)| {
-                profile
-                    .providers
-                    .first()
-                    .is_some_and(|candidate| candidate.provider == provider)
-            })
-            .map(|(_, agent)| agent.clone())
-            .or_else(|| {
-                self.profiles
-                    .get(self.default_profile.as_ref())
-                    .map(|(_, agent)| agent.clone())
-            })
+    pub fn len(&self) -> usize {
+        self.profiles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.profiles.is_empty()
+    }
+
+    pub fn clone_agent(&self, name: &str) -> Option<Agent> {
+        self.profiles.get(name).map(|(_, agent)| agent.clone())
     }
 
     pub fn upsert(&mut self, profile: Profile, agent: Agent) -> Result<(), ProfileError> {

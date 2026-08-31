@@ -177,10 +177,7 @@ args = ["/workspace"]
         profile.providers[0].provider_kind,
         ProviderKind::OpenAiCompatible
     );
-    assert_eq!(
-        profile.providers[0].api_base,
-        "http://127.0.0.1:11434/v1"
-    );
+    assert_eq!(profile.providers[0].api_base, "http://127.0.0.1:11434/v1");
     assert_eq!(
         profile.providers[0].api_key_env.as_deref(),
         Some("OLLAMA_API_KEY")
@@ -282,10 +279,7 @@ fn built_in_catalog_preserves_the_existing_local_ollama_defaults() {
     assert_eq!(catalog.default_profile(), "default");
     assert_eq!(profile.profile.providers[0].provider, "ollama");
     assert_eq!(profile.profile.providers[0].model, "qwen3:8b");
-    assert_eq!(
-        profile.providers[0].api_base,
-        "http://127.0.0.1:11434/v1"
-    );
+    assert_eq!(profile.providers[0].api_base, "http://127.0.0.1:11434/v1");
     assert!(profile.profile.active_skills.is_empty());
     assert!(profile.profile.mcp_servers.is_empty());
 }
@@ -871,6 +865,161 @@ model = "qwen3:8b"
         reloaded.resolve("alpha").unwrap().profile.providers[0].model,
         "qwen3:8b"
     );
+}
+
+#[test]
+fn adding_a_profile_does_not_change_memory_when_persistence_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    let error = catalog
+        .add_profile(editable_profile("work", "gpt-5"))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("failed to write"));
+    let names: Vec<_> = catalog
+        .resolve_all()
+        .unwrap()
+        .into_iter()
+        .map(|profile| profile.profile.name)
+        .collect();
+    assert_eq!(names, vec!["alpha".to_owned()]);
+}
+
+#[test]
+fn profile_catalog_merges_mutations_from_separate_instances() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+    let mut first = ProfileCatalog::load(&path).unwrap();
+    let mut second = ProfileCatalog::load(&path).unwrap();
+
+    first
+        .add_profile(editable_profile("work", "gpt-5"))
+        .unwrap();
+    second
+        .add_profile(editable_profile("personal", "qwen3:14b"))
+        .unwrap();
+
+    let names: Vec<_> = ProfileCatalog::load(path)
+        .unwrap()
+        .resolve_all()
+        .unwrap()
+        .into_iter()
+        .map(|profile| profile.profile.name)
+        .collect();
+    assert_eq!(names, ["alpha", "personal", "work"]);
+}
+
+#[test]
+fn profile_catalog_lists_all_catalog_provider_identifiers() {
+    let catalog = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[providers.unused_custom]
+kind = "openai-compatible"
+api_base = "https://custom.example/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(catalog.provider_ids(), ["ollama", "unused_custom"]);
+}
+
+#[test]
+fn reserved_runtime_profile_name_is_rejected_by_catalog_crud() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "alpha"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.alpha]
+provider = "ollama"
+model = "qwen3:8b"
+[profiles.openai-account]
+provider = "ollama"
+model = "legacy"
+"#,
+    )
+    .unwrap();
+    let original = std::fs::read_to_string(&path).unwrap();
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+
+    assert!(
+        catalog
+            .add_profile(editable_profile("openai-account", "new"))
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+    assert!(
+        catalog
+            .update_profile("alpha", editable_profile("openai-account", "renamed"))
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+    assert!(
+        catalog
+            .update_profile(
+                "openai-account",
+                editable_profile("openai-account", "edited")
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+    assert!(
+        catalog
+            .delete_profile("openai-account")
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
 }
 
 #[test]

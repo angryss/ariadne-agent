@@ -24,6 +24,13 @@ export function Typeahead({ disabled, id, onChange, options, value }: TypeaheadP
 
   const matches = matchingOptions(options, query, !dirty);
 
+  function cancelEditing() {
+    setQuery(value);
+    setOpen(false);
+    setDirty(false);
+    setActive(value || null);
+  }
+
   function select(next: string) {
     onChange(next);
     setQuery(next);
@@ -35,14 +42,18 @@ export function Typeahead({ disabled, id, onChange, options, value }: TypeaheadP
   return (
     <div className="provider-typeahead">
       <Input
-        aria-activedescendant={open && active ? `${id}-option-${active}` : undefined}
+        aria-activedescendant={
+          open && active && matches.includes(active)
+            ? `${id}-option-${matches.indexOf(active)}`
+            : undefined
+        }
         aria-autocomplete="list"
         aria-controls={`${id}-options`}
         aria-expanded={open}
         autoComplete="off"
         disabled={disabled}
         id={id}
-        onBlur={() => setOpen(false)}
+        onBlur={cancelEditing}
         onChange={(event) => {
           const nextQuery = event.target.value;
           setQuery(nextQuery);
@@ -58,7 +69,7 @@ export function Typeahead({ disabled, id, onChange, options, value }: TypeaheadP
         }}
         onKeyDown={(event) => {
           if (event.key === 'Escape') {
-            setOpen(false);
+            cancelEditing();
             return;
           }
           const nextMatches = matchingOptions(options, query, !dirty);
@@ -88,10 +99,10 @@ export function Typeahead({ disabled, id, onChange, options, value }: TypeaheadP
       />
       {open ? (
         <div className="provider-type-options" id={`${id}-options`} role="listbox">
-          {matches.map((option) => (
+          {matches.map((option, index) => (
             <button
               aria-selected={option === active}
-              id={`${id}-option-${option}`}
+              id={`${id}-option-${index}`}
               key={option}
               onClick={() => select(option)}
               onMouseDown={(event) => event.preventDefault()}

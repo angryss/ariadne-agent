@@ -434,7 +434,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
         Paragraph::new(concat!(
             "Rynna Settings — Providers\n",
             "Provider settings record credential readiness only.\n",
-            "Runtime provider/profile/model routing remains authoritative in rynna.toml and loads at startup."
+            "Runtime provider/profile/model routing remains authoritative in config.toml and loads at startup."
         ))
             .style(
                 Style::default()
@@ -632,7 +632,7 @@ mod tests {
         assert!(screen.contains("credential readiness only"), "{screen}");
         assert!(
             screen.contains(
-                "Runtime provider/profile/model routing remains authoritative in rynna.toml"
+                "Runtime provider/profile/model routing remains authoritative in config.toml"
             ),
             "{screen}"
         );

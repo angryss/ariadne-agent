@@ -17,6 +17,7 @@ pub const DEFAULT_MODEL: &str = "qwen3:8b";
 pub const DEFAULT_PROFILE: &str = "default";
 pub const DEFAULT_PROVIDER: &str = "ollama";
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Rynna, a careful and capable AI software agent.";
+pub const OPENAI_ACCOUNT_PROFILE: &str = "openai-account";
 const CONFIG_VERSION: u32 = 1;
 const PROVIDER_SETTINGS_VERSION: u32 = 1;
 static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -679,11 +680,18 @@ impl ProfileCatalog {
         &self.default_profile
     }
 
+    pub fn provider_ids(&self) -> Vec<String> {
+        self.providers.keys().cloned().collect()
+    }
+
     pub fn add_profile(&mut self, profile: Profile) -> Result<Profile, ConfigError> {
-        if self.profiles.contains_key(&profile.name) {
+        ensure_profile_is_mutable(&profile.name)?;
+        let _lock = self.lock_exclusive()?;
+        let file = self.fresh_file()?;
+        if file.profiles.contains_key(&profile.name) {
             return Err(ConfigError::DuplicateProfile(profile.name));
         }
-        self.write_profile(None, profile)
+        self.write_profile(file, None, profile)
     }
 
     pub fn update_profile(
@@ -691,23 +699,29 @@ impl ProfileCatalog {
         original_name: &str,
         profile: Profile,
     ) -> Result<Profile, ConfigError> {
-        if !self.profiles.contains_key(original_name) {
+        ensure_profile_is_mutable(original_name)?;
+        ensure_profile_is_mutable(&profile.name)?;
+        let _lock = self.lock_exclusive()?;
+        let file = self.fresh_file()?;
+        if !file.profiles.contains_key(original_name) {
             return Err(ConfigError::UnknownProfile(original_name.to_owned()));
         }
-        if profile.name != original_name && self.profiles.contains_key(&profile.name) {
+        if profile.name != original_name && file.profiles.contains_key(&profile.name) {
             return Err(ConfigError::DuplicateProfile(profile.name));
         }
-        self.write_profile(Some(original_name), profile)
+        self.write_profile(file, Some(original_name), profile)
     }
 
     pub fn delete_profile(&mut self, name: &str) -> Result<(), ConfigError> {
-        if !self.profiles.contains_key(name) {
+        ensure_profile_is_mutable(name)?;
+        let _lock = self.lock_exclusive()?;
+        let mut file = self.fresh_file()?;
+        if !file.profiles.contains_key(name) {
             return Err(ConfigError::UnknownProfile(name.to_owned()));
         }
-        if self.profiles.len() <= 1 {
+        if file.profiles.len() <= 1 {
             return Err(ConfigError::LastProfile);
         }
-        let mut file = self.to_file();
         file.profiles.remove(name);
         if file.default_profile == name {
             file.default_profile = file
@@ -717,16 +731,15 @@ impl ProfileCatalog {
                 .cloned()
                 .expect("a remaining profile exists");
         }
-        self.apply_file(file)?;
-        self.save()
+        self.apply_file(file)
     }
 
     fn write_profile(
         &mut self,
+        mut file: ConfigFile,
         original_name: Option<&str>,
         profile: Profile,
     ) -> Result<Profile, ConfigError> {
-        let mut file = self.to_file();
         let system_prompt = original_name
             .and_then(|name| file.profiles.get(name))
             .and_then(|existing| existing.system_prompt.clone());
@@ -749,14 +762,63 @@ impl ProfileCatalog {
             },
         );
         self.apply_file(file)?;
-        self.save()?;
         Ok(profile)
+    }
+
+    fn fresh_file(&self) -> Result<ConfigFile, ConfigError> {
+        let Some(path) = &self.path else {
+            return Ok(self.to_file());
+        };
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => Ok(Self::load(path)?.to_file()),
+            Ok(_) => Ok(self.to_file()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(self.to_file()),
+            Err(source) => Err(ConfigError::Inspect {
+                path: path.clone(),
+                source,
+            }),
+        }
+    }
+
+    fn lock_exclusive(&self) -> Result<Option<fs::File>, ConfigError> {
+        let Some(path) = &self.path else {
+            return Ok(None);
+        };
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        let lock_path = path.with_extension("toml.lock");
+        let mut options = fs::OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&lock_path)
+            .map_err(|source| ConfigError::Write {
+                path: lock_path.clone(),
+                source,
+            })?;
+        file.lock_exclusive().map_err(|source| ConfigError::Write {
+            path: lock_path,
+            source,
+        })?;
+        Ok(Some(file))
     }
 
     fn apply_file(&mut self, file: ConfigFile) -> Result<(), ConfigError> {
         let path = self.path.clone();
-        *self = Self::from_file(file)?;
-        self.path = path;
+        let mut updated = Self::from_file(file)?;
+        updated.path = path;
+        updated.save()?;
+        *self = updated;
         Ok(())
     }
 
@@ -959,10 +1021,9 @@ impl ProfileCatalog {
             }
             if profile.providers.iter().any(|provider| {
                 file.providers[&provider.provider].kind == ProviderKind::ClaudeSubscription
-            })
-                && (!profile.active_skills.is_empty()
-                    || !profile.mcp_servers.is_empty()
-                    || !profile.capabilities.is_empty())
+            }) && (!profile.active_skills.is_empty()
+                || !profile.mcp_servers.is_empty()
+                || !profile.capabilities.is_empty())
             {
                 return Err(ConfigError::ClaudeSubscriptionContext {
                     profile: name.clone(),
@@ -1147,6 +1208,8 @@ pub enum ConfigError {
     DuplicateProfile(String),
     #[error("the last profile cannot be deleted")]
     LastProfile,
+    #[error("profile name `{0}` is reserved for a runtime-only profile")]
+    ReservedProfile(String),
     #[error("Rynna configuration is not valid TOML: {0}")]
     Parse(#[from] toml::de::Error),
     #[error("Rynna configuration version {0} is not supported")]
@@ -1215,6 +1278,13 @@ pub enum ConfigError {
     Encode(#[from] toml::ser::Error),
     #[error("the platform configuration directory is unavailable")]
     ConfigDirectoryUnavailable,
+}
+
+fn ensure_profile_is_mutable(name: &str) -> Result<(), ConfigError> {
+    if name == OPENAI_ACCOUNT_PROFILE {
+        return Err(ConfigError::ReservedProfile(name.to_owned()));
+    }
+    Ok(())
 }
 
 fn ensure_not_blank(kind: &'static str, value: &str) -> Result<(), ConfigError> {

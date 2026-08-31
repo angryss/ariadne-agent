@@ -43,11 +43,11 @@ describe('TauriAgentClient', () => {
   it('loads profiles through the narrow desktop profiles command', async () => {
     const invoke = vi.fn().mockResolvedValue({
       default_profile: 'local',
+      provider_ids: ['ollama', 'unused-custom'],
       profiles: [
         {
           name: 'local',
-          provider: 'ollama',
-          model: 'qwen3:8b',
+          providers: [{ provider: 'ollama', model: 'qwen3:8b' }],
           active_skills: [],
           mcp_servers: ['filesystem'],
           capabilities: ['workspace'],
@@ -60,14 +60,33 @@ describe('TauriAgentClient', () => {
 
     expect(invoke).toHaveBeenCalledWith('profiles', {});
     expect(profiles.default_profile).toBe('local');
+    expect(profiles.provider_ids).toEqual(['ollama', 'unused-custom']);
     expect(profiles.profiles[0]!.mcp_servers).toEqual(['filesystem']);
+  });
+
+  it('rejects profile metadata that omits catalog provider identifiers', async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      default_profile: 'local',
+      profiles: [
+        {
+          name: 'local',
+          providers: [{ provider: 'ollama', model: 'qwen3:8b' }],
+          active_skills: [],
+          mcp_servers: [],
+          capabilities: [],
+        },
+      ],
+    });
+
+    await expect(new TauriAgentClient(invoke).listProfiles()).rejects.toThrow(
+      'invalid profile data',
+    );
   });
 
   it('uses narrow commands for profile CRUD', async () => {
     const profile = {
       name: 'work',
-      provider: 'openai',
-      model: 'gpt-5',
+      providers: [{ provider: 'openai', model: 'gpt-5' }],
       active_skills: [],
       mcp_servers: [],
       capabilities: [],
@@ -75,18 +94,27 @@ describe('TauriAgentClient', () => {
     const invoke = vi
       .fn()
       .mockResolvedValueOnce(profile)
-      .mockResolvedValueOnce({ ...profile, model: 'gpt-5.2' })
+      .mockResolvedValueOnce({
+        ...profile,
+        providers: [{ provider: 'openai', model: 'gpt-5.2' }],
+      })
       .mockResolvedValueOnce(undefined);
     const client = new TauriAgentClient(invoke);
 
     await client.createProfile(profile);
-    await client.updateProfile('work', { ...profile, model: 'gpt-5.2' });
+    await client.updateProfile('work', {
+      ...profile,
+      providers: [{ provider: 'openai', model: 'gpt-5.2' }],
+    });
     await client.deleteProfile('work');
 
     expect(invoke).toHaveBeenNthCalledWith(1, 'create_profile', { profile });
     expect(invoke).toHaveBeenNthCalledWith(2, 'update_profile', {
       name: 'work',
-      profile: { ...profile, model: 'gpt-5.2' },
+      profile: {
+        ...profile,
+        providers: [{ provider: 'openai', model: 'gpt-5.2' }],
+      },
     });
     expect(invoke).toHaveBeenNthCalledWith(3, 'delete_profile', { name: 'work' });
   });

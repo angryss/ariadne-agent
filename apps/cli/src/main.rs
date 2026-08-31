@@ -224,10 +224,10 @@ fn configured_profiles(
     let mut configured = Vec::new();
     for mut profile in resolved {
         let api_key_override = if profile.profile.name == default_profile {
-            if let Some(api_base) = &overrides.api_base {
-                if let Some(provider) = profile.providers.first_mut() {
-                    provider.api_base.clone_from(api_base);
-                }
+            if let Some(api_base) = &overrides.api_base
+                && let Some(provider) = profile.providers.first_mut()
+            {
+                provider.api_base.clone_from(api_base);
             }
             if let Some(model) = &overrides.model {
                 if let Some(provider) = profile.providers.first_mut() {
@@ -318,10 +318,7 @@ fn configured_provider(
                 &provider.api_base,
                 &provider.model,
                 api_key.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "profile `{}` requires an Anthropic API key",
-                        profile_name
-                    )
+                    anyhow::anyhow!("profile `{}` requires an Anthropic API key", profile_name)
                 })?,
             )
             .with_context(|| {
@@ -396,7 +393,12 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
             .profiles()
             .into_iter()
             .find(|candidate| candidate.name == profile)
-            .and_then(|candidate| candidate.providers.first().map(|provider| provider.model.clone()))
+            .and_then(|candidate| {
+                candidate
+                    .providers
+                    .first()
+                    .map(|provider| provider.model.clone())
+            })
             .with_context(|| format!("profile `{profile}` is not configured"))?;
         return chat_ui::run(profiles, profile, &model).await;
     }

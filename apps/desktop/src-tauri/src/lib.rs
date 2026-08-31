@@ -6,11 +6,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rynna_config::{
-    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
-    ProviderKind, ProviderSettingsStore, ResolvedCapability, ResolvedProfile,
-    secure_private_directory,
+    AnthropicAuthentication, ConfiguredProvider, OPENAI_ACCOUNT_PROFILE, OpenAiAuthentication,
+    ProfileCatalog, ProviderKind, ProviderSettingsStore, ResolvedCapability, ResolvedProfile,
+    ResolvedProvider, secure_private_directory,
 };
-use rynna_core::{Agent, AgentProfiles, CompletionDelta, Message, ModelProvider, Profile, Tool};
+use rynna_core::{
+    Agent, AgentProfiles, CompletionDelta, FallbackProvider, Message, ModelProvider, Profile,
+    ProfileProvider, Tool,
+};
 use rynna_provider_anthropic::{
     AnthropicMessagesProvider, CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, ClaudeCodeProvider,
     isolate_claude_subscription_environment, terminate_child,
@@ -430,6 +433,7 @@ pub struct RespondResponse {
 #[derive(Debug, Serialize)]
 pub struct ProfilesResponse {
     pub default_profile: String,
+    pub provider_ids: Vec<String>,
     pub profiles: Vec<Profile>,
 }
 
@@ -457,6 +461,15 @@ pub async fn respond_with_profiles(
         .await
         .map_err(|error| error.to_string())?;
     Ok(RespondResponse { message })
+}
+
+#[doc(hidden)]
+pub async fn respond_with_locked_profiles(
+    profiles: &Mutex<AgentProfiles>,
+    request: RespondRequest,
+) -> Result<RespondResponse, String> {
+    let profiles = profiles.lock().await.clone();
+    respond_with_profiles(&profiles, request).await
 }
 
 pub async fn respond_stream_with_profiles(
@@ -496,11 +509,37 @@ impl From<&CompletionDelta> for CompletionDeltaEvent {
     }
 }
 
-pub fn list_profiles(profiles: &AgentProfiles) -> ProfilesResponse {
-    ProfilesResponse {
-        default_profile: profiles.default_profile().to_owned(),
-        profiles: profiles.profiles(),
+pub fn list_profiles(
+    runtime: &AgentProfiles,
+    catalog: Option<&ProfileCatalog>,
+) -> Result<ProfilesResponse, String> {
+    let (provider_ids, catalog_profiles) = match catalog {
+        Some(catalog) => (
+            catalog.provider_ids(),
+            catalog
+                .resolve_all()
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|resolved| resolved.profile)
+                .collect(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+    let mut profiles = runtime.profiles();
+    for profile in catalog_profiles {
+        if !profiles
+            .iter()
+            .any(|candidate: &Profile| candidate.name == profile.name)
+        {
+            profiles.push(profile);
+        }
     }
+    profiles.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(ProfilesResponse {
+        default_profile: runtime.default_profile().to_owned(),
+        provider_ids,
+        profiles,
+    })
 }
 
 #[tauri::command]
@@ -508,8 +547,7 @@ async fn respond(
     profiles: State<'_, Mutex<AgentProfiles>>,
     request: RespondRequest,
 ) -> Result<RespondResponse, String> {
-    let profiles = profiles.lock().await;
-    respond_with_profiles(&profiles, request).await
+    respond_with_locked_profiles(&profiles, request).await
 }
 
 #[tauri::command]
@@ -526,9 +564,13 @@ async fn respond_stream(
 }
 
 #[tauri::command]
-async fn profiles(profiles: State<'_, Mutex<AgentProfiles>>) -> Result<ProfilesResponse, String> {
+async fn profiles(
+    catalog: State<'_, Mutex<ProfileCatalog>>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
+) -> Result<ProfilesResponse, String> {
+    let catalog = catalog.lock().await;
     let profiles = profiles.lock().await;
-    Ok(list_profiles(&profiles))
+    list_profiles(&profiles, Some(&catalog))
 }
 
 #[tauri::command]
@@ -538,12 +580,8 @@ async fn create_profile(
     profile: Profile,
 ) -> Result<Profile, String> {
     let mut catalog = catalog.lock().await;
-    let saved = catalog
-        .add_profile(profile)
-        .map_err(|error| error.to_string())?;
     let mut runtime = profiles.lock().await;
-    apply_saved_profile(&mut runtime, None, saved.clone(), catalog.default_profile())?;
-    Ok(saved)
+    create_saved_profile(&mut catalog, &mut runtime, profile)
 }
 
 #[tauri::command]
@@ -554,17 +592,8 @@ async fn update_profile(
     profile: Profile,
 ) -> Result<Profile, String> {
     let mut catalog = catalog.lock().await;
-    let saved = catalog
-        .update_profile(&name, profile)
-        .map_err(|error| error.to_string())?;
     let mut runtime = profiles.lock().await;
-    apply_saved_profile(
-        &mut runtime,
-        Some(&name),
-        saved.clone(),
-        catalog.default_profile(),
-    )?;
-    Ok(saved)
+    update_saved_profile(&mut catalog, &mut runtime, &name, profile)
 }
 
 #[tauri::command]
@@ -574,39 +603,49 @@ async fn delete_profile(
     name: String,
 ) -> Result<(), String> {
     let mut catalog = catalog.lock().await;
-    catalog
-        .delete_profile(&name)
-        .map_err(|error| error.to_string())?;
     let mut runtime = profiles.lock().await;
-    runtime.remove(&name).map_err(|error| error.to_string())?;
-    runtime
-        .set_default(catalog.default_profile())
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    delete_saved_profile(&mut catalog, &mut runtime, &name)
 }
 
-fn apply_saved_profile(
-    runtime: &mut AgentProfiles,
-    original_name: Option<&str>,
+#[doc(hidden)]
+pub fn create_saved_profile(
+    catalog: &mut ProfileCatalog,
+    _runtime: &mut AgentProfiles,
     profile: Profile,
-    default_profile: &str,
-) -> Result<(), String> {
-    let agent = runtime
-        .clone_agent_for_provider(&profile.provider)
-        .ok_or_else(|| format!("default profile `{default_profile}` is not defined"))?;
-    runtime
-        .upsert(profile.clone(), agent)
-        .map_err(|error| error.to_string())?;
-    if let Some(original) = original_name
-        && original != profile.name
-    {
-        runtime
-            .remove(original)
-            .map_err(|error| error.to_string())?;
-    }
-    runtime
-        .set_default(default_profile)
+) -> Result<Profile, String> {
+    catalog
+        .add_profile(profile)
         .map_err(|error| error.to_string())
+}
+
+#[doc(hidden)]
+pub fn update_saved_profile(
+    catalog: &mut ProfileCatalog,
+    _runtime: &mut AgentProfiles,
+    original_name: &str,
+    profile: Profile,
+) -> Result<Profile, String> {
+    catalog
+        .update_profile(original_name, profile)
+        .map_err(|error| error.to_string())
+}
+
+#[doc(hidden)]
+pub fn delete_saved_profile(
+    catalog: &mut ProfileCatalog,
+    runtime: &mut AgentProfiles,
+    name: &str,
+) -> Result<(), String> {
+    if runtime.contains(name) && runtime.len() <= 1 {
+        return Err("the last runtime profile cannot be deleted before restart".to_owned());
+    }
+    catalog
+        .delete_profile(name)
+        .map_err(|error| error.to_string())?;
+    if runtime.contains(name) {
+        runtime.remove(name).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -900,11 +939,18 @@ fn configured_profiles(
     let mut configured = Vec::new();
     for mut profile in catalog.resolve_all().map_err(|error| error.to_string())? {
         let api_key_override = if profile.profile.name == default_profile {
-            if let Some(api_base) = optional_env("RYNNA_API_BASE")? {
-                profile.api_base = api_base;
+            if let Some(api_base) = optional_env("RYNNA_API_BASE")?
+                && let Some(provider) = profile.providers.first_mut()
+            {
+                provider.api_base = api_base;
             }
             if let Some(model) = optional_env("RYNNA_MODEL")? {
-                profile.profile.model = model;
+                if let Some(provider) = profile.providers.first_mut() {
+                    provider.model.clone_from(&model);
+                }
+                if let Some(provider) = profile.profile.providers.first_mut() {
+                    provider.model = model;
+                }
             }
             if let Some(system_prompt) = optional_env("RYNNA_SYSTEM_PROMPT")? {
                 profile.system_prompt = system_prompt;
@@ -917,7 +963,6 @@ fn configured_profiles(
         configured.push((profile.profile, agent));
     }
 
-    const OPENAI_ACCOUNT_PROFILE: &str = "openai-account";
     if configured
         .iter()
         .any(|(profile, _)| profile.name == OPENAI_ACCOUNT_PROFILE)
@@ -928,8 +973,10 @@ fn configured_profiles(
     }
     let openai_profile = Profile {
         name: OPENAI_ACCOUNT_PROFILE.to_owned(),
-        provider: "openai".to_owned(),
-        model: "Codex default".to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "openai".to_owned(),
+            model: "Codex default".to_owned(),
+        }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
         capabilities: Vec::new(),
@@ -1014,46 +1061,70 @@ fn configured_agent(
     profile: &ResolvedProfile,
     api_key_override: Option<String>,
 ) -> Result<Agent, String> {
+    let mut providers = profile
+        .providers
+        .iter()
+        .enumerate()
+        .map(|(index, provider)| {
+            configured_model_provider(
+                &profile.profile.name,
+                provider,
+                if index == 0 {
+                    api_key_override.clone()
+                } else {
+                    None
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let provider: Arc<dyn ModelProvider> = if providers.len() == 1 {
+        providers.remove(0)
+    } else {
+        Arc::new(FallbackProvider::new(providers).map_err(|error| error.to_string())?)
+    };
+
+    compose_agent(profile, provider)
+}
+
+fn configured_model_provider(
+    profile_name: &str,
+    provider: &ResolvedProvider,
+    api_key_override: Option<String>,
+) -> Result<Arc<dyn ModelProvider>, String> {
     let api_key = match api_key_override {
         Some(api_key) => Some(api_key),
-        None => profile
+        None => provider
             .api_key_env
             .as_deref()
             .map(|name| {
                 env::var(name).map_err(|_| {
                     format!(
                         "profile `{}` requires provider API key environment variable `{name}`",
-                        profile.profile.name
+                        profile_name
                     )
                 })
             })
             .transpose()?,
     };
-    let provider: Arc<dyn ModelProvider> = match profile.provider_kind {
+    let configured: Arc<dyn ModelProvider> = match provider.provider_kind {
         ProviderKind::OpenAiCompatible => Arc::new(
-            OpenAiCompatibleProvider::new(&profile.api_base, &profile.profile.model, api_key)
+            OpenAiCompatibleProvider::new(&provider.api_base, &provider.model, api_key)
                 .map_err(|error| error.to_string())?,
         ),
         ProviderKind::AnthropicMessages => Arc::new(
             AnthropicMessagesProvider::with_base_url(
-                &profile.api_base,
-                &profile.profile.model,
+                &provider.api_base,
+                &provider.model,
                 api_key.ok_or_else(|| "Anthropic API key is required".to_owned())?,
             )
             .map_err(|error| error.to_string())?,
         ),
         ProviderKind::ClaudeSubscription => Arc::new(ClaudeCodeProvider::new(
-            &profile.claude_program,
-            &profile.profile.model,
+            &provider.claude_program,
+            &provider.model,
         )),
     };
-
-    if profile.provider_kind == ProviderKind::ClaudeSubscription && !profile.capabilities.is_empty()
-    {
-        return Err("Claude subscription profiles do not support Rynna capabilities".to_owned());
-    }
-
-    compose_agent(profile, provider)
+    Ok(configured)
 }
 
 #[doc(hidden)]
@@ -1149,7 +1220,7 @@ mod tests {
         let _ = std::fs::remove_file(&pid_file);
 
         let error =
-            authenticate_anthropic_subscription_with_program(program, Duration::from_millis(25))
+            authenticate_anthropic_subscription_with_program(program, Duration::from_millis(250))
                 .await
                 .unwrap_err();
         let pid = std::fs::read_to_string(&pid_file).unwrap();

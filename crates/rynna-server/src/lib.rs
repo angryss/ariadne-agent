@@ -15,12 +15,12 @@ use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use rynna_config::{
-    AnthropicAuthentication, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
+    AnthropicAuthentication, ConfigError, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
     ProviderSettingsError, ProviderSettingsStore, secure_private_directory,
 };
 use rynna_core::{
     Agent, AgentError, AgentProfiles, CompletionDelta, Message, Profile, ProfileAgentError,
-    ProfileError,
+    ProfileError, ProfileProvider,
 };
 use rynna_provider_anthropic::{
     CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, isolate_claude_subscription_environment,
@@ -46,8 +46,10 @@ struct AppState {
 pub fn router(agent: Agent) -> Router {
     let profile = Profile {
         name: "default".to_owned(),
-        provider: "configured".to_owned(),
-        model: "configured".to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "configured".to_owned(),
+            model: "configured".to_owned(),
+        }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
         capabilities: Vec::new(),
@@ -205,8 +207,10 @@ async fn require_loopback_provider_admin(
 pub fn router_with_web(agent: Agent, web_dir: impl AsRef<Path>) -> Router {
     let profile = Profile {
         name: "default".to_owned(),
-        provider: "configured".to_owned(),
-        model: "configured".to_owned(),
+        providers: vec![ProfileProvider {
+            provider: "configured".to_owned(),
+            model: "configured".to_owned(),
+        }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
         capabilities: Vec::new(),
@@ -267,15 +271,42 @@ async fn health() -> Json<HealthResponse> {
 #[derive(Serialize)]
 struct ProfilesResponse {
     default_profile: String,
+    provider_ids: Vec<String>,
     profiles: Vec<Profile>,
 }
 
-async fn list_profiles(State(state): State<AppState>) -> Json<ProfilesResponse> {
-    let profiles = state.profiles.lock().await;
-    Json(ProfilesResponse {
-        default_profile: profiles.default_profile().to_owned(),
-        profiles: profiles.profiles(),
-    })
+async fn list_profiles(State(state): State<AppState>) -> Result<Json<ProfilesResponse>, ApiError> {
+    let catalog_metadata = if let Some(catalog) = &state.catalog {
+        let catalog = catalog.lock().await;
+        Some((
+            catalog.provider_ids(),
+            catalog
+                .resolve_all()
+                .map_err(catalog_error)?
+                .into_iter()
+                .map(|resolved| resolved.profile)
+                .collect::<Vec<_>>(),
+        ))
+    } else {
+        None
+    };
+    let runtime = state.profiles.lock().await;
+    let (provider_ids, catalog_profiles) = catalog_metadata.unwrap_or_default();
+    let mut profiles = runtime.profiles();
+    for profile in catalog_profiles {
+        if !profiles
+            .iter()
+            .any(|candidate| candidate.name == profile.name)
+        {
+            profiles.push(profile);
+        }
+    }
+    profiles.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(Json(ProfilesResponse {
+        default_profile: runtime.default_profile().to_owned(),
+        provider_ids,
+        profiles,
+    }))
 }
 
 fn catalog_store(state: &AppState) -> Result<&Arc<Mutex<ProfileCatalog>>, ApiError> {
@@ -286,11 +317,24 @@ fn catalog_store(state: &AppState) -> Result<&Arc<Mutex<ProfileCatalog>>, ApiErr
     })
 }
 
-fn catalog_error(error: impl std::fmt::Display) -> ApiError {
-    ApiError {
-        status: StatusCode::BAD_REQUEST,
-        code: "invalid_profile",
-        message: error.to_string(),
+fn catalog_error(error: ConfigError) -> ApiError {
+    match error {
+        ConfigError::Read { .. }
+        | ConfigError::Inspect { .. }
+        | ConfigError::Write { .. }
+        | ConfigError::Encode(_)
+        | ConfigError::Parse(_)
+        | ConfigError::UnsupportedVersion(_)
+        | ConfigError::ConfigDirectoryUnavailable => ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "profile_catalog_persistence_failed",
+            message: "profile catalog could not be persisted".to_owned(),
+        },
+        _ => ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_profile",
+            message: error.to_string(),
+        },
     }
 }
 
@@ -324,24 +368,6 @@ where
     }
 }
 
-fn apply_saved_profile(
-    runtime: &mut AgentProfiles,
-    original_name: Option<&str>,
-    profile: Profile,
-    default_profile: &str,
-) -> Result<(), ProfileError> {
-    let agent = runtime
-        .clone_agent_for_provider(&profile.provider)
-        .ok_or_else(|| ProfileError::UnknownDefault(default_profile.to_owned()))?;
-    runtime.upsert(profile.clone(), agent)?;
-    if let Some(original) = original_name
-        && original != profile.name
-    {
-        runtime.remove(original)?;
-    }
-    runtime.set_default(default_profile)
-}
-
 async fn create_profile(
     peer: LoopbackClient,
     State(state): State<AppState>,
@@ -351,9 +377,6 @@ async fn create_profile(
     let Json(profile) = request.map_err(ApiError::from)?;
     let mut catalog = catalog_store(&state)?.lock().await;
     let saved = catalog.add_profile(profile).map_err(catalog_error)?;
-    let mut runtime = state.profiles.lock().await;
-    apply_saved_profile(&mut runtime, None, saved.clone(), catalog.default_profile())
-        .map_err(catalog_error)?;
     Ok(Json(saved))
 }
 
@@ -367,14 +390,6 @@ async fn update_saved_profile(
     let saved = catalog
         .update_profile(&name, profile)
         .map_err(catalog_error)?;
-    let mut runtime = state.profiles.lock().await;
-    apply_saved_profile(
-        &mut runtime,
-        Some(&name),
-        saved.clone(),
-        catalog.default_profile(),
-    )
-    .map_err(catalog_error)?;
     Ok(Json(saved))
 }
 
@@ -383,13 +398,27 @@ async fn delete_saved_profile(
     AxumPath(name): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let mut catalog = catalog_store(&state)?.lock().await;
-    catalog.delete_profile(&name).map_err(catalog_error)?;
     let mut runtime = state.profiles.lock().await;
-    runtime.remove(&name).map_err(catalog_error)?;
-    runtime
-        .set_default(catalog.default_profile())
-        .map_err(catalog_error)?;
+    if runtime.contains(&name) && runtime.len() <= 1 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_profile",
+            message: "the last runtime profile cannot be deleted before restart".to_owned(),
+        });
+    }
+    catalog.delete_profile(&name).map_err(catalog_error)?;
+    if runtime.contains(&name) {
+        runtime.remove(&name).map_err(runtime_profile_error)?;
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn runtime_profile_error(error: ProfileError) -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_profile",
+        message: error.to_string(),
+    }
 }
 
 #[derive(Serialize)]
@@ -733,7 +762,7 @@ async fn respond(
     request: Result<Json<RespondRequest>, JsonRejection>,
 ) -> Result<Json<RespondResponse>, ApiError> {
     let Json(request) = request.map_err(ApiError::from)?;
-    let profiles = state.profiles.lock().await;
+    let profiles = state.profiles.lock().await.clone();
     let message = profiles
         .respond(
             request.profile.as_deref(),
@@ -927,7 +956,7 @@ mod tests {
         let _ = std::fs::remove_file(&pid_file);
 
         let error =
-            authenticate_anthropic_subscription_with_program(&program, Duration::from_millis(25))
+            authenticate_anthropic_subscription_with_program(&program, Duration::from_millis(250))
                 .await
                 .unwrap_err();
         let pid = std::fs::read_to_string(&pid_file).unwrap();
