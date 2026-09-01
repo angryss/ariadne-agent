@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rynna_config::ProfileCatalog;
+use rynna_config::{ConfiguredProvider, ProfileCatalog, ProviderSettingsStore};
 use rynna_core::{
     Agent, AgentProfiles, Completion, CompletionDelta, CompletionRequest, Message, ModelProvider,
     Profile, ProfileProvider, ProviderError, ToolCall,
@@ -67,6 +67,8 @@ fn profile(name: &str, reply: &'static str) -> (Profile, Agent) {
             providers: vec![ProfileProvider {
                 provider: format!("{name}-provider"),
                 model: format!("{name}-model"),
+                enabled: true,
+                is_default: true,
             }],
             active_skills: vec![format!("{name}-skill")],
             mcp_servers: vec![format!("{name}-mcp")],
@@ -101,6 +103,7 @@ async fn desktop_profile_commands_list_and_dispatch_profiles() {
 
     assert_eq!(catalog.default_profile, "local");
     assert_eq!(catalog.profiles[1].name, "work");
+    assert_eq!(catalog.configured_profiles[1].name, "work");
     assert_eq!(response.message, Message::assistant("Work reply"));
 }
 
@@ -126,6 +129,18 @@ model = "qwen3:14b"
     )
     .unwrap();
     let mut catalog = ProfileCatalog::load(&path).unwrap();
+    let mut provider_settings =
+        ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    for profile in ["new", "work"] {
+        provider_settings
+            .add(
+                profile,
+                ConfiguredProvider::Ollama {
+                    api_base: "http://127.0.0.1:11434/v1".to_owned(),
+                },
+            )
+            .unwrap();
+    }
     let mut runtime = AgentProfiles::new(
         "work",
         vec![
@@ -140,6 +155,8 @@ model = "qwen3:14b"
         providers: vec![ProfileProvider {
             provider: "ollama".to_owned(),
             model: "other".to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
@@ -152,6 +169,7 @@ model = "qwen3:14b"
     update_saved_profile(
         &mut catalog,
         &mut runtime,
+        Some(&mut provider_settings),
         "new",
         Profile {
             name: "renamed".to_owned(),
@@ -161,10 +179,19 @@ model = "qwen3:14b"
     .unwrap();
     assert!(runtime.clone_agent("renamed").is_none());
     assert_eq!(runtime.default_profile(), "work");
+    assert!(provider_settings.list("new").is_empty());
+    assert_eq!(provider_settings.list("renamed").len(), 1);
 
-    delete_saved_profile(&mut catalog, &mut runtime, "work").unwrap();
+    delete_saved_profile(
+        &mut catalog,
+        &mut runtime,
+        Some(&mut provider_settings),
+        "work",
+    )
+    .unwrap();
     assert_eq!(runtime.default_profile(), "alpha");
     assert!(runtime.clone_agent("work").is_none());
+    assert!(provider_settings.list("work").is_empty());
 }
 
 #[test]
@@ -180,19 +207,22 @@ api_base = "http://127.0.0.1:11434/v1"
 kind = "openai-compatible"
 api_base = "https://custom.example/v1"
 [profiles.alpha]
-provider = "ollama"
-model = "qwen3:8b"
+providers = [
+  { provider = "ollama", model = "qwen3:8b", enabled = true, default = true },
+  { provider = "ollama", model = "qwen3:14b", enabled = false },
+]
 "#,
     )
     .unwrap();
-    let runtime = AgentProfiles::new(
-        "alpha",
-        vec![
-            profile("alpha", "Alpha"),
-            profile("openai-account", "OpenAI"),
-        ],
-    )
-    .unwrap();
+    let mut alpha = profile("alpha", "Alpha");
+    alpha.0.providers.push(ProfileProvider {
+        provider: "ollama".to_owned(),
+        model: "qwen3:14b".to_owned(),
+        enabled: false,
+        is_default: false,
+    });
+    let runtime =
+        AgentProfiles::new("alpha", vec![alpha, profile("openai-account", "OpenAI")]).unwrap();
 
     let response = list_profiles(&runtime, Some(&catalog)).unwrap();
 
@@ -203,6 +233,18 @@ model = "qwen3:8b"
             .iter()
             .any(|profile| profile.name == "openai-account")
     );
+    let runtime_alpha = response
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "alpha")
+        .unwrap();
+    assert_eq!(runtime_alpha.providers.len(), 1);
+    let configured_alpha = response
+        .configured_profiles
+        .iter()
+        .find(|profile| profile.name == "alpha")
+        .unwrap();
+    assert_eq!(configured_alpha.providers.len(), 2);
 }
 
 #[tokio::test]
@@ -233,6 +275,8 @@ async fn desktop_non_streaming_response_releases_profiles_lock_while_provider_is
         providers: vec![ProfileProvider {
             provider: "test".to_owned(),
             model: "test".to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
@@ -295,6 +339,8 @@ async fn desktop_stream_command_forwards_typed_deltas() {
         providers: vec![ProfileProvider {
             provider: "test".to_owned(),
             model: "test".to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),

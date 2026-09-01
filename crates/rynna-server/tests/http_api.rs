@@ -96,6 +96,8 @@ fn profile(name: &str, reply: &'static str) -> (Profile, Agent) {
             providers: vec![ProfileProvider {
                 provider: format!("{name}-provider"),
                 model: format!("{name}-model"),
+                enabled: true,
+                is_default: true,
             }],
             active_skills: vec![format!("{name}-skill")],
             mcp_servers: vec![format!("{name}-mcp")],
@@ -477,7 +479,9 @@ async fn provider_settings_endpoints_start_empty_and_persist_crud() {
     let response = app
         .clone()
         .oneshot(local_provider_request(
-            Request::get("/v1/providers").body(Body::empty()).unwrap(),
+            Request::get("/v1/profiles/local/providers")
+                .body(Body::empty())
+                .unwrap(),
         ))
         .await
         .unwrap();
@@ -491,7 +495,7 @@ async fn provider_settings_endpoints_start_empty_and_persist_crud() {
     let response = app
         .clone()
         .oneshot(local_provider_request(
-            Request::post("/v1/providers")
+            Request::post("/v1/profiles/local/providers")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"kind":"ollama","api_base":"http://localhost:11434/v1"}"#,
@@ -505,7 +509,7 @@ async fn provider_settings_endpoints_start_empty_and_persist_crud() {
     let response = app
         .clone()
         .oneshot(local_provider_request(
-            Request::put("/v1/providers/ollama")
+            Request::put("/v1/profiles/local/providers/ollama")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"kind":"ollama","api_base":"http://localhost:11435/v1"}"#,
@@ -518,7 +522,7 @@ async fn provider_settings_endpoints_start_empty_and_persist_crud() {
 
     let reloaded = ProviderSettingsStore::load(&settings_path).unwrap();
     assert_eq!(
-        serde_json::to_value(reloaded.list()).unwrap(),
+        serde_json::to_value(reloaded.list("local")).unwrap(),
         serde_json::json!([{
             "kind": "ollama",
             "api_base": "http://localhost:11435/v1"
@@ -527,7 +531,7 @@ async fn provider_settings_endpoints_start_empty_and_persist_crud() {
 
     let response = app
         .oneshot(local_provider_request(
-            Request::delete("/v1/providers/ollama")
+            Request::delete("/v1/profiles/local/providers/ollama")
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -537,7 +541,7 @@ async fn provider_settings_endpoints_start_empty_and_persist_crud() {
     assert!(
         ProviderSettingsStore::load(&settings_path)
             .unwrap()
-            .list()
+            .list("local")
             .is_empty()
     );
 }
@@ -548,7 +552,7 @@ async fn provider_settings_reject_non_loopback_clients() {
     let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
     let profiles = AgentProfiles::new("local", vec![profile("local", "Local.")]).unwrap();
     let app = router_with_profiles_and_provider_settings(profiles, settings);
-    let mut request = Request::post("/v1/providers")
+    let mut request = Request::post("/v1/profiles/local/providers")
         .header("content-type", "application/json")
         .body(Body::from(
             r#"{"kind":"ollama","api_base":"http://localhost:11434/v1"}"#,
@@ -572,7 +576,7 @@ async fn provider_settings_report_persistence_failures_as_server_errors() {
     let profiles = AgentProfiles::new("local", vec![profile("local", "Local.")]).unwrap();
     let app = router_with_profiles_and_provider_settings(profiles, settings);
     let request = local_provider_request(
-        Request::post("/v1/providers")
+        Request::post("/v1/profiles/local/providers")
             .header("content-type", "application/json")
             .body(Body::from(
                 r#"{"kind":"ollama","api_base":"http://localhost:11434/v1"}"#,
@@ -612,7 +616,7 @@ async fn concurrent_openai_creates_authenticate_only_once() {
     );
     let request = |key: &'static str| {
         local_provider_request(
-            Request::post("/v1/providers")
+            Request::post("/v1/profiles/local/providers")
                 .header("content-type", "application/json")
                 .body(Body::from(format!(
                     r#"{{"kind":"openai","authentication":"api_key","api_key":"{key}"}}"#
@@ -679,7 +683,7 @@ async fn openai_provider_can_reuse_existing_chatgpt_credentials_without_starting
 
     let response = app
         .oneshot(local_provider_request(
-            Request::post("/v1/providers")
+            Request::post("/v1/profiles/local/providers")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"kind":"openai","authentication":"chatgpt","reuse_existing":true}"#,
@@ -754,6 +758,20 @@ model = "qwen3:8b"
         "work"
     );
 
+    let provider = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::post("/v1/profiles/work/providers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"ollama","api_base":"http://127.0.0.1:11434/v1"}"#,
+                ))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(provider.status(), StatusCode::OK);
+
     let updated = app
         .clone()
         .oneshot(local_provider_request(
@@ -761,7 +779,7 @@ model = "qwen3:8b"
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
-                        "name": "work",
+                        "name": "renamed-work",
                         "providers": [{ "provider": "ollama", "model": "gpt-5.2" }],
                         "active_skills": [],
                         "mcp_servers": [],
@@ -775,10 +793,30 @@ model = "qwen3:8b"
         .unwrap();
     assert_eq!(updated.status(), StatusCode::OK);
 
+    let renamed_providers = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::get("/v1/profiles/renamed-work/providers")
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(renamed_providers.status(), StatusCode::OK);
+    let renamed_providers = to_bytes(renamed_providers.into_body(), 4096).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&renamed_providers)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
     let deleted = app
         .clone()
         .oneshot(local_provider_request(
-            Request::delete("/v1/profiles/work")
+            Request::delete("/v1/profiles/renamed-work")
                 .body(Body::empty())
                 .unwrap(),
         ))
@@ -794,6 +832,9 @@ model = "qwen3:8b"
     let listed: Value = serde_json::from_slice(&listed_body).unwrap();
     assert_eq!(listed["profiles"].as_array().unwrap().len(), 1);
     assert_eq!(listed["profiles"][0]["name"], "alpha");
+    let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
+    assert!(settings.list("work").is_empty());
+    assert!(settings.list("renamed-work").is_empty());
 }
 
 #[tokio::test]
@@ -831,6 +872,8 @@ model = "qwen3:8b"
         providers: vec![ProfileProvider {
             provider: "ollama".to_owned(),
             model: "qwen3:8b".to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: vec!["sensitive-skill".to_owned()],
         mcp_servers: Vec::new(),
@@ -903,6 +946,8 @@ model = "qwen3:8b"
         providers: vec![ProfileProvider {
             provider: "ollama".to_owned(),
             model: "runtime-model".to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
@@ -947,6 +992,10 @@ model = "qwen3:8b"
         listed["profiles"][0]["capabilities"],
         serde_json::json!(["runtime-capability"])
     );
+    assert_eq!(
+        listed["configured_profiles"][0]["providers"][0]["model"],
+        "saved-model"
+    );
 }
 
 #[tokio::test]
@@ -965,13 +1014,22 @@ api_base = "http://127.0.0.1:11434/v1"
 kind = "openai-compatible"
 api_base = "https://custom.example/v1"
 [profiles.alpha]
-provider = "ollama"
-model = "qwen3:8b"
+providers = [
+  { provider = "ollama", model = "qwen3:8b", enabled = true, default = true },
+  { provider = "ollama", model = "qwen3:14b", enabled = false },
+]
 "#,
     )
     .unwrap();
     let catalog = ProfileCatalog::load(path).unwrap();
-    let profiles = AgentProfiles::new("alpha", vec![profile("alpha", "Alpha.")]).unwrap();
+    let mut alpha = profile("alpha", "Alpha.");
+    alpha.0.providers.push(ProfileProvider {
+        provider: "ollama".to_owned(),
+        model: "qwen3:14b".to_owned(),
+        enabled: false,
+        is_default: false,
+    });
+    let profiles = AgentProfiles::new("alpha", vec![alpha]).unwrap();
     let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
     let response = router_with_profiles_provider_settings_and_catalog(profiles, settings, catalog)
         .oneshot(Request::get("/v1/profiles").body(Body::empty()).unwrap())
@@ -983,6 +1041,17 @@ model = "qwen3:8b"
     assert_eq!(
         value["provider_ids"],
         serde_json::json!(["ollama", "unused-custom"])
+    );
+    assert_eq!(
+        value["profiles"][0]["providers"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        value["configured_profiles"][0]["providers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
 }
 
@@ -1155,6 +1224,8 @@ async fn non_streaming_response_releases_profiles_lock_while_provider_is_pending
         providers: vec![ProfileProvider {
             provider: "test".to_owned(),
             model: "test".to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),

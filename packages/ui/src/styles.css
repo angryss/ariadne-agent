@@ -179,6 +179,17 @@ select:disabled { opacity: .5; }
 .credential-choice { display: grid; gap: .65rem; margin: .25rem 0; padding: .85rem; border: 1px solid hsl(var(--border)); border-radius: .65rem; background: hsl(var(--muted) / .55); }
 .credential-choice p { margin: 0; color: hsl(var(--muted-foreground)); font-size: .86rem; }
 .credential-choice button[aria-pressed="true"] { border-color: hsl(var(--primary)); background: hsl(var(--accent)); color: hsl(var(--accent-foreground)); }
+.model-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.model-filters .profile-picker { max-width: none; }
+.model-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 1rem 0 .75rem; padding-bottom: .75rem; border-bottom: 1px solid hsl(var(--border)); }
+.model-list { display: grid; }
+.model-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 4rem; padding: .75rem .25rem; border-bottom: 1px solid hsl(var(--border)); }
+.model-row > label:first-child { display: flex; align-items: center; gap: .8rem; min-width: 0; }
+.model-row input { width: 1rem; height: 1rem; accent-color: hsl(var(--primary)); }
+.model-row span { display: grid; gap: .2rem; min-width: 0; }
+.model-row strong { overflow: hidden; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; text-overflow: ellipsis; }
+.model-row small { color: hsl(var(--muted-foreground)); }
+.default-model-control { display: flex; align-items: center; gap: .45rem; color: hsl(var(--muted-foreground)); font-size: .8rem; }
 
 .conversation { width: min(920px, 100%); min-height: 0; margin: 0 auto; display: grid; grid-template-rows: 1fr auto auto; padding: clamp(1rem, 4vw, 2.5rem); }
 .messages { display: flex; min-height: 15rem; flex-direction: column; justify-content: flex-end; gap: 1rem; padding-bottom: 2rem; }
@@ -214,6 +225,8 @@ select:disabled { opacity: .5; }
   .settings-sidebar nav { display: flex; flex-wrap: wrap; }
   .settings-sidebar nav button { width: auto; }
   .profile-provider-row { grid-template-columns: 1fr; align-items: stretch; }
+  .model-filters { grid-template-columns: 1fr; }
+  .model-toolbar { align-items: flex-start; flex-direction: column; }
   .profile-provider-row > button { justify-self: start; }
   .conversation { padding: 1rem; }
   .message { max-width: 92%; }

@@ -99,6 +99,7 @@ impl OpenAiCredentialSelection {
         self.0.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     fn set_reuse_existing(&self, reuse_existing: bool) {
         self.0.store(reuse_existing, Ordering::Release);
     }
@@ -435,6 +436,7 @@ pub struct ProfilesResponse {
     pub default_profile: String,
     pub provider_ids: Vec<String>,
     pub profiles: Vec<Profile>,
+    pub configured_profiles: Vec<Profile>,
 }
 
 pub async fn respond_with_agent(
@@ -525,8 +527,17 @@ pub fn list_profiles(
         ),
         None => (Vec::new(), Vec::new()),
     };
+    let configured_profiles = if catalog.is_some() {
+        catalog_profiles.clone()
+    } else {
+        runtime.profiles()
+    };
     let mut profiles = runtime.profiles();
-    for profile in catalog_profiles {
+    for profile in &mut profiles {
+        profile.providers.retain(|provider| provider.enabled);
+    }
+    for mut profile in catalog_profiles {
+        profile.providers.retain(|provider| provider.enabled);
         if !profiles
             .iter()
             .any(|candidate: &Profile| candidate.name == profile.name)
@@ -539,6 +550,7 @@ pub fn list_profiles(
         default_profile: runtime.default_profile().to_owned(),
         provider_ids,
         profiles,
+        configured_profiles,
     })
 }
 
@@ -588,23 +600,38 @@ async fn create_profile(
 async fn update_profile(
     catalog: State<'_, Mutex<ProfileCatalog>>,
     profiles: State<'_, Mutex<AgentProfiles>>,
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     name: String,
     profile: Profile,
 ) -> Result<Profile, String> {
     let mut catalog = catalog.lock().await;
     let mut runtime = profiles.lock().await;
-    update_saved_profile(&mut catalog, &mut runtime, &name, profile)
+    let mut provider_settings = provider_settings.lock().await;
+    update_saved_profile(
+        &mut catalog,
+        &mut runtime,
+        Some(&mut provider_settings),
+        &name,
+        profile,
+    )
 }
 
 #[tauri::command]
 async fn delete_profile(
     catalog: State<'_, Mutex<ProfileCatalog>>,
     profiles: State<'_, Mutex<AgentProfiles>>,
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     name: String,
 ) -> Result<(), String> {
     let mut catalog = catalog.lock().await;
     let mut runtime = profiles.lock().await;
-    delete_saved_profile(&mut catalog, &mut runtime, &name)
+    let mut provider_settings = provider_settings.lock().await;
+    delete_saved_profile(
+        &mut catalog,
+        &mut runtime,
+        Some(&mut provider_settings),
+        &name,
+    )
 }
 
 #[doc(hidden)]
@@ -622,18 +649,28 @@ pub fn create_saved_profile(
 pub fn update_saved_profile(
     catalog: &mut ProfileCatalog,
     _runtime: &mut AgentProfiles,
+    provider_settings: Option<&mut ProviderSettingsStore>,
     original_name: &str,
     profile: Profile,
 ) -> Result<Profile, String> {
-    catalog
+    let saved = catalog
         .update_profile(original_name, profile)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if saved.name != original_name
+        && let Some(provider_settings) = provider_settings
+    {
+        provider_settings
+            .rename_profile(original_name, &saved.name)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(saved)
 }
 
 #[doc(hidden)]
 pub fn delete_saved_profile(
     catalog: &mut ProfileCatalog,
     runtime: &mut AgentProfiles,
+    provider_settings: Option<&mut ProviderSettingsStore>,
     name: &str,
 ) -> Result<(), String> {
     if runtime.contains(name) && runtime.len() <= 1 {
@@ -642,6 +679,11 @@ pub fn delete_saved_profile(
     catalog
         .delete_profile(name)
         .map_err(|error| error.to_string())?;
+    if let Some(provider_settings) = provider_settings {
+        provider_settings
+            .delete_profile(name)
+            .map_err(|error| error.to_string())?;
+    }
     if runtime.contains(name) {
         runtime.remove(name).map_err(|error| error.to_string())?;
     }
@@ -667,35 +709,20 @@ async fn existing_openai_account() -> Result<OpenAiAccountResponse, String> {
 #[tauri::command]
 async fn connect_openai(
     authentication_lock: State<'_, OpenAiAuthenticationLock>,
-    credential_selection: State<'_, OpenAiCredentialSelection>,
-    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     request: OpenAiConnectRequest,
 ) -> Result<OpenAiAccountResponse, String> {
     let _authentication = authentication_lock.acquire().await;
-    let provider_authentication = match &request {
-        OpenAiConnectRequest::Chatgpt => OpenAiAuthentication::Chatgpt,
-        OpenAiConnectRequest::ApiKey { .. } => OpenAiAuthentication::ApiKey,
-    };
-    let account =
-        connect_openai_with_program_and_home(codex_program(), configured_codex_home()?, request)
-            .await?;
-    let mut store = provider_settings.lock().await;
-    store.refresh().map_err(|error| error.to_string())?;
-    synchronize_connected_openai_provider(
-        &mut store,
-        &credential_selection,
-        provider_authentication,
-    )?;
-    Ok(account)
+    connect_openai_with_program_and_home(codex_program(), configured_codex_home()?, request).await
 }
 
 #[tauri::command]
 async fn list_providers(
     provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    profile: String,
 ) -> Result<Vec<ConfiguredProvider>, String> {
     let mut store = provider_settings.lock().await;
     store.refresh().map_err(|error| error.to_string())?;
-    Ok(store.list())
+    Ok(store.list(&profile))
 }
 
 async fn configured_provider_from_input(
@@ -815,14 +842,14 @@ async fn verify_existing_openai_credentials_with_program(
 #[tauri::command]
 async fn create_provider(
     authentication_lock: State<'_, OpenAiAuthenticationLock>,
-    credential_selection: State<'_, OpenAiCredentialSelection>,
     provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     provider: ProviderInput,
+    profile: String,
 ) -> Result<ConfiguredProvider, String> {
     let _authentication = authentication_lock.acquire().await;
     let mut store = provider_settings.lock().await;
     store.refresh().map_err(|error| error.to_string())?;
-    if store.get(provider.kind()).is_some() {
+    if store.get(&profile, provider.kind()).is_some() {
         return Err(format!(
             "provider `{}` is already configured",
             provider.kind()
@@ -830,58 +857,56 @@ async fn create_provider(
     }
     let provider = configured_provider_from_input(provider).await?;
     store
-        .add(provider.clone())
+        .add(&profile, provider.clone())
         .map_err(|error| error.to_string())?;
-    update_openai_credential_selection(&credential_selection, &provider);
     Ok(provider)
 }
 
 #[tauri::command]
 async fn update_provider(
     authentication_lock: State<'_, OpenAiAuthenticationLock>,
-    credential_selection: State<'_, OpenAiCredentialSelection>,
     provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     provider: ProviderInput,
+    profile: String,
 ) -> Result<ConfiguredProvider, String> {
     let _authentication = authentication_lock.acquire().await;
     let mut store = provider_settings.lock().await;
     store.refresh().map_err(|error| error.to_string())?;
-    if store.get(provider.kind()).is_none() {
+    if store.get(&profile, provider.kind()).is_none() {
         return Err(format!("provider `{}` is not configured", provider.kind()));
     }
     let provider = configured_provider_from_input(provider).await?;
     store
-        .update(provider.clone())
+        .update(&profile, provider.clone())
         .map_err(|error| error.to_string())?;
-    update_openai_credential_selection(&credential_selection, &provider);
     Ok(provider)
 }
 
 #[tauri::command]
 async fn delete_provider(
-    credential_selection: State<'_, OpenAiCredentialSelection>,
     provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     kind: String,
+    profile: String,
 ) -> Result<(), String> {
     provider_settings
         .lock()
         .await
-        .delete(&kind)
+        .delete(&profile, &kind)
         .map_err(|error| error.to_string())?;
-    if kind == "openai" {
-        credential_selection.set_reuse_existing(false);
-    }
     Ok(())
 }
 
 pub fn run() {
-    let provider_settings = configured_provider_settings()
-        .unwrap_or_else(|error| panic!("failed to load Rynna provider settings: {error}"));
-    let credential_selection = OpenAiCredentialSelection::new(
-        openai_account_reuses_existing_credentials(&provider_settings),
-    );
     let catalog = configured_catalog()
         .unwrap_or_else(|error| panic!("failed to load Rynna configuration: {error}"));
+    let provider_settings = configured_provider_settings()
+        .unwrap_or_else(|error| panic!("failed to load Rynna provider settings: {error}"));
+    let credential_profile = optional_env("RYNNA_PROFILE")
+        .unwrap_or_else(|error| panic!("failed to select Rynna profile: {error}"))
+        .unwrap_or_else(|| catalog.default_profile().to_owned());
+    let credential_selection = OpenAiCredentialSelection::new(
+        openai_account_reuses_existing_credentials(&provider_settings, &credential_profile),
+    );
     let configured = configured_profiles(credential_selection.clone(), &catalog)
         .unwrap_or_else(|error| panic!("failed to configure Rynna model provider: {error}"));
 
@@ -976,6 +1001,8 @@ fn configured_profiles(
         providers: vec![ProfileProvider {
             provider: "openai".to_owned(),
             model: "Codex default".to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
@@ -997,9 +1024,12 @@ fn configured_profiles(
     AgentProfiles::new(default_profile, configured).map_err(|error| error.to_string())
 }
 
-fn openai_account_reuses_existing_credentials(provider_settings: &ProviderSettingsStore) -> bool {
+fn openai_account_reuses_existing_credentials(
+    provider_settings: &ProviderSettingsStore,
+    profile: &str,
+) -> bool {
     provider_settings
-        .get("openai")
+        .get(profile, "openai")
         .is_some_and(configured_provider_reuses_existing_credentials)
 }
 
@@ -1011,33 +1041,6 @@ fn configured_provider_reuses_existing_credentials(provider: &ConfiguredProvider
             reuse_existing: true,
         }
     )
-}
-
-fn update_openai_credential_selection(
-    credential_selection: &OpenAiCredentialSelection,
-    provider: &ConfiguredProvider,
-) {
-    if matches!(provider, ConfiguredProvider::OpenAi { .. }) {
-        credential_selection
-            .set_reuse_existing(configured_provider_reuses_existing_credentials(provider));
-    }
-}
-
-fn synchronize_connected_openai_provider(
-    provider_settings: &mut ProviderSettingsStore,
-    credential_selection: &OpenAiCredentialSelection,
-    authentication: OpenAiAuthentication,
-) -> Result<(), String> {
-    if provider_settings.get("openai").is_some() {
-        provider_settings
-            .update(ConfiguredProvider::OpenAi {
-                authentication,
-                reuse_existing: false,
-            })
-            .map_err(|error| error.to_string())?;
-    }
-    credential_selection.set_reuse_existing(false);
-    Ok(())
 }
 
 fn optional_env(name: &str) -> Result<Option<String>, String> {
@@ -1207,7 +1210,6 @@ mod tests {
         MAX_CODEX_MESSAGE_BYTES, OpenAiAuthenticationLock, OpenAiCredentialSelection,
         authenticate_anthropic_subscription_with_program, decode_optional_env,
         openai_account_reuses_existing_credentials, read_codex_message, selected_openai_codex_home,
-        synchronize_connected_openai_provider, update_openai_credential_selection,
         verify_existing_openai_credentials_with_program, write_codex_message,
     };
 
@@ -1295,24 +1297,21 @@ mod tests {
         let mut settings =
             ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
         settings
-            .add(ConfiguredProvider::OpenAi {
-                authentication: OpenAiAuthentication::Chatgpt,
-                reuse_existing: true,
-            })
+            .add(
+                "work",
+                ConfiguredProvider::OpenAi {
+                    authentication: OpenAiAuthentication::Chatgpt,
+                    reuse_existing: true,
+                },
+            )
             .unwrap();
 
-        assert!(openai_account_reuses_existing_credentials(&settings));
-    }
-
-    #[test]
-    fn openai_credential_selection_updates_without_restarting() {
-        let selection = OpenAiCredentialSelection::new(false);
-
-        assert!(!selection.reuses_existing());
-        selection.set_reuse_existing(true);
-        assert!(selection.reuses_existing());
-        selection.set_reuse_existing(false);
-        assert!(!selection.reuses_existing());
+        assert!(openai_account_reuses_existing_credentials(
+            &settings, "work"
+        ));
+        assert!(!openai_account_reuses_existing_credentials(
+            &settings, "personal"
+        ));
     }
 
     #[test]
@@ -1327,50 +1326,6 @@ mod tests {
 
         selection.set_reuse_existing(true);
         assert_eq!(selected_openai_codex_home(&selection, &private_home), None);
-    }
-
-    #[test]
-    fn non_openai_provider_changes_preserve_openai_credential_selection() {
-        let selection = OpenAiCredentialSelection::new(true);
-
-        update_openai_credential_selection(
-            &selection,
-            &ConfiguredProvider::Ollama {
-                api_base: "http://127.0.0.1:11434/v1".to_owned(),
-            },
-        );
-
-        assert!(selection.reuses_existing());
-    }
-
-    #[test]
-    fn direct_openai_connection_switches_a_reused_provider_to_private_credentials() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut settings =
-            ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
-        settings
-            .add(ConfiguredProvider::OpenAi {
-                authentication: OpenAiAuthentication::Chatgpt,
-                reuse_existing: true,
-            })
-            .unwrap();
-        let selection = OpenAiCredentialSelection::new(true);
-
-        synchronize_connected_openai_provider(
-            &mut settings,
-            &selection,
-            OpenAiAuthentication::Chatgpt,
-        )
-        .unwrap();
-
-        assert!(!selection.reuses_existing());
-        assert!(matches!(
-            settings.get("openai"),
-            Some(ConfiguredProvider::OpenAi {
-                authentication: OpenAiAuthentication::Chatgpt,
-                reuse_existing: false,
-            })
-        ));
     }
 
     #[test]

@@ -24,6 +24,8 @@ export type CompletionDeltaHandler = (delta: CompletionDelta) => void;
 export interface ProfileProvider {
   provider: string;
   model: string;
+  enabled?: boolean;
+  default?: boolean;
 }
 
 export interface Profile {
@@ -38,6 +40,7 @@ export interface ProfileCatalog {
   default_profile: string;
   provider_ids: string[];
   profiles: Profile[];
+  configured_profiles: Profile[];
 }
 
 export type OpenAiAccount =
@@ -69,8 +72,8 @@ export interface AgentClient {
   getOpenAiAccount?(): Promise<OpenAiAccount>;
   getExistingOpenAiAccount?(): Promise<OpenAiAccount>;
   connectOpenAi?(request: ConnectOpenAiRequest): Promise<OpenAiAccount>;
-  listProviders?(): Promise<ConfiguredProvider[]>;
-  createProvider?(provider: ProviderInput): Promise<ConfiguredProvider>;
-  updateProvider?(provider: ProviderInput): Promise<ConfiguredProvider>;
-  deleteProvider?(kind: ConfiguredProvider['kind']): Promise<void>;
+  listProviders?(profile: string): Promise<ConfiguredProvider[]>;
+  createProvider?(provider: ProviderInput, profile: string): Promise<ConfiguredProvider>;
+  updateProvider?(provider: ProviderInput, profile: string): Promise<ConfiguredProvider>;
+  deleteProvider?(kind: ConfiguredProvider['kind'], profile: string): Promise<void>;
 }

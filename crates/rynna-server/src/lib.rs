@@ -49,6 +49,8 @@ pub fn router(agent: Agent) -> Router {
         providers: vec![ProfileProvider {
             provider: "configured".to_owned(),
             model: "configured".to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
@@ -136,13 +138,13 @@ fn router_with_runtime(
             get(existing_openai_account).fallback(api_method_not_allowed),
         )
         .route(
-            "/v1/providers",
+            "/v1/profiles/{profile}/providers",
             get(list_provider_settings)
                 .post(create_provider)
                 .fallback(api_method_not_allowed),
         )
         .route(
-            "/v1/providers/{kind}",
+            "/v1/profiles/{profile}/providers/{kind}",
             axum::routing::put(update_provider)
                 .delete(delete_provider)
                 .fallback(api_method_not_allowed),
@@ -210,6 +212,8 @@ pub fn router_with_web(agent: Agent, web_dir: impl AsRef<Path>) -> Router {
         providers: vec![ProfileProvider {
             provider: "configured".to_owned(),
             model: "configured".to_owned(),
+            enabled: true,
+            is_default: true,
         }],
         active_skills: Vec::new(),
         mcp_servers: Vec::new(),
@@ -273,6 +277,7 @@ struct ProfilesResponse {
     default_profile: String,
     provider_ids: Vec<String>,
     profiles: Vec<Profile>,
+    configured_profiles: Vec<Profile>,
 }
 
 async fn list_profiles(State(state): State<AppState>) -> Result<Json<ProfilesResponse>, ApiError> {
@@ -292,8 +297,13 @@ async fn list_profiles(State(state): State<AppState>) -> Result<Json<ProfilesRes
     };
     let runtime = state.profiles.lock().await;
     let (provider_ids, catalog_profiles) = catalog_metadata.unwrap_or_default();
+    let configured_profiles = catalog_profiles.clone();
     let mut profiles = runtime.profiles();
-    for profile in catalog_profiles {
+    for profile in &mut profiles {
+        profile.providers.retain(|provider| provider.enabled);
+    }
+    for mut profile in catalog_profiles {
+        profile.providers.retain(|provider| provider.enabled);
         if !profiles
             .iter()
             .any(|candidate| candidate.name == profile.name)
@@ -306,6 +316,7 @@ async fn list_profiles(State(state): State<AppState>) -> Result<Json<ProfilesRes
         default_profile: runtime.default_profile().to_owned(),
         provider_ids,
         profiles,
+        configured_profiles,
     }))
 }
 
@@ -390,6 +401,15 @@ async fn update_saved_profile(
     let saved = catalog
         .update_profile(&name, profile)
         .map_err(catalog_error)?;
+    if saved.name != name
+        && let Some(provider_settings) = &state.provider_settings
+    {
+        provider_settings
+            .lock()
+            .await
+            .rename_profile(&name, &saved.name)
+            .map_err(provider_store_error)?;
+    }
     Ok(Json(saved))
 }
 
@@ -398,15 +418,25 @@ async fn delete_saved_profile(
     AxumPath(name): AxumPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let mut catalog = catalog_store(&state)?.lock().await;
-    let mut runtime = state.profiles.lock().await;
-    if runtime.contains(&name) && runtime.len() <= 1 {
-        return Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_profile",
-            message: "the last runtime profile cannot be deleted before restart".to_owned(),
-        });
+    {
+        let runtime = state.profiles.lock().await;
+        if runtime.contains(&name) && runtime.len() <= 1 {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "invalid_profile",
+                message: "the last runtime profile cannot be deleted before restart".to_owned(),
+            });
+        }
     }
     catalog.delete_profile(&name).map_err(catalog_error)?;
+    if let Some(provider_settings) = &state.provider_settings {
+        provider_settings
+            .lock()
+            .await
+            .delete_profile(&name)
+            .map_err(provider_store_error)?;
+    }
+    let mut runtime = state.profiles.lock().await;
     if runtime.contains(&name) {
         runtime.remove(&name).map_err(runtime_profile_error)?;
     }
@@ -476,35 +506,42 @@ fn provider_store(state: &AppState) -> Result<&Arc<Mutex<ProviderSettingsStore>>
 
 async fn list_provider_settings(
     State(state): State<AppState>,
+    AxumPath(profile): AxumPath<String>,
 ) -> Result<Json<Vec<ConfiguredProvider>>, ApiError> {
+    ensure_known_profile(&state, &profile).await?;
     let mut store = provider_store(&state)?.lock().await;
     store.refresh().map_err(provider_store_error)?;
-    Ok(Json(store.list()))
+    Ok(Json(store.list(&profile)))
 }
 
 async fn create_provider(
     State(state): State<AppState>,
+    AxumPath(profile): AxumPath<String>,
     request: Result<Json<ProviderInput>, JsonRejection>,
 ) -> Result<Json<ConfiguredProvider>, ApiError> {
+    ensure_known_profile(&state, &profile).await?;
     let Json(input) = request.map_err(ApiError::from)?;
     let mut store = provider_store(&state)?.lock().await;
     store.refresh().map_err(provider_store_error)?;
-    if store.get(input.kind()).is_some() {
+    if store.get(&profile, input.kind()).is_some() {
         return Err(provider_settings_error(format!(
             "provider `{}` is already configured",
             input.kind()
         )));
     }
     let provider = configured_provider(&state, input).await?;
-    store.add(provider.clone()).map_err(provider_store_error)?;
+    store
+        .add(&profile, provider.clone())
+        .map_err(provider_store_error)?;
     Ok(Json(provider))
 }
 
 async fn update_provider(
     State(state): State<AppState>,
-    AxumPath(kind): AxumPath<String>,
+    AxumPath((profile, kind)): AxumPath<(String, String)>,
     request: Result<Json<ProviderInput>, JsonRejection>,
 ) -> Result<Json<ConfiguredProvider>, ApiError> {
+    ensure_known_profile(&state, &profile).await?;
     let Json(input) = request.map_err(ApiError::from)?;
     if kind != input.kind() {
         return Err(provider_settings_error(
@@ -513,28 +550,44 @@ async fn update_provider(
     }
     let mut store = provider_store(&state)?.lock().await;
     store.refresh().map_err(provider_store_error)?;
-    if store.get(&kind).is_none() {
+    if store.get(&profile, &kind).is_none() {
         return Err(provider_settings_error(format!(
             "provider `{kind}` is not configured"
         )));
     }
     let provider = configured_provider(&state, input).await?;
     store
-        .update(provider.clone())
+        .update(&profile, provider.clone())
         .map_err(provider_store_error)?;
     Ok(Json(provider))
 }
 
 async fn delete_provider(
     State(state): State<AppState>,
-    AxumPath(kind): AxumPath<String>,
+    AxumPath((profile, kind)): AxumPath<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
+    ensure_known_profile(&state, &profile).await?;
     provider_store(&state)?
         .lock()
         .await
-        .delete(&kind)
+        .delete(&profile, &kind)
         .map_err(provider_store_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn ensure_known_profile(state: &AppState, profile: &str) -> Result<(), ApiError> {
+    let exists = if let Some(catalog) = &state.catalog {
+        catalog.lock().await.resolve(profile).is_ok()
+    } else {
+        state.profiles.lock().await.contains(profile)
+    };
+    if exists {
+        Ok(())
+    } else {
+        Err(provider_settings_error(format!(
+            "profile `{profile}` is not defined"
+        )))
+    }
 }
 
 async fn configured_provider(

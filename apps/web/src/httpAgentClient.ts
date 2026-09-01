@@ -30,8 +30,8 @@ export class HttpAgentClient implements AgentClient {
     this.fetcher = fetcher;
   }
 
-  async listProviders(): Promise<ConfiguredProvider[]> {
-    const body = await this.providerRequest(this.providersEndpoint, 'GET');
+  async listProviders(profile: string): Promise<ConfiguredProvider[]> {
+    const body = await this.providerRequest(this.profileProvidersEndpoint(profile), 'GET');
     if (!Array.isArray(body) || !body.every(isConfiguredProvider)) {
       throw new Error('Rynna API returned invalid provider data');
     }
@@ -49,17 +49,27 @@ export class HttpAgentClient implements AgentClient {
     return body;
   }
 
-  async createProvider(provider: ProviderInput): Promise<ConfiguredProvider> {
-    return this.savedProvider(this.providersEndpoint, 'POST', provider);
+  async createProvider(provider: ProviderInput, profile: string): Promise<ConfiguredProvider> {
+    return this.savedProvider(this.profileProvidersEndpoint(profile), 'POST', provider);
   }
 
-  async updateProvider(provider: ProviderInput): Promise<ConfiguredProvider> {
-    return this.savedProvider(`${this.providersEndpoint}/${provider.kind}`, 'PUT', provider);
+  async updateProvider(provider: ProviderInput, profile: string): Promise<ConfiguredProvider> {
+    return this.savedProvider(
+      `${this.profileProvidersEndpoint(profile)}/${provider.kind}`,
+      'PUT',
+      provider,
+    );
   }
 
-  async deleteProvider(kind: ConfiguredProvider['kind']): Promise<void> {
-    const response = await this.fetcher(`${this.providersEndpoint}/${kind}`, { method: 'DELETE' });
+  async deleteProvider(kind: ConfiguredProvider['kind'], profile: string): Promise<void> {
+    const response = await this.fetcher(`${this.profileProvidersEndpoint(profile)}/${kind}`, {
+      method: 'DELETE',
+    });
     if (!response.ok) throw new Error(`Rynna API returned ${response.status}`);
+  }
+
+  private profileProvidersEndpoint(profile: string): string {
+    return `${this.profilesEndpoint}/${encodeURIComponent(profile)}/providers`;
   }
 
   private async savedProvider(
@@ -353,7 +363,10 @@ function isProfileCatalog(value: unknown): value is ProfileCatalog {
       value.provider_ids.every((provider) => typeof provider === 'string') &&
       'profiles' in value &&
       Array.isArray(value.profiles) &&
-      value.profiles.every(isProfile),
+      value.profiles.every(isProfile) &&
+      'configured_profiles' in value &&
+      Array.isArray(value.configured_profiles) &&
+      value.configured_profiles.every(isProfile),
   );
 }
 
