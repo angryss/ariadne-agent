@@ -178,11 +178,12 @@ async fn saving_and_disabling_change_live_sync_and_stream_requests_and_survive_r
             .0,
         StatusCode::OK
     );
-    assert!(
-        model.0.lock().unwrap()[0].messages[0]
-            .content
-            .contains("Remembered fact")
-    );
+    {
+        let requests = model.0.lock().unwrap();
+        assert_eq!(requests[0].messages[0].content, "policy");
+        assert_eq!(requests[0].messages[1].role, rynna_core::Role::User);
+        assert!(requests[0].messages[1].content.contains("Remembered fact"));
+    }
     assert_eq!(calls.lock().unwrap().len(), 2);
     let restarted = app(&path, model.clone());
     let stream = Request::post("/v1/respond/stream")
