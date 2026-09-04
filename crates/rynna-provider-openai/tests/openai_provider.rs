@@ -582,6 +582,100 @@ async fn complete_serializes_assistant_tool_calls_and_tool_results() {
 }
 
 #[tokio::test]
+async fn complete_preserves_reasoning_details_across_tool_turns() {
+    let server = MockServer::start().await;
+    let reasoning_details = vec![json!({
+        "type": "reasoning.encrypted",
+        "data": "opaque-reasoning",
+        "id": "reasoning-1",
+        "format": "openai-responses-v1",
+        "index": 0
+    })];
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Read it"}]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_details": reasoning_details,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                }
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Read it"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_details": reasoning_details,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"README.md\"}"
+                        }
+                    }]
+                },
+                {"role": "tool", "content": "# Rynna", "tool_call_id": "call-1"}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "Done"}}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        OpenAiCompatibleProvider::new(format!("{}/v1", server.uri()), "test-model", None).unwrap();
+
+    let first = provider
+        .complete(CompletionRequest {
+            messages: vec![Message::user("Read it")],
+            tools: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        first.message.provider_context,
+        Some(ProviderContext::OpenAiChatReasoningDetails(
+            reasoning_details.clone()
+        ))
+    );
+    provider
+        .complete(CompletionRequest {
+            messages: vec![
+                Message::user("Read it"),
+                first.message,
+                Message::tool("call-1", "# Rynna"),
+            ],
+            tools: Vec::new(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn complete_stream_distinguishes_reasoning_from_user_facing_content() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -675,6 +769,61 @@ async fn complete_stream_accumulates_fragmented_tool_calls() {
     assert_eq!(
         completion.message.tool_calls[0].arguments,
         json!({"path": "README.md"})
+    );
+}
+
+#[tokio::test]
+async fn complete_stream_preserves_reasoning_detail_chunks() {
+    let server = MockServer::start().await;
+    let reasoning_details = vec![
+        json!({
+            "type": "reasoning.summary",
+            "summary": "Inspect the project",
+            "id": "reasoning-1",
+            "format": "anthropic-claude-v1",
+            "index": 0
+        }),
+        json!({
+            "type": "reasoning.encrypted",
+            "data": "opaque-reasoning",
+            "id": "reasoning-2",
+            "format": "anthropic-claude-v1",
+            "index": 1
+        }),
+    ];
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.summary\",\"summary\":\"Inspect the project\",\"id\":\"reasoning-1\",\"format\":\"anthropic-claude-v1\",\"index\":0}]}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"opaque-reasoning\",\"id\":\"reasoning-2\",\"format\":\"anthropic-claude-v1\",\"index\":1}],\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]}}]}\n\n",
+                    "data: [DONE]\n\n"
+                )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        OpenAiCompatibleProvider::new(format!("{}/v1", server.uri()), "test-model", None).unwrap();
+
+    let completion = provider
+        .complete_stream(
+            CompletionRequest {
+                messages: vec![Message::user("Inspect it")],
+                tools: Vec::new(),
+            },
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        completion.message.provider_context,
+        Some(ProviderContext::OpenAiChatReasoningDetails(
+            reasoning_details
+        ))
     );
 }
 

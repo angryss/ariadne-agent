@@ -32,6 +32,7 @@ pub struct Message {
 #[serde(tag = "provider", content = "state", rename_all = "snake_case")]
 pub enum ProviderContext {
     OpenAi(Vec<serde_json::Value>),
+    OpenAiChatReasoningDetails(Vec<serde_json::Value>),
     AnthropicCompaction(Option<String>),
     ManagedToken(String),
 }
@@ -49,7 +50,11 @@ fn has_direct_compaction(message: &Message) -> bool {
 fn has_direct_provider_context(message: &Message) -> bool {
     matches!(
         message.provider_context,
-        Some(ProviderContext::OpenAi(_) | ProviderContext::AnthropicCompaction(_))
+        Some(
+            ProviderContext::OpenAi(_)
+                | ProviderContext::OpenAiChatReasoningDetails(_)
+                | ProviderContext::AnthropicCompaction(_)
+        )
     )
 }
 

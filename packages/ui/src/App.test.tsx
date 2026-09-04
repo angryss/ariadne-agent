@@ -454,6 +454,7 @@ describe('App', () => {
           respond: vi.fn(),
           listProviders: vi.fn().mockResolvedValue([
             { kind: 'openai' as const, authentication: 'chatgpt' as const },
+            { kind: 'openrouter' as const },
             { kind: 'ollama' as const, api_base: 'http://localhost:11434/v1' },
             { kind: 'anthropic' as const, authentication: 'subscription' as const },
           ]),
@@ -467,6 +468,7 @@ describe('App', () => {
       'Anthropic',
       'Ollama',
       'OpenAI',
+      'OpenRouter',
     ]);
   });
 
@@ -490,6 +492,7 @@ describe('App', () => {
       'Anthropic',
       'Ollama',
       'OpenAI',
+      'OpenRouter',
     ]);
 
     await user.keyboard('{Enter}');
@@ -607,6 +610,32 @@ describe('App', () => {
       'default',
     );
     expect(screen.queryByDisplayValue('sk-secret')).not.toBeInTheDocument();
+  });
+
+  it('adds OpenRouter without collecting or persisting its API key', async () => {
+    const createProvider = vi.fn().mockImplementation(async (provider) => provider);
+    const user = userEvent.setup();
+    render(
+      <App
+        client={{
+          respond: vi.fn(),
+          listProviders: vi.fn().mockResolvedValue([]),
+          createProvider,
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Add provider' }));
+    const providerType = screen.getByRole('combobox', { name: 'Provider type' });
+    await user.clear(providerType);
+    await user.type(providerType, 'router');
+    await user.keyboard('{Enter}');
+
+    expect(screen.getByText(/Set OPENROUTER_API_KEY/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/OpenRouter API key/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save provider' }));
+    expect(createProvider).toHaveBeenCalledWith({ kind: 'openrouter' }, 'default');
   });
 
   it('asks before reusing existing ChatGPT credentials for a provider', async () => {

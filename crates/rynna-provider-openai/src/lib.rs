@@ -174,6 +174,8 @@ struct OpenAiRequestMessage {
     tool_calls: Vec<OpenAiToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    reasoning_details: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -225,6 +227,8 @@ struct OpenAiResponseMessage {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<OpenAiResponseToolCall>,
+    #[serde(default)]
+    reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -254,6 +258,8 @@ struct StreamDelta {
     content: Option<String>,
     reasoning_content: Option<String>,
     reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_details: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     tool_calls: Vec<OpenAiStreamToolCall>,
 }
@@ -407,6 +413,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let mut pending = Vec::new();
         let mut content = String::new();
         let mut tool_calls = BTreeMap::new();
+        let mut reasoning_details = Vec::new();
         let mut received = 0usize;
         let mut done = false;
         while let Some(chunk) = response
@@ -425,7 +432,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
-                if process_sse_line(&line, &mut content, &mut tool_calls, on_delta)? {
+                if process_sse_line(
+                    &line,
+                    &mut content,
+                    &mut tool_calls,
+                    &mut reasoning_details,
+                    on_delta,
+                )? {
                     done = true;
                     pending.clear();
                     break;
@@ -436,7 +449,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
             }
         }
         if !done && !pending.is_empty() {
-            done = process_sse_line(&pending, &mut content, &mut tool_calls, on_delta)?;
+            done = process_sse_line(
+                &pending,
+                &mut content,
+                &mut tool_calls,
+                &mut reasoning_details,
+                on_delta,
+            )?;
         }
         if !done {
             return Err(ProviderError::new(
@@ -444,7 +463,11 @@ impl ModelProvider for OpenAiCompatibleProvider {
             ));
         }
 
-        Ok(Completion::new(stream_message(content, tool_calls)?))
+        Ok(Completion::new(stream_message(
+            content,
+            tool_calls,
+            reasoning_details,
+        )?))
     }
 }
 
@@ -603,19 +626,31 @@ fn chat_completion_request(
             .messages
             .into_iter()
             .map(|message| {
-                let content = if message.role == Role::Assistant
-                    && !message.tool_calls.is_empty()
-                    && message.content.is_empty()
-                {
-                    None
-                } else {
-                    Some(message.content)
+                let Message {
+                    role,
+                    content,
+                    tool_calls,
+                    tool_call_id,
+                    provider_context,
+                } = message;
+                let content =
+                    if role == Role::Assistant && !tool_calls.is_empty() && content.is_empty() {
+                        None
+                    } else {
+                        Some(content)
+                    };
+                let reasoning_details = match provider_context {
+                    Some(ProviderContext::OpenAiChatReasoningDetails(details))
+                        if role == Role::Assistant =>
+                    {
+                        details
+                    }
+                    _ => Vec::new(),
                 };
                 OpenAiRequestMessage {
-                    role: message.role,
+                    role,
                     content,
-                    tool_calls: message
-                        .tool_calls
+                    tool_calls: tool_calls
                         .into_iter()
                         .map(|call| OpenAiToolCall {
                             id: call.id,
@@ -626,7 +661,8 @@ fn chat_completion_request(
                             },
                         })
                         .collect(),
-                    tool_call_id: message.tool_call_id,
+                    tool_call_id,
+                    reasoning_details,
                 }
             })
             .collect(),
@@ -648,8 +684,13 @@ fn openai_tool(definition: ToolDefinition) -> OpenAiTool {
 }
 
 fn response_message(message: OpenAiResponseMessage) -> Result<Message, ProviderError> {
-    let tool_calls = message
-        .tool_calls
+    let OpenAiResponseMessage {
+        role,
+        content,
+        tool_calls,
+        reasoning_details,
+    } = message;
+    let tool_calls = tool_calls
         .into_iter()
         .map(|call| {
             let arguments = serde_json::from_str(&call.function.arguments).map_err(|error| {
@@ -659,17 +700,20 @@ fn response_message(message: OpenAiResponseMessage) -> Result<Message, ProviderE
         })
         .collect::<Result<Vec<_>, ProviderError>>()?;
     Ok(Message {
-        role: message.role,
-        content: message.content.unwrap_or_default(),
+        role,
+        content: content.unwrap_or_default(),
         tool_calls,
         tool_call_id: None,
-        provider_context: None,
+        provider_context: reasoning_details
+            .filter(|details| !details.is_empty())
+            .map(ProviderContext::OpenAiChatReasoningDetails),
     })
 }
 
 fn stream_message(
     content: String,
     pending: BTreeMap<usize, PendingToolCall>,
+    reasoning_details: Vec<serde_json::Value>,
 ) -> Result<Message, ProviderError> {
     let tool_calls = pending
         .into_values()
@@ -688,7 +732,9 @@ fn stream_message(
         content,
         tool_calls,
         tool_call_id: None,
-        provider_context: None,
+        provider_context: (!reasoning_details.is_empty()).then_some(
+            ProviderContext::OpenAiChatReasoningDetails(reasoning_details),
+        ),
     })
 }
 
@@ -696,6 +742,7 @@ fn process_sse_line(
     line: &[u8],
     content: &mut String,
     tool_calls: &mut BTreeMap<usize, PendingToolCall>,
+    reasoning_details: &mut Vec<serde_json::Value>,
     on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
 ) -> Result<bool, ProviderError> {
     let Some(data) = line.strip_prefix(b"data:") else {
@@ -711,6 +758,7 @@ fn process_sse_line(
     let chunk: ChatCompletionChunk = serde_json::from_slice(data)
         .map_err(|error| ProviderError::new(format!("invalid provider stream: {error}")))?;
     for choice in chunk.choices {
+        reasoning_details.extend(choice.delta.reasoning_details.unwrap_or_default());
         for delta in choice.delta.tool_calls {
             let pending = tool_calls.entry(delta.index).or_default();
             if let Some(id) = delta.id {

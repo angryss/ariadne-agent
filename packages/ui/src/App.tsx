@@ -33,6 +33,7 @@ const PROVIDER_KINDS: readonly ConfiguredProvider['kind'][] = [
   'anthropic',
   'ollama',
   'openai',
+  'openrouter',
 ];
 
 function sortedProfiles(profiles: Profile[]): Profile[] {
@@ -471,7 +472,7 @@ export function App({ client }: AppProps) {
   }
 
   function beginAddProvider() {
-    const availableKind = (['ollama', 'openai', 'anthropic'] as const).find(
+    const availableKind = (['ollama', 'openai', 'openrouter', 'anthropic'] as const).find(
       (kind) => !providerSettings.some((provider) => provider.kind === kind),
     ) ?? 'ollama';
     setEditingProvider(availableKind);
@@ -496,7 +497,7 @@ export function App({ client }: AppProps) {
     setActiveProviderKind(provider.kind);
     if (provider.kind === 'ollama') setOllamaApiBase(provider.api_base);
     else if (provider.kind === 'openai') setOpenAiAuthentication(provider.authentication);
-    else setAnthropicAuthentication(provider.authentication);
+    else if (provider.kind === 'anthropic') setAnthropicAuthentication(provider.authentication);
     setReuseExistingChatgpt(null);
     setProviderApiKey('');
   }
@@ -530,6 +531,8 @@ export function App({ client }: AppProps) {
     const input: ProviderInput =
       providerKind === 'ollama'
         ? { kind: 'ollama', api_base: ollamaApiBase.trim() }
+        : providerKind === 'openrouter'
+          ? { kind: 'openrouter' }
         : providerKind === 'anthropic'
           ? { kind: 'anthropic', authentication: anthropicAuthentication }
           : openAiAuthentication === 'chatgpt'
@@ -870,6 +873,8 @@ export function App({ client }: AppProps) {
                     <p>
                       {provider.kind === 'ollama'
                         ? provider.api_base
+                        : provider.kind === 'openrouter'
+                          ? 'API key via OPENROUTER_API_KEY'
                         : provider.kind === 'anthropic'
                           ? provider.authentication === 'subscription'
                             ? 'Claude subscription / usage bundle'
@@ -1074,6 +1079,11 @@ export function App({ client }: AppProps) {
                     <p>A browser window will open so you can sign in to ChatGPT.</p>
                   )}
                 </>
+              ) : providerKind === 'openrouter' ? (
+                <p>
+                  Set OPENROUTER_API_KEY in the Rynna process environment; the key is never saved
+                  in provider settings.
+                </p>
               ) : (
                 <>
                   <label htmlFor="anthropic-authentication">Anthropic authentication</label>
@@ -1336,5 +1346,8 @@ function formatPlan(plan: string): string {
 }
 
 function providerTitle(kind: ConfiguredProvider['kind']): string {
-  return kind === 'ollama' ? 'Ollama' : kind === 'openai' ? 'OpenAI' : 'Anthropic';
+  if (kind === 'ollama') return 'Ollama';
+  if (kind === 'openai') return 'OpenAI';
+  if (kind === 'openrouter') return 'OpenRouter';
+  return 'Anthropic';
 }

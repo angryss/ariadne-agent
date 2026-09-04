@@ -497,6 +497,18 @@ async fn provider_settings_endpoints_start_empty_and_persist_crud() {
         .oneshot(local_provider_request(
             Request::post("/v1/profiles/local/providers")
                 .header("content-type", "application/json")
+                .body(Body::from(r#"{"kind":"openrouter"}"#))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(local_provider_request(
+            Request::post("/v1/profiles/local/providers")
+                .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"kind":"ollama","api_base":"http://localhost:11434/v1"}"#,
                 ))
@@ -523,10 +535,13 @@ async fn provider_settings_endpoints_start_empty_and_persist_crud() {
     let reloaded = ProviderSettingsStore::load(&settings_path).unwrap();
     assert_eq!(
         serde_json::to_value(reloaded.list("local")).unwrap(),
-        serde_json::json!([{
-            "kind": "ollama",
-            "api_base": "http://localhost:11435/v1"
-        }])
+        serde_json::json!([
+            { "kind": "openrouter" },
+            {
+                "kind": "ollama",
+                "api_base": "http://localhost:11435/v1"
+            }
+        ])
     );
 
     let response = app
@@ -538,11 +553,14 @@ async fn provider_settings_endpoints_start_empty_and_persist_crud() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert!(
-        ProviderSettingsStore::load(&settings_path)
-            .unwrap()
-            .list("local")
-            .is_empty()
+    assert_eq!(
+        serde_json::to_value(
+            ProviderSettingsStore::load(&settings_path)
+                .unwrap()
+                .list("local")
+        )
+        .unwrap(),
+        serde_json::json!([{ "kind": "openrouter" }])
     );
 }
 

@@ -42,6 +42,8 @@ pub enum ConfiguredProvider {
     Ollama {
         api_base: String,
     },
+    #[serde(rename = "openrouter")]
+    OpenRouter,
     #[serde(rename = "openai")]
     OpenAi {
         authentication: OpenAiAuthentication,
@@ -57,6 +59,7 @@ impl ConfiguredProvider {
     pub fn id(&self) -> &'static str {
         match self {
             Self::Ollama { .. } => "ollama",
+            Self::OpenRouter => "openrouter",
             Self::OpenAi { .. } => "openai",
             Self::Anthropic { .. } => "anthropic",
         }

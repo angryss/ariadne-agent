@@ -411,6 +411,7 @@ function isConfiguredProvider(value: unknown): value is ConfiguredProvider {
       (value.authentication === 'api_key' || value.authentication === 'subscription')
     );
   }
+  if (value.kind === 'openrouter') return true;
   return (
     value.kind === 'openai' &&
     'authentication' in value &&

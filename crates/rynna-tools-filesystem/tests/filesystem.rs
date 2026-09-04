@@ -671,7 +671,7 @@ async fn traversal_budget_is_spent_as_entries_are_processed() {
 #[tokio::test]
 async fn find_files_stops_after_the_configured_traversal_file_budget() {
     let workspace = tempfile::tempdir().unwrap();
-    std::fs::write(workspace.path().join("00.txt"), "first").unwrap();
+    std::fs::write(workspace.path().join("00.rs"), "first").unwrap();
     std::fs::write(workspace.path().join("01.rs"), "second").unwrap();
     let mut config = FileSystemConfig::new(workspace.path());
     config.max_traversal_files = 1;
@@ -682,7 +682,9 @@ async fn find_files_stops_after_the_configured_traversal_file_budget() {
         .await
         .unwrap();
 
-    assert_eq!(found["paths"], json!([]));
+    let paths = found["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1);
+    assert!(matches!(paths[0].as_str(), Some("00.rs" | "01.rs")));
 }
 
 #[tokio::test]
