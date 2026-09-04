@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rynna_config::memory::{MemorySettings, MemorySettingsResponse, MemorySettingsStore};
 use rynna_config::{
     AnthropicAuthentication, ConfiguredProvider, OPENAI_ACCOUNT_PROFILE, OpenAiAuthentication,
     ProfileCatalog, ProviderKind, ProviderSettingsStore, ResolvedCapability, ResolvedProfile,
@@ -14,6 +15,7 @@ use rynna_core::{
     Agent, AgentProfiles, CompletionDelta, FallbackProvider, Message, ModelProvider, Profile,
     ProfileProvider, Tool,
 };
+use rynna_memory_hindsight::configured_memory;
 use rynna_provider_anthropic::{
     AnthropicMessagesProvider, CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, ClaudeCodeProvider,
     isolate_claude_subscription_environment, terminate_child,
@@ -900,6 +902,33 @@ async fn delete_provider(
     Ok(())
 }
 
+#[tauri::command]
+async fn get_memory_settings(
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+) -> Result<MemorySettingsResponse, String> {
+    let store = provider_settings.lock().await;
+    MemorySettingsStore::new(store.memory_settings_path())
+        .load()
+        .map(|settings| settings.response())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_memory_settings(
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
+    settings: MemorySettings,
+) -> Result<MemorySettingsResponse, String> {
+    let mut profiles = profiles.lock().await;
+    let store = provider_settings.lock().await;
+    let settings = MemorySettingsStore::new(store.memory_settings_path())
+        .save(settings)
+        .map_err(|error| error.to_string())?;
+    let memory = configured_memory(&settings).map_err(|error| error.to_string())?;
+    profiles.set_memory_provider(memory);
+    Ok(settings.response())
+}
+
 pub fn run() {
     let catalog = configured_catalog()
         .unwrap_or_else(|error| panic!("failed to load Rynna configuration: {error}"));
@@ -911,8 +940,16 @@ pub fn run() {
     let credential_selection = OpenAiCredentialSelection::new(
         openai_account_reuses_existing_credentials(&provider_settings, &credential_profile),
     );
-    let configured = configured_profiles(credential_selection.clone(), &catalog)
+    let mut configured = configured_profiles(credential_selection.clone(), &catalog)
         .unwrap_or_else(|error| panic!("failed to configure Rynna model provider: {error}"));
+
+    let memory_settings = MemorySettingsStore::new(provider_settings.memory_settings_path())
+        .load()
+        .unwrap_or_else(|error| panic!("failed to load Rynna memory settings: {error}"));
+    configured.set_memory_provider(
+        configured_memory(&memory_settings)
+            .unwrap_or_else(|error| panic!("failed to configure Rynna memory provider: {error}")),
+    );
 
     tauri::Builder::default()
         .manage(Mutex::new(configured))
@@ -930,6 +967,8 @@ pub fn run() {
             openai_account,
             existing_openai_account,
             connect_openai,
+            get_memory_settings,
+            save_memory_settings,
             list_providers,
             create_provider,
             update_provider,

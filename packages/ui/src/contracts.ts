@@ -65,7 +65,27 @@ export type ProviderInput =
   | { kind: 'openai'; authentication: 'api_key'; api_key: string }
   | { kind: 'anthropic'; authentication: 'api_key' | 'subscription' };
 
+export type HindsightDeployment = 'cloud' | 'self_hosted';
+export type MemorySettings =
+  | { kind: 'none' }
+  | { kind: 'hindsight'; deployment: HindsightDeployment; api_base: string; bank_id: string; api_key_configured: boolean };
+export type MemorySettingsInput =
+  | { kind: 'none' }
+  | { kind: 'hindsight'; deployment: HindsightDeployment; api_base: string; bank_id: string; api_key?: string };
+
+export function isMemorySettings(value: unknown): value is MemorySettings {
+  if (!value || typeof value !== 'object' || !('kind' in value)) return false;
+  if (value.kind === 'none') return true;
+  return value.kind === 'hindsight' && 'deployment' in value &&
+    (value.deployment === 'cloud' || value.deployment === 'self_hosted') &&
+    'api_base' in value && typeof value.api_base === 'string' &&
+    'bank_id' in value && typeof value.bank_id === 'string' &&
+    'api_key_configured' in value && typeof value.api_key_configured === 'boolean';
+}
+
 export interface AgentClient {
+  getMemorySettings?(): Promise<MemorySettings>;
+  saveMemorySettings?(settings: MemorySettingsInput): Promise<MemorySettings>;
   respond(request: RespondRequest, onDelta?: CompletionDeltaHandler): Promise<RespondResponse>;
   listProfiles?(): Promise<ProfileCatalog>;
   createProfile?(profile: Profile): Promise<Profile>;

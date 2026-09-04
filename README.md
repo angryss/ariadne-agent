@@ -2,7 +2,7 @@
 
 Rynna is an open-source AI software agent built with Rust, React, and Tauri. One shared application core powers an interactive CLI, deterministic one-shot jobs, a long-running HTTP service, a browser UI, and a native desktop app.
 
-> **Project status:** bootstrap foundation. The model-provider path, versioned profiles, native workspace filesystem and bounded command tools, and all product surfaces are working. Skill execution, MCP tool execution, durable memory, approvals, and long-running autonomous loops remain future capabilities.
+> **Project status:** bootstrap foundation. The model-provider path, versioned profiles, native workspace filesystem and bounded command tools, and all product surfaces are working. Skill execution, MCP tool execution, approvals, and long-running autonomous loops remain future capabilities.
 
 ## Why Rynna
 
@@ -236,3 +236,30 @@ Behavior changes follow test-driven development. See [CONTRIBUTING.md](CONTRIBUT
 ## License
 
 Rynna is available under the [MIT License](LICENSE).
+
+## Memory providers
+
+Open **Settings → Memory provider** in web or desktop. The provider defaults to **None**; existing installations make no memory calls until configured. Select **Hindsight** to reveal its settings:
+
+- **Hindsight Cloud:** the official API URL, your memory bank ID, and an API key.
+- **Self-hosted:** your server API base URL (for example `http://localhost:8888`), bank ID, and an optional API key for authenticated servers. Reverse-proxy path prefixes are supported; enter the base URL without `/v1/default/banks`.
+
+Save to apply the choice to subsequent requests immediately. All profiles in the application share the selected bank. Rynna recalls relevant context before each turn and retains only the completed user message and final answer, including for streaming responses. It does not automatically upload previous history, tool output, or thinking. Recalled text is bounded and labeled as untrusted reference data. A memory failure is logged and does not prevent a model response; each operation has a ten-second deadline. Hindsight retention is queued asynchronously, so new memories may take time to become searchable.
+
+Selecting **None** stops future memory operations and removes the saved local credential. Existing memories remain on Hindsight; requests already in progress finish with their original provider. An unchanged blank API-key field preserves a saved credential only for the same endpoint and hosting mode. Self-hosted settings also offer an explicit remove-key checkbox.
+
+Settings are stored in `memory.toml` beside `providers.toml`, including when `--provider-config` / `RYNNA_PROVIDER_CONFIG` chooses a custom directory. CLI chat and one-shot runs read this file at startup. Web/desktop changes affect their current process; restart other running processes to pick up changes. The file is written atomically with owner-only permissions on Unix. API keys are never returned to the frontend or written to browser storage.
+
+For CLI-only configuration, create `memory.toml` in that directory (restrict its permissions to your user):
+
+```toml
+kind = "hindsight"
+deployment = "self_hosted"
+api_base = "http://localhost:8888"
+bank_id = "rynna"
+# api_key = "your-server-key" # only for authenticated servers
+```
+
+For Cloud, use `deployment = "cloud"`, `api_base = "https://api.hindsight.vectorize.io"`, and an `api_key`. To disable memory, replace the file contents with `kind = "none"`.
+
+The HTTP settings contract is `GET` / `PUT /v1/settings/memory`; both methods use the existing loopback-only administration restriction. Desktop uses `get_memory_settings` / `save_memory_settings` IPC commands. The provider-neutral `rynna_core::MemoryProvider` trait exposes `recall` and `retain`; implement this port and register a configuration variant and composition adapter to add another provider. Hindsight-specific HTTP behavior lives in `rynna-memory-hindsight`.

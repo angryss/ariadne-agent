@@ -3,6 +3,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { HttpAgentClient } from './httpAgentClient';
 
 describe('HttpAgentClient', () => {
+  it('loads and saves memory settings through the HTTP settings endpoint', async () => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ kind: 'none' })));
+    const client = new HttpAgentClient('/custom/v1/respond', fetcher);
+    expect(await client.getMemorySettings()).toEqual({ kind: 'none' });
+    expect(fetcher).toHaveBeenLastCalledWith('/custom/v1/settings/memory', { method: 'GET', headers: { accept: 'application/json' } });
+    await client.saveMemorySettings({ kind: 'none' });
+    expect(fetcher).toHaveBeenLastCalledWith('/custom/v1/settings/memory', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{"kind":"none"}' });
+    fetcher.mockResolvedValueOnce(new Response('{"kind":"hindsight"}'));
+    await expect(client.getMemorySettings()).rejects.toThrow('invalid memory settings');
+  });
+
   it('posts a response request to the Rynna API', async () => {
     const fetcher = vi.fn().mockResolvedValue(
       new Response(

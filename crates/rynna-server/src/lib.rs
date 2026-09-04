@@ -14,6 +14,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
+use rynna_config::memory::{
+    MemorySettings, MemorySettingsError, MemorySettingsResponse, MemorySettingsStore,
+};
 use rynna_config::{
     AnthropicAuthentication, ConfigError, ConfiguredProvider, OpenAiAuthentication, ProfileCatalog,
     ProviderSettingsError, ProviderSettingsStore, secure_private_directory,
@@ -22,6 +25,7 @@ use rynna_core::{
     Agent, AgentError, AgentProfiles, CompletionDelta, Message, Profile, ProfileAgentError,
     ProfileError, ProfileProvider,
 };
+use rynna_memory_hindsight::configured_memory;
 use rynna_provider_anthropic::{
     CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, isolate_claude_subscription_environment,
     terminate_child,
@@ -132,7 +136,23 @@ fn router_with_runtime(
     let claude_program = std::env::var_os("RYNNA_CLAUDE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("claude"));
+    let mut profiles = profiles;
+    if let Some(store) = &provider_settings {
+        match MemorySettingsStore::new(store.memory_settings_path()).load() {
+            Ok(settings) => match configured_memory(&settings) {
+                Ok(memory) => profiles.set_memory_provider(memory),
+                Err(_) => tracing::warn!("could not configure memory provider"),
+            },
+            Err(_) => tracing::warn!("could not load memory settings"),
+        }
+    }
     let provider_routes = Router::new()
+        .route(
+            "/v1/settings/memory",
+            get(get_memory_settings)
+                .put(save_memory_settings)
+                .fallback(api_method_not_allowed),
+        )
         .route(
             "/v1/providers/openai/existing-account",
             get(existing_openai_account).fallback(api_method_not_allowed),
@@ -505,6 +525,52 @@ fn provider_store(state: &AppState) -> Result<&Arc<Mutex<ProviderSettingsStore>>
         code: "provider_settings_unavailable",
         message: "provider settings are unavailable".to_owned(),
     })
+}
+
+fn memory_settings_error(error: MemorySettingsError) -> ApiError {
+    ApiError {
+        status: if matches!(error, MemorySettingsError::Invalid(_)) {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+        code: "memory_settings_error",
+        message: error.to_string(),
+    }
+}
+
+async fn get_memory_settings(
+    State(state): State<AppState>,
+) -> Result<Json<MemorySettingsResponse>, ApiError> {
+    let store = provider_store(&state)?.lock().await;
+    let settings = MemorySettingsStore::new(store.memory_settings_path())
+        .load()
+        .map_err(memory_settings_error)?;
+    Ok(Json(settings.response()))
+}
+
+async fn save_memory_settings(
+    State(state): State<AppState>,
+    request: Result<Json<MemorySettings>, JsonRejection>,
+) -> Result<Json<MemorySettingsResponse>, ApiError> {
+    // JSON rejection text can quote the submitted credential. Do not echo it.
+    let Json(input) = request.map_err(|_| {
+        memory_settings_error(MemorySettingsError::Invalid(
+            "invalid memory settings request",
+        ))
+    })?;
+    let mut profiles = state.profiles.lock().await;
+    let store = provider_store(&state)?.lock().await;
+    let settings = MemorySettingsStore::new(store.memory_settings_path())
+        .save(input)
+        .map_err(memory_settings_error)?;
+    let memory = configured_memory(&settings).map_err(|_| {
+        memory_settings_error(MemorySettingsError::Invalid(
+            "could not configure memory provider",
+        ))
+    })?;
+    profiles.set_memory_provider(memory);
+    Ok(Json(settings.response()))
 }
 
 async fn list_provider_settings(

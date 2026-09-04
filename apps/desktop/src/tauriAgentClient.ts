@@ -1,6 +1,9 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
+import { isMemorySettings } from '@rynna/ui';
 import type {
   AgentClient,
+  MemorySettings,
+  MemorySettingsInput,
   CompletionDelta,
   CompletionDeltaHandler,
   ConnectOpenAiRequest,
@@ -29,6 +32,18 @@ export class TauriAgentClient implements AgentClient {
   ) {
     this.invoke = invoker;
     this.createChannel = createChannel;
+  }
+
+  async getMemorySettings(): Promise<MemorySettings> {
+    const settings = await this.invoke('get_memory_settings', {});
+    if (!isMemorySettings(settings)) throw new Error('Rynna desktop returned invalid memory settings');
+    return settings;
+  }
+
+  async saveMemorySettings(settings: MemorySettingsInput): Promise<MemorySettings> {
+    const saved = await this.invoke('save_memory_settings', { settings });
+    if (!isMemorySettings(saved)) throw new Error('Rynna desktop returned invalid memory settings');
+    return saved;
   }
 
   async listProfiles(): Promise<ProfileCatalog> {

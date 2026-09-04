@@ -1,0 +1,192 @@
+//! Application-wide memory settings. Credentials never appear in the response type.
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+use url::Url;
+
+pub const HINDSIGHT_CLOUD_URL: &str = "https://api.hindsight.vectorize.io";
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HindsightDeployment {
+    Cloud,
+    SelfHosted,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemorySettings {
+    #[default]
+    None,
+    Hindsight {
+        deployment: HindsightDeployment,
+        api_base: String,
+        bank_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_key: Option<String>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MemorySettingsResponse {
+    None,
+    Hindsight {
+        deployment: HindsightDeployment,
+        api_base: String,
+        bank_id: String,
+        api_key_configured: bool,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum MemorySettingsError {
+    #[error("{0}")]
+    Invalid(&'static str),
+    // Parsing errors can contain credential-bearing source lines. Keep them private.
+    #[error("could not read memory settings")]
+    Read,
+    #[error("could not save memory settings")]
+    Write,
+}
+
+impl MemorySettings {
+    pub fn response(&self) -> MemorySettingsResponse {
+        match self {
+            Self::None => MemorySettingsResponse::None,
+            Self::Hindsight {
+                deployment,
+                api_base,
+                bank_id,
+                api_key,
+            } => MemorySettingsResponse::Hindsight {
+                deployment: *deployment,
+                api_base: api_base.clone(),
+                bank_id: bank_id.clone(),
+                api_key_configured: api_key.as_ref().is_some_and(|key| !key.is_empty()),
+            },
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), MemorySettingsError> {
+        if let Self::Hindsight {
+            deployment,
+            api_base,
+            bank_id,
+            api_key,
+        } = self
+        {
+            let invalid_url = || {
+                MemorySettingsError::Invalid(
+                    "enter an HTTP(S) API URL without credentials, query, or fragment",
+                )
+            };
+            let url = Url::parse(api_base).map_err(|_| invalid_url())?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(invalid_url());
+            }
+            if *deployment == HindsightDeployment::Cloud
+                && api_base.trim_end_matches('/') != HINDSIGHT_CLOUD_URL
+            {
+                return Err(MemorySettingsError::Invalid(
+                    "Hindsight Cloud must use its official API URL",
+                ));
+            }
+            if bank_id.trim().is_empty()
+                || bank_id.len() > 256
+                || bank_id != bank_id.trim()
+                || bank_id.chars().any(char::is_control)
+                || matches!(bank_id.as_str(), "." | "..")
+            {
+                return Err(MemorySettingsError::Invalid(
+                    "enter a valid memory bank ID (up to 256 bytes)",
+                ));
+            }
+            if api_key.as_ref().is_some_and(|key| {
+                key.len() > 16 * 1024 || !key.is_ascii() || key.chars().any(char::is_control)
+            }) {
+                return Err(MemorySettingsError::Invalid("enter a valid API key"));
+            }
+            if *deployment == HindsightDeployment::Cloud
+                && api_key.as_ref().is_none_or(|key| key.trim().is_empty())
+            {
+                return Err(MemorySettingsError::Invalid(
+                    "an API key is required for Hindsight Cloud",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct MemorySettingsStore {
+    path: PathBuf,
+}
+
+impl MemorySettingsStore {
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_owned(),
+        }
+    }
+
+    pub fn load(&self) -> Result<MemorySettings, MemorySettingsError> {
+        let settings: MemorySettings = match std::fs::read_to_string(&self.path) {
+            Ok(source) => toml::from_str(&source).map_err(|_| MemorySettingsError::Read)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => MemorySettings::None,
+            Err(_) => return Err(MemorySettingsError::Read),
+        };
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    pub fn save(
+        &self,
+        mut settings: MemorySettings,
+    ) -> Result<MemorySettings, MemorySettingsError> {
+        let lock_store = super::ProviderSettingsStore {
+            path: self.path.clone(),
+            providers: Default::default(),
+        };
+        let _lock = lock_store
+            .lock_exclusive()
+            .map_err(|_| MemorySettingsError::Write)?;
+        // Omission preserves a credential only for the same destination. An empty key clears it.
+        if let MemorySettings::Hindsight {
+            deployment,
+            api_base,
+            api_key,
+            ..
+        } = &mut settings
+        {
+            if api_key.is_none()
+                && let MemorySettings::Hindsight {
+                    deployment: old_deployment,
+                    api_base: old_base,
+                    api_key: old_key,
+                    ..
+                } = self.load()?
+                && *deployment == old_deployment
+                && api_base.trim_end_matches('/') == old_base.trim_end_matches('/')
+            {
+                *api_key = old_key;
+            }
+            if api_key.as_ref().is_some_and(|key| key.is_empty()) {
+                *api_key = None;
+            }
+        }
+        settings.validate()?;
+        let encoded = toml::to_string_pretty(&settings).map_err(|_| MemorySettingsError::Write)?;
+        let temporary = super::write_private_temporary_file(&self.path, encoded.as_bytes())
+            .map_err(|_| MemorySettingsError::Write)?;
+        let _cleanup = super::TemporaryFileCleanup(temporary.clone());
+        super::replace_file(&temporary, &self.path).map_err(|_| MemorySettingsError::Write)?;
+        Ok(settings)
+    }
+}
