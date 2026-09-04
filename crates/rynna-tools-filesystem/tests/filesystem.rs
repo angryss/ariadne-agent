@@ -65,7 +65,10 @@ async fn read_file_is_scoped_to_the_workspace_and_denies_secrets() {
 
     let result = read.execute(json!({"path": "README.md"})).await.unwrap();
     assert_eq!(result["content"], "# Rynna\n");
-    assert!(result["sha256"].as_str().unwrap().len() == 64);
+    assert_eq!(
+        result["sha256"],
+        "fa6c1ac17cc5d94131e0ed7edc7cf8d4f2b4b44fb3cecd27d386f79b829f7b10"
+    );
 
     let traversal = read
         .execute(json!({"path": "../outside"}))

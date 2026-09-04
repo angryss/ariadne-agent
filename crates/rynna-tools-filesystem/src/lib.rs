@@ -992,7 +992,10 @@ fn relative_string(path: &Path) -> String {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn file_change_result(path: String, bytes: &[u8]) -> Value {
