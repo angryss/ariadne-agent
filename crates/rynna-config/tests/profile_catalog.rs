@@ -71,6 +71,42 @@ fn anthropic_provider_settings_never_serialize_credentials() {
 }
 
 #[test]
+fn openrouter_provider_settings_persist_only_credential_readiness() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.toml");
+    let mut store = ProviderSettingsStore::load(&path).unwrap();
+    store.add("work", ConfiguredProvider::OpenRouter).unwrap();
+
+    let encoded = std::fs::read_to_string(&path).unwrap();
+    assert!(encoded.contains("kind = \"openrouter\""));
+    assert!(!encoded.contains("OPENROUTER_API_KEY"));
+    assert_eq!(
+        ProviderSettingsStore::load(path).unwrap().list("work"),
+        vec![ConfiguredProvider::OpenRouter]
+    );
+}
+
+#[test]
+fn example_catalog_configures_openrouter_through_the_openai_compatible_adapter() {
+    let catalog = ProfileCatalog::from_toml(include_str!("../../../rynna.example.toml")).unwrap();
+    let profile = catalog.resolve("openrouter").unwrap();
+
+    assert_eq!(profile.providers[0].name, "openrouter");
+    assert_eq!(
+        profile.providers[0].provider_kind,
+        ProviderKind::OpenAiCompatible
+    );
+    assert_eq!(
+        profile.providers[0].api_base,
+        "https://openrouter.ai/api/v1"
+    );
+    assert_eq!(
+        profile.providers[0].api_key_env.as_deref(),
+        Some("OPENROUTER_API_KEY")
+    );
+}
+
+#[test]
 fn claude_subscription_profiles_reject_rynna_context() {
     let error = ProfileCatalog::from_toml(
         r#"

@@ -161,13 +161,13 @@ describe('TauriAgentClient', () => {
   it('uses narrow commands for provider settings CRUD', async () => {
     const invoke = vi
       .fn()
-      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ kind: 'openrouter' }])
       .mockResolvedValueOnce({ kind: 'openai', authentication: 'chatgpt' })
       .mockResolvedValueOnce({ kind: 'openai', authentication: 'api_key' })
       .mockResolvedValueOnce(undefined);
     const client = new TauriAgentClient(invoke);
 
-    await client.listProviders('work');
+    await expect(client.listProviders('work')).resolves.toEqual([{ kind: 'openrouter' }]);
     await client.createProvider({ kind: 'openai', authentication: 'chatgpt' }, 'work');
     await client.updateProvider({ kind: 'openai', authentication: 'api_key', api_key: 'sk-secret' }, 'work');
     await client.deleteProvider('openai', 'work');

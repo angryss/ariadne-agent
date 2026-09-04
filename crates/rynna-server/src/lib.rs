@@ -473,6 +473,8 @@ enum ProviderInput {
     Ollama {
         api_base: String,
     },
+    #[serde(rename = "openrouter")]
+    OpenRouter,
     #[serde(rename = "openai")]
     OpenAi {
         authentication: OpenAiAuthentication,
@@ -490,6 +492,7 @@ impl ProviderInput {
     fn kind(&self) -> &'static str {
         match self {
             Self::Ollama { .. } => "ollama",
+            Self::OpenRouter => "openrouter",
             Self::OpenAi { .. } => "openai",
             Self::Anthropic { .. } => "anthropic",
         }
@@ -596,6 +599,7 @@ async fn configured_provider(
 ) -> Result<ConfiguredProvider, ApiError> {
     match input {
         ProviderInput::Ollama { api_base } => Ok(ConfiguredProvider::Ollama { api_base }),
+        ProviderInput::OpenRouter => Ok(ConfiguredProvider::OpenRouter),
         ProviderInput::OpenAi {
             authentication,
             api_key,

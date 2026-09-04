@@ -12,6 +12,11 @@ kind = "openai-compatible"
 api_base = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 
+[providers.openrouter]
+kind = "openai-compatible"
+api_base = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+
 [providers.anthropic-api]
 kind = "anthropic-messages"
 api_base = "https://api.anthropic.com"
@@ -37,6 +42,11 @@ model = "gpt-5"
 system_prompt = "You are Rynna, a careful AI software agent working in a professional environment."
 active_skills = ["github", "code-review"]
 mcp_servers = ["github"]
+capabilities = ["workspace"]
+
+[profiles.openrouter]
+provider = "openrouter"
+model = "openai/gpt-5.2"
 capabilities = ["workspace"]
 
 [profiles.anthropic]

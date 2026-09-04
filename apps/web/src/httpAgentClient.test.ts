@@ -173,13 +173,13 @@ describe('HttpAgentClient', () => {
   it('lists and mutates provider settings through the providers API', async () => {
     const fetcher = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([{ kind: 'openrouter' }]))
       .mockResolvedValueOnce(jsonResponse({ kind: 'ollama', api_base: 'http://localhost:11434/v1' }))
       .mockResolvedValueOnce(jsonResponse({ kind: 'ollama', api_base: 'http://localhost:22434/v1' }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const client = new HttpAgentClient('/v1/respond', fetcher);
 
-    await expect(client.listProviders('work')).resolves.toEqual([]);
+    await expect(client.listProviders('work')).resolves.toEqual([{ kind: 'openrouter' }]);
     await client.createProvider({ kind: 'ollama', api_base: 'http://localhost:11434/v1' }, 'work');
     await client.updateProvider({ kind: 'ollama', api_base: 'http://localhost:22434/v1' }, 'work');
     await client.deleteProvider('ollama', 'work');

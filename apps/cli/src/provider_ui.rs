@@ -28,6 +28,7 @@ use rynna_provider_anthropic::{
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ProviderChoice {
     Ollama,
+    OpenRouter,
     OpenAi,
     Anthropic,
 }
@@ -36,6 +37,7 @@ impl ProviderChoice {
     fn id(self) -> &'static str {
         match self {
             Self::Ollama => "ollama",
+            Self::OpenRouter => "openrouter",
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
         }
@@ -44,6 +46,7 @@ impl ProviderChoice {
     fn title(self) -> &'static str {
         match self {
             Self::Ollama => "Ollama",
+            Self::OpenRouter => "OpenRouter",
             Self::OpenAi => "OpenAI",
             Self::Anthropic => "Anthropic",
         }
@@ -51,7 +54,8 @@ impl ProviderChoice {
 
     fn toggle(self) -> Self {
         match self {
-            Self::Ollama => Self::OpenAi,
+            Self::Ollama => Self::OpenRouter,
+            Self::OpenRouter => Self::OpenAi,
             Self::OpenAi => Self::Anthropic,
             Self::Anthropic => Self::Ollama,
         }
@@ -87,6 +91,7 @@ impl ProviderUi {
         self.existing = false;
         self.choice = [
             ProviderChoice::Ollama,
+            ProviderChoice::OpenRouter,
             ProviderChoice::OpenAi,
             ProviderChoice::Anthropic,
         ]
@@ -113,6 +118,10 @@ impl ProviderUi {
             ConfiguredProvider::Ollama { api_base } => {
                 self.choice = ProviderChoice::Ollama;
                 self.input = api_base.clone();
+            }
+            ConfiguredProvider::OpenRouter => {
+                self.choice = ProviderChoice::OpenRouter;
+                self.input.clear();
             }
             ConfiguredProvider::OpenAi { authentication, .. } => {
                 self.choice = ProviderChoice::OpenAi;
@@ -188,7 +197,7 @@ fn run_loop(
                 }
                 KeyCode::Left | KeyCode::Right if !ui.existing => {
                     let mut next = ui.choice.toggle();
-                    for _ in 0..3 {
+                    for _ in 0..4 {
                         if !ui.has(next.id()) {
                             ui.choice = next;
                             ui.input = if next == ProviderChoice::Ollama {
@@ -201,7 +210,12 @@ fn run_loop(
                         next = next.toggle();
                     }
                 }
-                KeyCode::Tab if ui.choice != ProviderChoice::Ollama => {
+                KeyCode::Tab
+                    if !matches!(
+                        ui.choice,
+                        ProviderChoice::Ollama | ProviderChoice::OpenRouter
+                    ) =>
+                {
                     ui.authentication = match ui.authentication {
                         OpenAiAuthentication::ApiKey => OpenAiAuthentication::Chatgpt,
                         OpenAiAuthentication::Chatgpt => OpenAiAuthentication::ApiKey,
@@ -221,7 +235,7 @@ fn run_loop(
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => break,
-            KeyCode::Char('a') if ui.providers.len() < 3 => ui.begin_add(),
+            KeyCode::Char('a') if ui.providers.len() < 4 => ui.begin_add(),
             KeyCode::Char('e') | KeyCode::Enter => ui.begin_edit(),
             KeyCode::Char('d') => {
                 if let Some(provider) = ui.providers.get(ui.selected) {
@@ -268,6 +282,7 @@ fn save_provider(ui: &mut ProviderUi, store: &mut ProviderSettingsStore, profile
         ProviderChoice::Ollama => ConfiguredProvider::Ollama {
             api_base: ui.input.trim().to_owned(),
         },
+        ProviderChoice::OpenRouter => ConfiguredProvider::OpenRouter,
         ProviderChoice::OpenAi => {
             if let Err(error) = authenticate_openai(ui.authentication, &ui.input) {
                 ui.error = Some(error.to_string());
@@ -465,10 +480,12 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
         };
         let text = Text::from(vec![
             Line::from(format!("Provider: {}  (←/→ to change)", ui.choice.title())),
-            Line::from(if ui.choice != ProviderChoice::Ollama {
-                format!("Authentication: {authentication}  (Tab to change)")
-            } else {
-                "Ollama API base URL:".to_owned()
+            Line::from(match ui.choice {
+                ProviderChoice::Ollama => "Ollama API base URL:".to_owned(),
+                ProviderChoice::OpenRouter => {
+                    "Authentication: API key from OPENROUTER_API_KEY".to_owned()
+                }
+                _ => format!("Authentication: {authentication}  (Tab to change)"),
             }),
             Line::from(displayed),
             Line::from(""),
@@ -482,7 +499,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
         );
     } else if ui.providers.is_empty() {
         frame.render_widget(
-            Paragraph::new("No providers configured.\n\nPress a to add Ollama or OpenAI.")
+            Paragraph::new("No providers configured.\n\nPress a to add a provider.")
                 .block(Block::default().borders(Borders::ALL)),
             chunks[1],
         );
@@ -490,6 +507,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
         let items = ui.providers.iter().map(|provider| {
             let detail = match provider {
                 ConfiguredProvider::Ollama { api_base } => api_base.as_str(),
+                ConfiguredProvider::OpenRouter => "API key from OPENROUTER_API_KEY",
                 ConfiguredProvider::OpenAi {
                     authentication: OpenAiAuthentication::ApiKey,
                     ..
@@ -539,6 +557,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &ProviderUi) {
 fn provider_title(provider: &ConfiguredProvider) -> &'static str {
     match provider {
         ConfiguredProvider::Ollama { .. } => "Ollama",
+        ConfiguredProvider::OpenRouter => "OpenRouter",
         ConfiguredProvider::OpenAi { .. } => "OpenAI",
         ConfiguredProvider::Anthropic { .. } => "Anthropic",
     }
@@ -612,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_ui_starts_with_an_empty_list_and_can_prepare_both_provider_forms() {
+    fn provider_ui_starts_with_an_empty_list_and_advances_to_openrouter() {
         let mut ui = ProviderUi::new(Vec::new());
         assert!(ui.providers.is_empty());
         ui.begin_add();
@@ -622,7 +641,7 @@ mod tests {
             api_base: "http://localhost:11434/v1".to_owned(),
         });
         ui.begin_add();
-        assert_eq!(ui.choice.id(), "openai");
+        assert_eq!(ui.choice.id(), "openrouter");
     }
 
     #[test]

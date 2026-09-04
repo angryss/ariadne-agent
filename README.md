@@ -10,7 +10,7 @@ Rynna is an open-source AI software agent built with Rust, React, and Tauri. One
 - **Automation friendly:** `rynna run` reads a flag or stdin and supports machine-readable JSON.
 - **VPS ready:** `rynna serve` is stateless, handles graceful shutdown, and can serve the web build from the same binary.
 - **One core, several surfaces:** HTTP, terminal, and Tauri code remain thin adapters around `rynna-core`.
-- **Provider portable:** use Ollama locally or set environment variables for another OpenAI-compatible API.
+- **Provider portable:** use Ollama locally, OpenRouter, or another OpenAI-compatible API.
 - **Cache aware:** stable prompt prefixes are routed through a replaceable cache optimizer and translated to each provider's supported server-side cache controls.
 - **Profile scoped:** local, work, automation, and hosted profiles can select different providers, models, system prompts, native capabilities, active skills, and MCP servers.
 
@@ -41,6 +41,7 @@ See [the architecture guide](docs/architecture.md) for dependency boundaries and
 - Rust 1.88 or newer
 - Node.js 22 or newer and npm
 - [Ollama](https://ollama.com/) for the default local provider, or another OpenAI-compatible endpoint
+- An [OpenRouter API key](https://openrouter.ai/keys) when using OpenRouter
 - [OpenAI Codex CLI 0.149.1](https://developers.openai.com/codex/cli/) to configure OpenAI with a ChatGPT subscription or API key; the desktop account-backed chat provider rejects unreviewed Codex versions fail-closed
 - [Claude Code 2.1.223](https://docs.anthropic.com/en/docs/claude-code) for Claude subscription / usage bundle profiles
 - Tauri 2 platform prerequisites when building the desktop app
@@ -83,7 +84,7 @@ Open the terminal provider settings interface with:
 cargo run -p rynna-cli -- --configure-providers
 ```
 
-The TUI starts with an empty provider list and supports adding, editing, and deleting Ollama, OpenAI, and Anthropic settings. Use `--provider-config <path>` to select a non-default provider settings file. OpenAI can authenticate through an API key sent directly to Codex over stdin or through Codex's ChatGPT browser sign-in.
+The TUI starts with an empty provider list and supports adding, editing, and deleting Ollama, OpenRouter, OpenAI, and Anthropic settings. Use `--provider-config <path>` to select a non-default provider settings file. OpenRouter reads `OPENROUTER_API_KEY` from the Rynna process environment. OpenAI can authenticate through an API key sent directly to Codex over stdin or through Codex's ChatGPT browser sign-in.
 
 ## Web application
 
@@ -126,6 +127,7 @@ The desktop app also exposes **Connect OpenAI**. Choose **Use ChatGPT subscripti
 | `RYNNA_API_BASE` | `http://127.0.0.1:11434/v1` | OpenAI-compatible API base URL |
 | `RYNNA_MODEL` | `qwen3:8b` | Provider model identifier |
 | `RYNNA_API_KEY` | unset | Optional bearer token; never place it in source control |
+| `OPENROUTER_API_KEY` | unset | OpenRouter bearer token referenced by the example OpenRouter provider |
 | `ANTHROPIC_API_KEY` | unset | Example direct Messages API credential referenced by an Anthropic provider's `api_key_env` |
 | `RYNNA_CODEX_PATH` | `codex` on `PATH` | Codex CLI executable used by desktop OpenAI account support |
 | `RYNNA_CODEX_HOME` | `<config-dir>/rynna/codex` | Private Codex credential/config directory owned by Rynna desktop |
@@ -146,7 +148,7 @@ Rynna reads TOML from the platform configuration directory at `<config-dir>/rynn
 
 See [`rynna.example.toml`](rynna.example.toml) for the complete version 1 schema. The catalog separates reusable provider connections from profiles:
 
-- `providers.<name>` may use `openai-compatible`, `anthropic-messages`, or `claude-subscription`. Direct Anthropic profiles use `api_key_env` (normally `ANTHROPIC_API_KEY`); store the secret only in that environment variable, never in TOML.
+- `providers.<name>` may use `openai-compatible`, `anthropic-messages`, or `claude-subscription`. OpenRouter uses the OpenAI-compatible adapter at `https://openrouter.ai/api/v1` with `api_key_env = "OPENROUTER_API_KEY"`. Direct Anthropic profiles use `api_key_env` (normally `ANTHROPIC_API_KEY`); store secrets only in environment variables, never in TOML.
 - `claude-subscription` uses Claude Code's supported headless interface after `claude auth login --claudeai` (or an explicit `CLAUDE_CODE_OAUTH_TOKEN` created by `claude setup-token`). Claude subscription / usage bundle billing is handled by Claude. Rynna removes competing API, profile, gateway, and cloud-provider environment overrides; disables Claude Code tools, MCP, customizations, and persistence; and rejects profiles that declare Rynna capabilities, skills, or MCP servers.
 - Provider settings in the CLI, web app, and desktop app store shared credential readiness only. Runtime provider, model, and profile routing remains authoritative in `config.toml` and is loaded at process startup.
 - `profiles.<name>` selects an ordered, non-empty list of provider/model entries and may define `system_prompt`, `capabilities`, `active_skills`, and `mcp_servers`. The first entry is primary; later entries are attempted as fallbacks.
@@ -166,7 +168,7 @@ Profile-scoped skill and MCP activation is represented and exposed consistently,
 
 `GET /v1/profiles` returns the process default, safe catalog provider identifiers, and safe profile metadata. It never returns API keys, API-key environment-variable names, provider base URLs, system prompts, or MCP command definitions. `POST /v1/profiles` and `PUT`/`DELETE /v1/profiles/{name}` add, update, and delete catalog profiles for loopback clients. Profile mutations persist to `config.toml`, but they never attach an existing runtime agent to changed metadata: metadata for currently running profiles remains the startup snapshot, while new catalog-only profiles have no runtime agent. Restart the process before using a new or renamed profile or relying on changed providers, models, prompts, or capabilities.
 
-`GET /v1/providers`, `POST /v1/providers`, and `PUT`/`DELETE /v1/providers/{kind}` provide provider settings CRUD for the browser. The persisted TOML contains only Ollama's API base URL or the selected OpenAI/Anthropic authentication method. OpenAI API keys are piped to Codex and are never stored in this file or returned by the API.
+`GET /v1/providers`, `POST /v1/providers`, and `PUT`/`DELETE /v1/providers/{kind}` provide provider settings CRUD for the browser. The persisted TOML contains only Ollama's API base URL, the selected OpenAI/Anthropic authentication method, or an OpenRouter credential-readiness marker. OpenRouter reads its API key from `OPENROUTER_API_KEY`; OpenAI API keys are piped to Codex. Neither key is stored in this file or returned by the API.
 
 `POST /v1/respond` accepts caller-owned user/assistant history, an optional profile name, and a new prompt. Omit `profile` to use the process default:
 
