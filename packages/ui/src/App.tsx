@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
+import { MemorySettingsPanel } from './components/memory-settings';
 import { ThemeToggle } from './components/theme-toggle';
 import { Typeahead } from './components/typeahead';
 import { Badge } from './components/ui/badge';
@@ -119,10 +120,10 @@ export function App({ client }: AppProps) {
   const [reuseExistingChatgpt, setReuseExistingChatgpt] = useState<boolean | null>(null);
   const [providerApiKey, setProviderApiKey] = useState('');
   const [savingProvider, setSavingProvider] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<'profiles' | 'provider-credentials' | 'models'>(
+  const [settingsSection, setSettingsSection] = useState<'profiles' | 'provider-credentials' | 'models' | 'memory'>(
     client.createProfile || client.updateProfile || client.deleteProfile
       ? 'profiles'
-      : 'provider-credentials',
+      : client.listProviders ? 'provider-credentials' : 'memory',
   );
   const [addingProfile, setAddingProfile] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
@@ -244,7 +245,7 @@ export function App({ client }: AppProps) {
     (profile) => profile.name === selectedSettingsProfile,
   );
   const canEditProfiles = Boolean(client.createProfile || client.updateProfile || client.deleteProfile);
-  const canOpenSettings = Boolean(client.listProviders || canEditProfiles);
+  const canOpenSettings = Boolean(client.listProviders || canEditProfiles || client.getMemorySettings);
   const selectedModelKeys = new Set(
     selectedModels.map((model) => `${modelProvider}\u0000${model}`),
   );
@@ -762,9 +763,41 @@ export function App({ client }: AppProps) {
                   Models
                 </Button>
               ) : null}
+              {client.getMemorySettings ? (
+                <Button aria-current={settingsSection === 'memory' ? 'page' : undefined}
+                  onClick={() => setSettingsSection('memory')} type="button" variant="ghost">
+                  Memory provider
+                </Button>
+              ) : null}
             </nav>
           </aside>
           <div className="settings-content">
+            {settingsSection === 'memory' ? (
+              <>
+                <label className="profile-picker" htmlFor="memory-profile">
+                  <span>Profile</span>
+                  <select
+                    id="memory-profile"
+                    value={selectedSettingsProfile ?? ''}
+                    onChange={(event) => selectSettingsProfile(event.target.value)}
+                  >
+                    {!selectedSettingsProfile ? <option value="" disabled>Select a profile</option> : null}
+                    {sortedProfiles([
+                      ...configuredProfiles,
+                      ...profiles.filter(
+                        (profile) => profile.name === 'openai-account' &&
+                          !configuredProfiles.some((saved) => saved.name === profile.name),
+                      ),
+                    ]).map((profile) => (
+                      <option key={profile.name} value={profile.name}>{profile.name}</option>
+                    ))}
+                  </select>
+                </label>
+                {selectedSettingsProfile ? (
+                  <MemorySettingsPanel key={selectedSettingsProfile} client={client} profile={selectedSettingsProfile} />
+                ) : <p>Select a profile to configure its memory provider.</p>}
+              </>
+            ) : null}
             {settingsSection === 'profiles' && canEditProfiles ? (
               <>
                 <div className="settings-heading">

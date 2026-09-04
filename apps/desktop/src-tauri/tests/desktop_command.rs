@@ -141,6 +141,21 @@ model = "qwen3:14b"
             )
             .unwrap();
     }
+    let memory_store =
+        rynna_config::memory::MemorySettingsStore::new(provider_settings.memory_settings_path());
+    for name in ["new", "work"] {
+        memory_store
+            .save(
+                name,
+                rynna_config::memory::MemorySettings::Hindsight {
+                    deployment: rynna_config::memory::HindsightDeployment::Cloud,
+                    api_base: rynna_config::memory::HINDSIGHT_CLOUD_URL.to_owned(),
+                    bank_id: name.to_owned(),
+                    api_key: Some(format!("{name}-secret")),
+                },
+            )
+            .unwrap();
+    }
     let mut runtime = AgentProfiles::new(
         "work",
         vec![
@@ -181,6 +196,13 @@ model = "qwen3:14b"
     assert_eq!(runtime.default_profile(), "work");
     assert!(provider_settings.list("new").is_empty());
     assert_eq!(provider_settings.list("renamed").len(), 1);
+    assert!(matches!(
+        memory_store.load("new").unwrap(),
+        rynna_config::memory::MemorySettings::None
+    ));
+    assert!(
+        matches!(memory_store.load("renamed").unwrap(), rynna_config::memory::MemorySettings::Hindsight { api_key: Some(key), .. } if key == "new-secret")
+    );
 
     delete_saved_profile(
         &mut catalog,
@@ -192,6 +214,14 @@ model = "qwen3:14b"
     assert_eq!(runtime.default_profile(), "alpha");
     assert!(runtime.clone_agent("work").is_none());
     assert!(provider_settings.list("work").is_empty());
+    assert!(matches!(
+        memory_store.load("work").unwrap(),
+        rynna_config::memory::MemorySettings::None
+    ));
+    assert!(matches!(
+        memory_store.load("renamed").unwrap(),
+        rynna_config::memory::MemorySettings::Hindsight { .. }
+    ));
 }
 
 #[test]
@@ -399,39 +429,10 @@ async fn desktop_openai_commands_use_codex_managed_credentials_without_echoing_k
 #[cfg(unix)]
 #[tokio::test]
 async fn codex_app_server_provider_returns_the_subscription_answer() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
-    let program = directory.path().join("fake-codex-provider");
-    std::fs::write(
-        &program,
-        r#"#!/bin/sh
-[ "$1" = "--version" ] && { printf '%s\n' 'codex-cli 0.149.1'; exit 0; }
-[ "$1" = "app-server" ] || exit 2
-[ "${CODEX_HOME##*/}" = "rynna-codex" ] || exit 4
-IFS= read -r initialize
-case "$initialize" in *'"experimentalApi":true'*) ;; *) exit 4 ;; esac
-printf '%s\n' '{"id":1,"result":{"userAgent":"fake"}}'
-IFS= read -r initialized
-IFS= read -r thread
-case "$thread" in *'"sandbox":"read-only"'*) ;; *) exit 5 ;; esac
-case "$thread" in *'"features":{"shell_tool":false,"view_image":false}'*) ;; *) exit 6 ;; esac
-case "$thread" in *'"web_search":"disabled"'*) ;; *) exit 7 ;; esac
-case "$thread" in *'"environments":[]'*) ;; *) exit 8 ;; esac
-case "$thread" in *'"update_plan":{"enabled":false}'*) ;; *) exit 9 ;; esac
-printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
-IFS= read -r turn
-printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}'
-printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"other-thread","turnId":"other-turn","itemId":"item-9","delta":"forged"}}'
-printf '%s\n' '{"method":"turn/completed","params":{"threadId":"other-thread","turn":{"id":"other-turn","status":"completed","items":[]}}}'
-printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"item-forged","delta":"forged"}}'
-printf '%s\n' '{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","startedAtMs":1,"item":{"id":"item-1","type":"agentMessage","text":""}}}'
-printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"Subscription answer"}}'
-printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[]}}}'
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A checked-in executable avoids write/exec races in parallel Linux tests.
+    let program =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_codex_provider.sh");
     let provider = Arc::new(CodexAppServerProvider::with_home(
         &program,
         directory.path().canonicalize().unwrap().join("rynna-codex"),

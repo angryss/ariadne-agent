@@ -1,5 +1,8 @@
+import { isMemorySettings } from '@rynna/ui';
 import type {
   AgentClient,
+  MemorySettings,
+  MemorySettingsInput,
   CompletionDelta,
   CompletionDeltaHandler,
   ConfiguredProvider,
@@ -28,6 +31,18 @@ export class HttpAgentClient implements AgentClient {
     this.profilesEndpoint = profilesEndpoint;
     this.providersEndpoint = endpoint.replace(/\/respond$/, '/providers');
     this.fetcher = fetcher;
+  }
+
+  async getMemorySettings(profile: string): Promise<MemorySettings> {
+    const body = await this.providerRequest(`${this.profilesEndpoint}/${encodeURIComponent(profile)}/memory`, 'GET');
+    if (!isMemorySettings(body)) throw new Error('Rynna API returned invalid memory settings');
+    return body;
+  }
+
+  async saveMemorySettings(settings: MemorySettingsInput, profile: string): Promise<MemorySettings> {
+    const body = await this.providerRequest(`${this.profilesEndpoint}/${encodeURIComponent(profile)}/memory`, 'PUT', settings);
+    if (!isMemorySettings(body)) throw new Error('Rynna API returned invalid memory settings');
+    return body;
   }
 
   async listProviders(profile: string): Promise<ConfiguredProvider[]> {
@@ -84,7 +99,7 @@ export class HttpAgentClient implements AgentClient {
     return body;
   }
 
-  private async providerRequest(endpoint: string, method: string, body?: ProviderInput): Promise<unknown> {
+  private async providerRequest(endpoint: string, method: string, body?: ProviderInput | MemorySettingsInput): Promise<unknown> {
     const response = await this.fetcher(endpoint, {
       method,
       ...(body

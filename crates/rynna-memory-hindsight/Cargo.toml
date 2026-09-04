@@ -1,6 +1,6 @@
 [package]
-name = "rynna-core"
-description = "Transport-independent application core for Rynna"
+name = "rynna-memory-hindsight"
+description = "Hindsight Cloud and self-hosted memory adapter for Rynna"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,11 +8,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+rynna-core = { path = "../rynna-core" }
+rynna-config = { path = "../rynna-config" }
 async-trait.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
 tokio.workspace = true
-tracing.workspace = true
-uuid.workspace = true

@@ -4,6 +4,7 @@ members = [
   "apps/desktop/src-tauri",
   "crates/rynna-config",
   "crates/rynna-core",
+  "crates/rynna-memory-hindsight",
   "crates/rynna-provider-anthropic",
   "crates/rynna-provider-openai",
   "crates/rynna-server",

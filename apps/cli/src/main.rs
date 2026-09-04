@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
         return list_profiles(&catalog, &default_profile, cli.model.as_deref(), output);
     }
     let include_all_profiles = matches!(&command, Command::Serve { .. });
-    let profiles = configured_profiles(
+    let mut profiles = configured_profiles(
         &catalog,
         &default_profile,
         ProfileOverrides {
@@ -135,6 +135,14 @@ async fn main() -> Result<()> {
         },
         include_all_profiles,
     )?;
+
+    let memory_store = rynna_config::memory::MemorySettingsStore::new(
+        provider_config.with_file_name("memory.toml"),
+    );
+    for profile in profiles.profiles() {
+        let memory = rynna_memory_hindsight::configured_memory(&memory_store.load(&profile.name)?)?;
+        profiles.set_memory_provider(&profile.name, memory)?;
+    }
 
     match command {
         Command::Run { prompt, output } => {

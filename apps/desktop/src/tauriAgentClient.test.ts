@@ -3,6 +3,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { TauriAgentClient } from './tauriAgentClient';
 
 describe('TauriAgentClient', () => {
+  it('loads and saves memory settings through narrow desktop commands', async () => {
+    const invoke = vi.fn().mockResolvedValue({ kind: 'none' });
+    const client = new TauriAgentClient(invoke);
+    expect(await client.getMemorySettings('work profile')).toEqual({ kind: 'none' });
+    expect(invoke).toHaveBeenLastCalledWith('get_memory_settings', { profile: 'work profile' });
+    await client.saveMemorySettings({ kind: 'none' }, 'work profile');
+    expect(invoke).toHaveBeenLastCalledWith('save_memory_settings', { settings: { kind: 'none' }, profile: 'work profile' });
+    invoke.mockResolvedValueOnce({ kind: 'hindsight' });
+    await expect(client.getMemorySettings('work profile')).rejects.toThrow('invalid memory settings');
+  });
+
   it('invokes the narrow desktop response command', async () => {
     const invoke = vi.fn().mockResolvedValue({
       message: { role: 'assistant', content: 'From Tauri.' },

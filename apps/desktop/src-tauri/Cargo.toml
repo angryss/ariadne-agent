@@ -19,6 +19,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+rynna-memory-hindsight = { path = "../../../crates/rynna-memory-hindsight" }
 async-trait.workspace = true
 rynna-config = { path = "../../../crates/rynna-config" }
 rynna-core = { path = "../../../crates/rynna-core" }
