@@ -131,7 +131,8 @@ impl MemorySettings {
 struct MemorySettingsFile {
     version: u32,
     #[serde(default)]
-    profiles: BTreeMap<String, MemorySettings>,
+    // Decode only the selected profile so invalid entries remain independently repairable.
+    profiles: BTreeMap<String, toml::Value>,
 }
 
 pub struct MemorySettingsStore {
@@ -145,7 +146,7 @@ impl MemorySettingsStore {
         }
     }
 
-    fn read_profiles(&self) -> Result<BTreeMap<String, MemorySettings>, MemorySettingsError> {
+    fn read_profiles(&self) -> Result<BTreeMap<String, toml::Value>, MemorySettingsError> {
         let source = match std::fs::read_to_string(&self.path) {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -161,16 +162,18 @@ impl MemorySettingsStore {
                 "unsupported memory settings version",
             ));
         }
-        for (profile, settings) in &file.profiles {
+        for profile in file.profiles.keys() {
             validate_profile(profile)?;
-            settings.validate()?;
         }
         Ok(file.profiles)
     }
 
     pub fn load(&self, profile: &str) -> Result<MemorySettings, MemorySettingsError> {
         validate_profile(profile)?;
-        Ok(self.read_profiles()?.remove(profile).unwrap_or_default())
+        match self.read_profiles()?.remove(profile) {
+            Some(value) => decode_settings(value),
+            None => Ok(MemorySettings::None),
+        }
     }
 
     fn lock(&self) -> Result<std::fs::File, MemorySettingsError> {
@@ -184,7 +187,7 @@ impl MemorySettingsStore {
 
     fn write_profiles(
         &self,
-        profiles: BTreeMap<String, MemorySettings>,
+        profiles: BTreeMap<String, toml::Value>,
     ) -> Result<(), MemorySettingsError> {
         let encoded = toml::to_string_pretty(&MemorySettingsFile {
             version: 1,
@@ -219,18 +222,24 @@ impl MemorySettingsStore {
                     api_base: old_base,
                     api_key: old_key,
                     ..
-                }) = profiles.get(profile)
-                && deployment == old_deployment
+                }) = profiles
+                    .get(profile)
+                    .cloned()
+                    .and_then(|value| decode_settings(value).ok())
+                && *deployment == old_deployment
                 && api_base.trim_end_matches('/') == old_base.trim_end_matches('/')
             {
-                *api_key = old_key.clone();
+                *api_key = old_key;
             }
             if api_key.as_ref().is_some_and(|key| key.is_empty()) {
                 *api_key = None;
             }
         }
         settings.validate()?;
-        profiles.insert(profile.to_owned(), settings.clone());
+        profiles.insert(
+            profile.to_owned(),
+            toml::Value::try_from(&settings).map_err(|_| MemorySettingsError::Write)?,
+        );
         self.write_profiles(profiles)?;
         Ok(settings)
     }
@@ -273,4 +282,14 @@ fn validate_profile(profile: &str) -> Result<(), MemorySettingsError> {
         ));
     }
     Ok(())
+}
+
+fn decode_settings(value: toml::Value) -> Result<MemorySettings, MemorySettingsError> {
+    let settings: MemorySettings = value.try_into().map_err(|_| {
+        MemorySettingsError::Invalid(
+            "invalid memory settings for this profile; save replacement settings",
+        )
+    })?;
+    settings.validate()?;
+    Ok(settings)
 }

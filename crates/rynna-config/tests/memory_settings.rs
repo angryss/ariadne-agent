@@ -226,3 +226,47 @@ fn unreleased_global_settings_are_not_implicitly_shared_with_any_profile() {
     assert!(store.save("work", MemorySettings::None).is_err());
     assert_eq!(std::fs::read_to_string(path).unwrap(), previous);
 }
+
+#[test]
+fn repairs_invalid_profiles_without_changing_other_profiles() {
+    for invalid in [
+        "kind = 'unknown'",
+        "kind = 'hindsight'\ndeployment = 'self_hosted'\napi_base = 'not-a-url'\nbank_id = 'bank'",
+    ] {
+        for replacement in [
+            MemorySettings::None,
+            hindsight("http://localhost:8888", false, None),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("memory.toml");
+            let source = format!(
+                "version = 1\n[profiles.broken]\n{invalid}\n[profiles.other]\nkind = 'hindsight'\ndeployment = 'cloud'\napi_base = '{HINDSIGHT_CLOUD_URL}'\nbank_id = 'other-bank'\napi_key = 'other-secret'\n[profiles.also_broken]\nkind = 'future-provider'\n"
+            );
+            std::fs::write(&path, &source).unwrap();
+            let store = MemorySettingsStore::new(&path);
+            assert!(store.load("broken").is_err());
+            assert!(store.load("other").is_ok());
+            store.save("broken", replacement).unwrap();
+            assert!(store.load("broken").is_ok());
+            let before: toml::Value = toml::from_str(&source).unwrap();
+            let after: toml::Value =
+                toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(before["profiles"]["other"], after["profiles"]["other"]);
+            assert_eq!(
+                before["profiles"]["also_broken"],
+                after["profiles"]["also_broken"]
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_file_cannot_be_overwritten_by_a_single_profile_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.toml");
+    let source = "version = 1\n[profiles.other]\napi_key = 'unterminated-secret";
+    std::fs::write(&path, source).unwrap();
+    let store = MemorySettingsStore::new(&path);
+    assert!(store.save("broken", MemorySettings::None).is_err());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}

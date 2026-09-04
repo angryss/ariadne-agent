@@ -224,3 +224,27 @@ it('ignores a previous profile load that resolves after switching', async () => 
   expect(screen.getByLabelText('Memory provider')).toHaveValue('none');
   expect(screen.queryByLabelText('API key')).not.toBeInTheDocument();
 });
+
+it.each(['none', 'hindsight'])('allows saving %s after a failed load', async (kind) => {
+  const user = userEvent.setup();
+  const save = vi.fn().mockResolvedValue({ kind: 'none' });
+  render(
+    <MemorySettingsPanel profile="test" client={{
+      respond: vi.fn(),
+      getMemorySettings: vi.fn().mockRejectedValue(new Error('Invalid profile settings')),
+      saveMemorySettings: save,
+    }} />,
+  );
+  await screen.findByRole('alert');
+  expect(screen.getByLabelText('Memory provider')).toBeEnabled();
+  if (kind === 'hindsight') {
+    await user.selectOptions(screen.getByLabelText('Memory provider'), 'hindsight');
+    await user.selectOptions(screen.getByLabelText('Hosting'), 'self_hosted');
+    await user.type(screen.getByLabelText('Memory bank ID'), 'repaired');
+  }
+  await user.click(screen.getByRole('button', { name: 'Save memory settings' }));
+  expect(save).toHaveBeenCalledWith(expect.objectContaining({ kind }), 'test');
+  expect(await screen.findByRole('status')).toHaveTextContent('Memory settings saved');
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Retry loading memory settings' })).not.toBeInTheDocument();
+});

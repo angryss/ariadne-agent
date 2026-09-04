@@ -80,7 +80,7 @@ export function MemorySettingsPanel({
 
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (!client.saveMemorySettings || loading || loadFailed || saving) return;
+    if (!client.saveMemorySettings || loading || saving) return;
     setSaving(true);
     setError(null);
     setStatus('');
@@ -96,6 +96,7 @@ export function MemorySettingsPanel({
           };
     try {
       apply(await client.saveMemorySettings(settings, profile));
+      setLoadFailed(false);
       setStatus('Memory settings saved. Changes apply to your next request.');
     } catch (reason) {
       setError(
@@ -125,11 +126,7 @@ export function MemorySettingsPanel({
         onSubmit={save}
         onChange={() => setStatus('')}
       >
-        <fieldset
-          disabled={
-            loading || loadFailed || saving || !client.saveMemorySettings
-          }
-        >
+        <fieldset disabled={loading || saving || !client.saveMemorySettings}>
           <label htmlFor="memory-provider">Memory provider</label>
           <select
             id="memory-provider"
@@ -237,12 +234,20 @@ export function MemorySettingsPanel({
         </fieldset>
       </form>
       {loadFailed ? (
-        <Button
-          type="button"
-          onClick={() => setLoadAttempt((attempt) => attempt + 1)}
-        >
-          Retry loading memory settings
-        </Button>
+        <>
+          <p>
+            Settings could not be loaded. Retry or save replacement settings for
+            this profile. If memory.toml has invalid syntax, repair the file first
+            to preserve other profiles.
+          </p>
+          <Button
+            type="button"
+            disabled={loading || saving}
+            onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+          >
+            Retry loading memory settings
+          </Button>
+        </>
       ) : null}
       {error ? <p role="alert">{error}</p> : null}
       {status ? <p role="status">{status}</p> : null}
