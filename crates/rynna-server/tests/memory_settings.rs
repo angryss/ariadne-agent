@@ -36,7 +36,20 @@ fn app(path: &std::path::Path, model: Arc<Model>) -> Router {
         mcp_servers: vec![],
         capabilities: vec![],
     };
-    let profiles = AgentProfiles::new("test", [(profile, Agent::new(model, "policy"))]).unwrap();
+    let profiles = AgentProfiles::new(
+        "test",
+        [
+            (profile.clone(), Agent::new(model.clone(), "policy")),
+            (
+                Profile {
+                    name: "other".into(),
+                    ..profile
+                },
+                Agent::new(model, "policy"),
+            ),
+        ],
+    )
+    .unwrap();
     router_with_profiles_and_provider_settings(profiles, ProviderSettingsStore::load(path).unwrap())
 }
 async fn request(
@@ -60,7 +73,14 @@ async fn request(
     let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-    (status, serde_json::from_slice(&body).unwrap())
+    (
+        status,
+        if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        },
+    )
 }
 
 #[tokio::test]
@@ -73,7 +93,7 @@ async fn settings_are_local_only_default_to_none_and_never_return_secrets() {
             request(
                 &app,
                 method,
-                "/v1/settings/memory",
+                "/v1/profiles/test/memory",
                 json!({"kind":"none"}),
                 false
             )
@@ -83,30 +103,30 @@ async fn settings_are_local_only_default_to_none_and_never_return_secrets() {
         );
     }
     assert_eq!(
-        request(&app, "GET", "/v1/settings/memory", Value::Null, true)
+        request(&app, "GET", "/v1/profiles/test/memory", Value::Null, true)
             .await
             .1,
         json!({"kind":"none"})
     );
     let input = json!({"kind":"hindsight", "deployment":"cloud", "api_base":"https://api.hindsight.vectorize.io", "bank_id":"rynna", "api_key":"test-secret"});
-    let (status, saved) = request(&app, "PUT", "/v1/settings/memory", input, true).await;
+    let (status, saved) = request(&app, "PUT", "/v1/profiles/test/memory", input, true).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(saved["api_key_configured"], true);
     assert!(!saved.to_string().contains("test-secret"));
     assert!(saved.get("api_key").is_none());
     assert_eq!(
-        request(&app, "GET", "/v1/settings/memory", Value::Null, true)
+        request(&app, "GET", "/v1/profiles/test/memory", Value::Null, true)
             .await
             .1,
         saved
     );
     let mut malformed = saved.clone();
     malformed["deployment"] = json!("test-secret");
-    let (status, body) = request(&app, "PUT", "/v1/settings/memory", malformed, true).await;
+    let (status, body) = request(&app, "PUT", "/v1/profiles/test/memory", malformed, true).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(!body.to_string().contains("test-secret"));
     assert_eq!(
-        request(&app, "GET", "/v1/settings/memory", Value::Null, true)
+        request(&app, "GET", "/v1/profiles/test/memory", Value::Null, true)
             .await
             .1,
         saved
@@ -115,7 +135,7 @@ async fn settings_are_local_only_default_to_none_and_never_return_secrets() {
         request(
             &app,
             "PUT",
-            "/v1/settings/memory",
+            "/v1/profiles/test/memory",
             json!({"kind":"none"}),
             true
         )
@@ -146,7 +166,7 @@ async fn saving_and_disabling_change_live_sync_and_stream_requests_and_survive_r
     let settings =
         json!({"kind":"hindsight","deployment":"self_hosted","api_base":base,"bank_id":"test"});
     assert_eq!(
-        request(&router, "PUT", "/v1/settings/memory", settings, true)
+        request(&router, "PUT", "/v1/profiles/test/memory", settings, true)
             .await
             .0,
         StatusCode::OK
@@ -177,7 +197,7 @@ async fn saving_and_disabling_change_live_sync_and_stream_requests_and_survive_r
         request(
             &router,
             "PUT",
-            "/v1/settings/memory",
+            "/v1/profiles/test/memory",
             json!({"kind":"none"}),
             true
         )
@@ -204,7 +224,7 @@ async fn failed_persistence_is_reported_and_does_not_enable_memory() {
         request(
             &router,
             "PUT",
-            "/v1/settings/memory",
+            "/v1/profiles/test/memory",
             json!({"kind":"none"}),
             true
         )
@@ -212,4 +232,197 @@ async fn failed_persistence_is_reported_and_does_not_enable_memory() {
         .0,
         StatusCode::INTERNAL_SERVER_ERROR
     );
+}
+
+#[tokio::test]
+async fn unknown_profiles_and_global_endpoint_cannot_read_or_write_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let router = app(
+        &dir.path().join("providers.toml"),
+        Arc::new(Model::default()),
+    );
+    for path in ["/v1/profiles/missing/memory", "/v1/settings/memory"] {
+        for method in ["GET", "PUT"] {
+            assert!(
+                !request(&router, method, path, json!({"kind":"none"}), true)
+                    .await
+                    .0
+                    .is_success()
+            );
+        }
+    }
+    assert!(!dir.path().join("memory.toml").exists());
+}
+
+#[tokio::test]
+async fn two_profiles_route_to_their_own_banks_and_disabling_one_keeps_the_other_enabled() {
+    let calls = Calls::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let memory_app = Router::new()
+        .route("/{*path}", post(memory))
+        .with_state(calls.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, memory_app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("providers.toml");
+    let model = Arc::new(Model::default());
+    let router = app(&path, model.clone());
+    for name in ["test", "other"] {
+        assert_eq!(
+            request(
+                &router,
+                "GET",
+                &format!("/v1/profiles/{name}/memory"),
+                Value::Null,
+                true
+            )
+            .await
+            .1,
+            json!({"kind":"none"})
+        );
+        let settings = json!({"kind":"hindsight", "deployment":"self_hosted", "api_base":base, "bank_id": name});
+        assert_eq!(
+            request(
+                &router,
+                "PUT",
+                &format!("/v1/profiles/{name}/memory"),
+                settings,
+                true
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    let restarted = app(&path, model);
+    for name in ["test", "other"] {
+        let prompt = json!({"profile":name, "prompt":"hello", "history":[]});
+        assert_eq!(
+            request(&restarted, "POST", "/v1/respond", prompt, true)
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            "/v1/default/banks/test/memories/recall",
+            "/v1/default/banks/test/memories",
+            "/v1/default/banks/other/memories/recall",
+            "/v1/default/banks/other/memories"
+        ]
+    );
+    assert_eq!(
+        request(
+            &restarted,
+            "PUT",
+            "/v1/profiles/test/memory",
+            json!({"kind":"none"}),
+            true
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    for name in ["test", "other"] {
+        request(
+            &restarted,
+            "POST",
+            "/v1/respond",
+            json!({"profile":name,"prompt":"again","history":[]}),
+            true,
+        )
+        .await;
+    }
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 6);
+    assert!(calls[4..].iter().all(|path| path.contains("/banks/other/")));
+    server.abort();
+}
+
+#[tokio::test]
+async fn catalog_profile_rename_and_delete_move_and_remove_memory_settings() {
+    use rynna_config::{
+        ProfileCatalog,
+        memory::{MemorySettings, MemorySettingsStore},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+version = 1
+default_profile = "test"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.test]
+provider = "ollama"
+model = "model"
+"#,
+    )
+    .unwrap();
+    let catalog = ProfileCatalog::load(&config_path).unwrap();
+    let profile = catalog.resolve("test").unwrap().profile;
+    let profiles = AgentProfiles::new(
+        "test",
+        [(profile, Agent::new(Arc::new(Model::default()), "policy"))],
+    )
+    .unwrap();
+    let router = rynna_server::router_with_profiles_provider_settings_and_catalog(
+        profiles,
+        ProviderSettingsStore::load(dir.path().join("providers.toml")).unwrap(),
+        catalog,
+    );
+    let draft = json!({"name":"new", "providers":[{"provider":"ollama", "model":"model"}], "active_skills":[], "mcp_servers":[], "capabilities":[]});
+    assert_eq!(
+        request(&router, "POST", "/v1/profiles", draft.clone(), true)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let settings = json!({"kind":"hindsight", "deployment":"cloud", "api_base":"https://api.hindsight.vectorize.io", "bank_id":"new-bank", "api_key":"new-secret"});
+    assert_eq!(
+        request(&router, "PUT", "/v1/profiles/new/memory", settings, true)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let mut renamed = draft.clone();
+    renamed["name"] = json!("renamed");
+    assert_eq!(
+        request(&router, "PUT", "/v1/profiles/new", renamed, true)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let store = MemorySettingsStore::new(dir.path().join("memory.toml"));
+    assert!(matches!(store.load("new").unwrap(), MemorySettings::None));
+    assert!(
+        matches!(store.load("renamed").unwrap(), MemorySettings::Hindsight { api_key: Some(key), .. } if key == "new-secret")
+    );
+    assert_eq!(
+        request(
+            &router,
+            "GET",
+            "/v1/profiles/renamed/memory",
+            Value::Null,
+            true
+        )
+        .await
+        .1["bank_id"],
+        "new-bank"
+    );
+    assert_eq!(
+        request(&router, "DELETE", "/v1/profiles/renamed", Value::Null, true)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(matches!(
+        store.load("renamed").unwrap(),
+        MemorySettings::None
+    ));
+    assert!(matches!(store.load("test").unwrap(), MemorySettings::None));
 }

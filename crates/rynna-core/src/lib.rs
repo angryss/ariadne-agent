@@ -1089,10 +1089,16 @@ impl AgentProfiles {
     }
 
     /// Applies to subsequent requests; in-flight agents retain their original provider.
-    pub fn set_memory_provider(&mut self, memory: Option<Arc<dyn MemoryProvider>>) {
-        for (_, agent) in Arc::make_mut(&mut self.profiles).values_mut() {
-            agent.memory = memory.clone();
-        }
+    pub fn set_memory_provider(
+        &mut self,
+        profile: &str,
+        memory: Option<Arc<dyn MemoryProvider>>,
+    ) -> Result<(), ProfileError> {
+        let (_, agent) = Arc::make_mut(&mut self.profiles)
+            .get_mut(profile)
+            .ok_or_else(|| ProfileError::UnknownProfile(profile.to_owned()))?;
+        agent.memory = memory;
+        Ok(())
     }
 
     pub fn default_profile(&self) -> &str {

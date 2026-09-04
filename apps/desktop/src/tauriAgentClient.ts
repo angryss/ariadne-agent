@@ -34,14 +34,14 @@ export class TauriAgentClient implements AgentClient {
     this.createChannel = createChannel;
   }
 
-  async getMemorySettings(): Promise<MemorySettings> {
-    const settings = await this.invoke('get_memory_settings', {});
+  async getMemorySettings(profile: string): Promise<MemorySettings> {
+    const settings = await this.invoke('get_memory_settings', { profile });
     if (!isMemorySettings(settings)) throw new Error('Rynna desktop returned invalid memory settings');
     return settings;
   }
 
-  async saveMemorySettings(settings: MemorySettingsInput): Promise<MemorySettings> {
-    const saved = await this.invoke('save_memory_settings', { settings });
+  async saveMemorySettings(settings: MemorySettingsInput, profile: string): Promise<MemorySettings> {
+    const saved = await this.invoke('save_memory_settings', { settings, profile });
     if (!isMemorySettings(saved)) throw new Error('Rynna desktop returned invalid memory settings');
     return saved;
   }

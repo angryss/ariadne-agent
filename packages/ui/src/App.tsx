@@ -772,7 +772,32 @@ export function App({ client }: AppProps) {
             </nav>
           </aside>
           <div className="settings-content">
-            {settingsSection === 'memory' ? <MemorySettingsPanel client={client} /> : null}
+            {settingsSection === 'memory' ? (
+              <>
+                <label className="profile-picker" htmlFor="memory-profile">
+                  <span>Profile</span>
+                  <select
+                    id="memory-profile"
+                    value={selectedSettingsProfile ?? ''}
+                    onChange={(event) => selectSettingsProfile(event.target.value)}
+                  >
+                    {!selectedSettingsProfile ? <option value="" disabled>Select a profile</option> : null}
+                    {sortedProfiles([
+                      ...configuredProfiles,
+                      ...profiles.filter(
+                        (profile) => profile.name === 'openai-account' &&
+                          !configuredProfiles.some((saved) => saved.name === profile.name),
+                      ),
+                    ]).map((profile) => (
+                      <option key={profile.name} value={profile.name}>{profile.name}</option>
+                    ))}
+                  </select>
+                </label>
+                {selectedSettingsProfile ? (
+                  <MemorySettingsPanel key={selectedSettingsProfile} client={client} profile={selectedSettingsProfile} />
+                ) : <p>Select a profile to configure its memory provider.</p>}
+              </>
+            ) : null}
             {settingsSection === 'profiles' && canEditProfiles ? (
               <>
                 <div className="settings-heading">

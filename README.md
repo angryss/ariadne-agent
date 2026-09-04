@@ -239,20 +239,23 @@ Rynna is available under the [MIT License](LICENSE).
 
 ## Memory providers
 
-Open **Settings → Memory provider** in web or desktop. The provider defaults to **None**; existing installations make no memory calls until configured. Select **Hindsight** to reveal its settings:
+Open **Settings → Memory provider** in web or desktop and choose a profile. Each profile defaults to **None**; existing installations make no memory calls until configured. Select **Hindsight** to reveal its settings:
 
 - **Hindsight Cloud:** the official API URL, your memory bank ID, and an API key.
 - **Self-hosted:** your server API base URL (for example `http://localhost:8888`), bank ID, and an optional API key for authenticated servers. Reverse-proxy path prefixes are supported; enter the base URL without `/v1/default/banks`.
 
-Save to apply the choice to subsequent requests immediately. All profiles in the application share the selected bank. Rynna recalls relevant context before each turn and retains only the completed user message and final answer, including for streaming responses. It does not automatically upload previous history, tool output, or thinking. Recalled text is bounded and labeled as untrusted reference data. A memory failure is logged and does not prevent a model response; each operation has a ten-second deadline. Hindsight retention is queued asynchronously, so new memories may take time to become searchable.
+Save to apply the choice to subsequent requests for that profile immediately. Provider choice, hosting, endpoint, bank ID, and credentials are independent per profile. Use distinct bank IDs to keep memories separate; pointing two profiles at the same bank intentionally shares its contents. Rynna recalls relevant context before each turn and retains only the completed user message and final answer, including for streaming responses. It does not automatically upload previous history, tool output, or thinking. Recalled text is bounded and labeled as untrusted reference data. A memory failure is logged and does not prevent a model response; each operation has a ten-second deadline. Hindsight retention is queued asynchronously, so new memories may take time to become searchable.
 
-Selecting **None** stops future memory operations and removes the saved local credential. Existing memories remain on Hindsight; requests already in progress finish with their original provider. An unchanged blank API-key field preserves a saved credential only for the same endpoint and hosting mode. Self-hosted settings also offer an explicit remove-key checkbox.
+Selecting **None** stops future memory operations for the selected profile and removes only its saved local credential. Existing memories remain on Hindsight; requests already in progress finish with their original provider. An unchanged blank API-key field preserves that profile’s saved credential only for the same endpoint and hosting mode. Self-hosted settings also offer an explicit remove-key checkbox.
 
-Settings are stored in `memory.toml` beside `providers.toml`, including when `--provider-config` / `RYNNA_PROVIDER_CONFIG` chooses a custom directory. CLI chat and one-shot runs read this file at startup. Web/desktop changes affect their current process; restart other running processes to pick up changes. The file is written atomically with owner-only permissions on Unix. API keys are never returned to the frontend or written to browser storage.
+Settings are stored as versioned `[profiles.<name>]` entries in `memory.toml` beside `providers.toml`, including when `--provider-config` / `RYNNA_PROVIDER_CONFIG` chooses a custom directory. CLI chat and one-shot runs read this file at startup. Web/desktop changes affect their current process; restart other running processes to pick up changes. Renaming a profile moves its memory settings; deleting a profile removes them locally without deleting remote memories. New or renamed profiles still become runnable after restart, consistent with the profile catalog. The file is written atomically with owner-only permissions on Unix. API keys are never returned to the frontend or written to browser storage.
 
 For CLI-only configuration, create `memory.toml` in that directory (restrict its permissions to your user):
 
 ```toml
+version = 1
+
+[profiles.local]
 kind = "hindsight"
 deployment = "self_hosted"
 api_base = "http://localhost:8888"
@@ -260,6 +263,6 @@ bank_id = "rynna"
 # api_key = "your-server-key" # only for authenticated servers
 ```
 
-For Cloud, use `deployment = "cloud"`, `api_base = "https://api.hindsight.vectorize.io"`, and an `api_key`. To disable memory, replace the file contents with `kind = "none"`.
+For Cloud, use `deployment = "cloud"`, `api_base = "https://api.hindsight.vectorize.io"`, and an `api_key`. Replace `local` with your profile name. To disable its memory, replace that profile’s table with `kind = "none"` or remove the table, leaving other profiles intact. The unreleased global format is rejected with migration instructions: add `version = 1` and place the previous settings under the intended `[profiles.<name>]` table.
 
-The HTTP settings contract is `GET` / `PUT /v1/settings/memory`; both methods use the existing loopback-only administration restriction. Desktop uses `get_memory_settings` / `save_memory_settings` IPC commands. The provider-neutral `rynna_core::MemoryProvider` trait exposes `recall` and `retain`; implement this port and register a configuration variant and composition adapter to add another provider. Hindsight-specific HTTP behavior lives in `rynna-memory-hindsight`.
+The HTTP settings contract is `GET` / `PUT /v1/profiles/{profile}/memory`; both methods use the existing loopback-only administration restriction. Desktop uses `get_memory_settings` / `save_memory_settings` IPC commands, both with a required `profile` argument. Unknown profiles are rejected. The provider-neutral `rynna_core::MemoryProvider` trait exposes `recall` and `retain`; implement this port and register a configuration variant and composition adapter to add another provider. Hindsight-specific HTTP behavior lives in `rynna-memory-hindsight`.

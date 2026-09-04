@@ -84,8 +84,8 @@ export function isMemorySettings(value: unknown): value is MemorySettings {
 }
 
 export interface AgentClient {
-  getMemorySettings?(): Promise<MemorySettings>;
-  saveMemorySettings?(settings: MemorySettingsInput): Promise<MemorySettings>;
+  getMemorySettings?(profile: string): Promise<MemorySettings>;
+  saveMemorySettings?(settings: MemorySettingsInput, profile: string): Promise<MemorySettings>;
   respond(request: RespondRequest, onDelta?: CompletionDeltaHandler): Promise<RespondResponse>;
   listProfiles?(): Promise<ProfileCatalog>;
   createProfile?(profile: Profile): Promise<Profile>;

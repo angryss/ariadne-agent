@@ -139,8 +139,10 @@ async fn main() -> Result<()> {
     let memory_store = rynna_config::memory::MemorySettingsStore::new(
         provider_config.with_file_name("memory.toml"),
     );
-    let memory = rynna_memory_hindsight::configured_memory(&memory_store.load()?)?;
-    profiles.set_memory_provider(memory);
+    for profile in profiles.profiles() {
+        let memory = rynna_memory_hindsight::configured_memory(&memory_store.load(&profile.name)?)?;
+        profiles.set_memory_provider(&profile.name, memory)?;
+    }
 
     match command {
         Command::Run { prompt, output } => {

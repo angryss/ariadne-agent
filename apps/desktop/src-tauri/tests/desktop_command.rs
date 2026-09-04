@@ -141,6 +141,21 @@ model = "qwen3:14b"
             )
             .unwrap();
     }
+    let memory_store =
+        rynna_config::memory::MemorySettingsStore::new(provider_settings.memory_settings_path());
+    for name in ["new", "work"] {
+        memory_store
+            .save(
+                name,
+                rynna_config::memory::MemorySettings::Hindsight {
+                    deployment: rynna_config::memory::HindsightDeployment::Cloud,
+                    api_base: rynna_config::memory::HINDSIGHT_CLOUD_URL.to_owned(),
+                    bank_id: name.to_owned(),
+                    api_key: Some(format!("{name}-secret")),
+                },
+            )
+            .unwrap();
+    }
     let mut runtime = AgentProfiles::new(
         "work",
         vec![
@@ -181,6 +196,13 @@ model = "qwen3:14b"
     assert_eq!(runtime.default_profile(), "work");
     assert!(provider_settings.list("new").is_empty());
     assert_eq!(provider_settings.list("renamed").len(), 1);
+    assert!(matches!(
+        memory_store.load("new").unwrap(),
+        rynna_config::memory::MemorySettings::None
+    ));
+    assert!(
+        matches!(memory_store.load("renamed").unwrap(), rynna_config::memory::MemorySettings::Hindsight { api_key: Some(key), .. } if key == "new-secret")
+    );
 
     delete_saved_profile(
         &mut catalog,
@@ -192,6 +214,14 @@ model = "qwen3:14b"
     assert_eq!(runtime.default_profile(), "alpha");
     assert!(runtime.clone_agent("work").is_none());
     assert!(provider_settings.list("work").is_empty());
+    assert!(matches!(
+        memory_store.load("work").unwrap(),
+        rynna_config::memory::MemorySettings::None
+    ));
+    assert!(matches!(
+        memory_store.load("renamed").unwrap(),
+        rynna_config::memory::MemorySettings::Hindsight { .. }
+    ));
 }
 
 #[test]

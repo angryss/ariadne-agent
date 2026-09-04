@@ -1,5 +1,6 @@
-//! Application-wide memory settings. Credentials never appear in the response type.
+//! Profile-specific memory settings. Credentials never appear in the response type.
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use url::Url;
@@ -125,6 +126,14 @@ impl MemorySettings {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MemorySettingsFile {
+    version: u32,
+    #[serde(default)]
+    profiles: BTreeMap<String, MemorySettings>,
+}
+
 pub struct MemorySettingsStore {
     path: PathBuf,
 }
@@ -136,28 +145,67 @@ impl MemorySettingsStore {
         }
     }
 
-    pub fn load(&self) -> Result<MemorySettings, MemorySettingsError> {
-        let settings: MemorySettings = match std::fs::read_to_string(&self.path) {
-            Ok(source) => toml::from_str(&source).map_err(|_| MemorySettingsError::Read)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => MemorySettings::None,
+    fn read_profiles(&self) -> Result<BTreeMap<String, MemorySettings>, MemorySettingsError> {
+        let source = match std::fs::read_to_string(&self.path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
             Err(_) => return Err(MemorySettingsError::Read),
         };
-        settings.validate()?;
-        Ok(settings)
+        let file: MemorySettingsFile = toml::from_str(&source).map_err(|_| MemorySettingsError::Invalid(
+            "memory.toml must use version = 1 and [profiles.<name>] entries; assign any previous global settings to a profile"
+        ))?;
+        if file.version != 1 {
+            return Err(MemorySettingsError::Invalid(
+                "unsupported memory settings version",
+            ));
+        }
+        for (profile, settings) in &file.profiles {
+            validate_profile(profile)?;
+            settings.validate()?;
+        }
+        Ok(file.profiles)
+    }
+
+    pub fn load(&self, profile: &str) -> Result<MemorySettings, MemorySettingsError> {
+        validate_profile(profile)?;
+        Ok(self.read_profiles()?.remove(profile).unwrap_or_default())
+    }
+
+    fn lock(&self) -> Result<std::fs::File, MemorySettingsError> {
+        super::ProviderSettingsStore {
+            path: self.path.clone(),
+            providers: Default::default(),
+        }
+        .lock_exclusive()
+        .map_err(|_| MemorySettingsError::Write)
+    }
+
+    fn write_profiles(
+        &self,
+        profiles: BTreeMap<String, MemorySettings>,
+    ) -> Result<(), MemorySettingsError> {
+        let encoded = toml::to_string_pretty(&MemorySettingsFile {
+            version: 1,
+            profiles,
+        })
+        .map_err(|_| MemorySettingsError::Write)?;
+        let temporary = super::write_private_temporary_file(&self.path, encoded.as_bytes())
+            .map_err(|_| MemorySettingsError::Write)?;
+        let _cleanup = super::TemporaryFileCleanup(temporary.clone());
+        super::replace_file(&temporary, &self.path).map_err(|_| MemorySettingsError::Write)
     }
 
     pub fn save(
         &self,
+        profile: &str,
         mut settings: MemorySettings,
     ) -> Result<MemorySettings, MemorySettingsError> {
-        let lock_store = super::ProviderSettingsStore {
-            path: self.path.clone(),
-            providers: Default::default(),
-        };
-        let _lock = lock_store
-            .lock_exclusive()
-            .map_err(|_| MemorySettingsError::Write)?;
-        // Omission preserves a credential only for the same destination. An empty key clears it.
+        validate_profile(profile)?;
+        let _lock = self.lock()?;
+        let mut profiles = self.read_profiles()?;
+        // Omission preserves only this profile's credential for the same destination.
         if let MemorySettings::Hindsight {
             deployment,
             api_base,
@@ -166,27 +214,63 @@ impl MemorySettingsStore {
         } = &mut settings
         {
             if api_key.is_none()
-                && let MemorySettings::Hindsight {
+                && let Some(MemorySettings::Hindsight {
                     deployment: old_deployment,
                     api_base: old_base,
                     api_key: old_key,
                     ..
-                } = self.load()?
-                && *deployment == old_deployment
+                }) = profiles.get(profile)
+                && deployment == old_deployment
                 && api_base.trim_end_matches('/') == old_base.trim_end_matches('/')
             {
-                *api_key = old_key;
+                *api_key = old_key.clone();
             }
             if api_key.as_ref().is_some_and(|key| key.is_empty()) {
                 *api_key = None;
             }
         }
         settings.validate()?;
-        let encoded = toml::to_string_pretty(&settings).map_err(|_| MemorySettingsError::Write)?;
-        let temporary = super::write_private_temporary_file(&self.path, encoded.as_bytes())
-            .map_err(|_| MemorySettingsError::Write)?;
-        let _cleanup = super::TemporaryFileCleanup(temporary.clone());
-        super::replace_file(&temporary, &self.path).map_err(|_| MemorySettingsError::Write)?;
+        profiles.insert(profile.to_owned(), settings.clone());
+        self.write_profiles(profiles)?;
         Ok(settings)
     }
+
+    pub fn rename_profile(&self, original: &str, name: &str) -> Result<(), MemorySettingsError> {
+        validate_profile(original)?;
+        validate_profile(name)?;
+        if original == name {
+            return Ok(());
+        }
+        let _lock = self.lock()?;
+        let mut profiles = self.read_profiles()?;
+        if profiles.contains_key(name) {
+            return Err(MemorySettingsError::Invalid(
+                "memory settings already exist for the new profile name",
+            ));
+        }
+        if let Some(settings) = profiles.remove(original) {
+            profiles.insert(name.to_owned(), settings);
+            self.write_profiles(profiles)?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_profile(&self, profile: &str) -> Result<(), MemorySettingsError> {
+        validate_profile(profile)?;
+        let _lock = self.lock()?;
+        let mut profiles = self.read_profiles()?;
+        if profiles.remove(profile).is_some() {
+            self.write_profiles(profiles)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_profile(profile: &str) -> Result<(), MemorySettingsError> {
+    if profile.trim().is_empty() {
+        return Err(MemorySettingsError::Invalid(
+            "memory profile must not be blank",
+        ));
+    }
+    Ok(())
 }

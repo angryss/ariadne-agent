@@ -138,17 +138,24 @@ fn router_with_runtime(
         .unwrap_or_else(|| PathBuf::from("claude"));
     let mut profiles = profiles;
     if let Some(store) = &provider_settings {
-        match MemorySettingsStore::new(store.memory_settings_path()).load() {
-            Ok(settings) => match configured_memory(&settings) {
-                Ok(memory) => profiles.set_memory_provider(memory),
-                Err(_) => tracing::warn!("could not configure memory provider"),
-            },
-            Err(_) => tracing::warn!("could not load memory settings"),
+        let store = MemorySettingsStore::new(store.memory_settings_path());
+        for profile in profiles.profiles() {
+            match store.load(&profile.name) {
+                Ok(settings) => match configured_memory(&settings) {
+                    Ok(memory) => {
+                        profiles
+                            .set_memory_provider(&profile.name, memory)
+                            .expect("existing profile");
+                    }
+                    Err(_) => tracing::warn!("could not configure memory provider"),
+                },
+                Err(_) => tracing::warn!("could not load memory settings"),
+            }
         }
     }
     let provider_routes = Router::new()
         .route(
-            "/v1/settings/memory",
+            "/v1/profiles/{profile}/memory",
             get(get_memory_settings)
                 .put(save_memory_settings)
                 .fallback(api_method_not_allowed),
@@ -424,9 +431,11 @@ async fn update_saved_profile(
     if saved.name != name
         && let Some(provider_settings) = &state.provider_settings
     {
+        let mut provider_settings = provider_settings.lock().await;
+        MemorySettingsStore::new(provider_settings.memory_settings_path())
+            .rename_profile(&name, &saved.name)
+            .map_err(memory_settings_error)?;
         provider_settings
-            .lock()
-            .await
             .rename_profile(&name, &saved.name)
             .map_err(provider_store_error)?;
     }
@@ -450,9 +459,11 @@ async fn delete_saved_profile(
     }
     catalog.delete_profile(&name).map_err(catalog_error)?;
     if let Some(provider_settings) = &state.provider_settings {
+        let mut provider_settings = provider_settings.lock().await;
+        MemorySettingsStore::new(provider_settings.memory_settings_path())
+            .delete_profile(&name)
+            .map_err(memory_settings_error)?;
         provider_settings
-            .lock()
-            .await
             .delete_profile(&name)
             .map_err(provider_store_error)?;
     }
@@ -541,35 +552,54 @@ fn memory_settings_error(error: MemorySettingsError) -> ApiError {
 
 async fn get_memory_settings(
     State(state): State<AppState>,
+    AxumPath(profile): AxumPath<String>,
 ) -> Result<Json<MemorySettingsResponse>, ApiError> {
+    ensure_known_profile(&state, &profile).await?;
     let store = provider_store(&state)?.lock().await;
     let settings = MemorySettingsStore::new(store.memory_settings_path())
-        .load()
+        .load(&profile)
         .map_err(memory_settings_error)?;
     Ok(Json(settings.response()))
 }
 
 async fn save_memory_settings(
     State(state): State<AppState>,
+    AxumPath(profile): AxumPath<String>,
     request: Result<Json<MemorySettings>, JsonRejection>,
 ) -> Result<Json<MemorySettingsResponse>, ApiError> {
-    // JSON rejection text can quote the submitted credential. Do not echo it.
     let Json(input) = request.map_err(|_| {
         memory_settings_error(MemorySettingsError::Invalid(
             "invalid memory settings request",
         ))
     })?;
+    // Serialize against catalog rename/delete, then lock runtime and credentials in that order.
+    let catalog = match &state.catalog {
+        Some(catalog) => Some(catalog.lock().await),
+        None => None,
+    };
     let mut profiles = state.profiles.lock().await;
+    let exists = catalog.as_ref().map_or_else(
+        || profiles.contains(&profile),
+        |catalog| catalog.resolve(&profile).is_ok(),
+    );
+    if !exists {
+        return Err(provider_settings_error("memory profile is not defined"));
+    }
     let store = provider_store(&state)?.lock().await;
     let settings = MemorySettingsStore::new(store.memory_settings_path())
-        .save(input)
+        .save(&profile, input)
         .map_err(memory_settings_error)?;
     let memory = configured_memory(&settings).map_err(|_| {
         memory_settings_error(MemorySettingsError::Invalid(
             "could not configure memory provider",
         ))
     })?;
-    profiles.set_memory_provider(memory);
+    // Newly created or renamed catalog profiles become runnable on restart.
+    if profiles.contains(&profile) {
+        profiles
+            .set_memory_provider(&profile, memory)
+            .map_err(runtime_profile_error)?;
+    }
     Ok(Json(settings.response()))
 }
 

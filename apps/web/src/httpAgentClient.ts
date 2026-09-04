@@ -33,14 +33,14 @@ export class HttpAgentClient implements AgentClient {
     this.fetcher = fetcher;
   }
 
-  async getMemorySettings(): Promise<MemorySettings> {
-    const body = await this.providerRequest(this.endpoint.replace(/\/respond$/, '/settings/memory'), 'GET');
+  async getMemorySettings(profile: string): Promise<MemorySettings> {
+    const body = await this.providerRequest(`${this.profilesEndpoint}/${encodeURIComponent(profile)}/memory`, 'GET');
     if (!isMemorySettings(body)) throw new Error('Rynna API returned invalid memory settings');
     return body;
   }
 
-  async saveMemorySettings(settings: MemorySettingsInput): Promise<MemorySettings> {
-    const body = await this.providerRequest(this.endpoint.replace(/\/respond$/, '/settings/memory'), 'PUT', settings);
+  async saveMemorySettings(settings: MemorySettingsInput, profile: string): Promise<MemorySettings> {
+    const body = await this.providerRequest(`${this.profilesEndpoint}/${encodeURIComponent(profile)}/memory`, 'PUT', settings);
     if (!isMemorySettings(body)) throw new Error('Rynna API returned invalid memory settings');
     return body;
   }

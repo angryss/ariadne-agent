@@ -6,12 +6,12 @@ describe('TauriAgentClient', () => {
   it('loads and saves memory settings through narrow desktop commands', async () => {
     const invoke = vi.fn().mockResolvedValue({ kind: 'none' });
     const client = new TauriAgentClient(invoke);
-    expect(await client.getMemorySettings()).toEqual({ kind: 'none' });
-    expect(invoke).toHaveBeenLastCalledWith('get_memory_settings', {});
-    await client.saveMemorySettings({ kind: 'none' });
-    expect(invoke).toHaveBeenLastCalledWith('save_memory_settings', { settings: { kind: 'none' } });
+    expect(await client.getMemorySettings('work profile')).toEqual({ kind: 'none' });
+    expect(invoke).toHaveBeenLastCalledWith('get_memory_settings', { profile: 'work profile' });
+    await client.saveMemorySettings({ kind: 'none' }, 'work profile');
+    expect(invoke).toHaveBeenLastCalledWith('save_memory_settings', { settings: { kind: 'none' }, profile: 'work profile' });
     invoke.mockResolvedValueOnce({ kind: 'hindsight' });
-    await expect(client.getMemorySettings()).rejects.toThrow('invalid memory settings');
+    await expect(client.getMemorySettings('work profile')).rejects.toThrow('invalid memory settings');
   });
 
   it('invokes the narrow desktop response command', async () => {

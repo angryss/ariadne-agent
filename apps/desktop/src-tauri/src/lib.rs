@@ -664,6 +664,9 @@ pub fn update_saved_profile(
     if saved.name != original_name
         && let Some(provider_settings) = provider_settings
     {
+        MemorySettingsStore::new(provider_settings.memory_settings_path())
+            .rename_profile(original_name, &saved.name)
+            .map_err(|error| error.to_string())?;
         provider_settings
             .rename_profile(original_name, &saved.name)
             .map_err(|error| error.to_string())?;
@@ -685,6 +688,9 @@ pub fn delete_saved_profile(
         .delete_profile(name)
         .map_err(|error| error.to_string())?;
     if let Some(provider_settings) = provider_settings {
+        MemorySettingsStore::new(provider_settings.memory_settings_path())
+            .delete_profile(name)
+            .map_err(|error| error.to_string())?;
         provider_settings
             .delete_profile(name)
             .map_err(|error| error.to_string())?;
@@ -902,30 +908,58 @@ async fn delete_provider(
     Ok(())
 }
 
+fn ensure_memory_profile(
+    catalog: &ProfileCatalog,
+    runtime: &AgentProfiles,
+    profile: &str,
+) -> Result<(), String> {
+    if catalog.resolve(profile).is_ok()
+        || (profile == OPENAI_ACCOUNT_PROFILE && runtime.contains(profile))
+    {
+        Ok(())
+    } else {
+        Err("memory profile is not defined".to_owned())
+    }
+}
+
 #[tauri::command]
 async fn get_memory_settings(
+    catalog: State<'_, Mutex<ProfileCatalog>>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
     provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    profile: String,
 ) -> Result<MemorySettingsResponse, String> {
+    let catalog = catalog.lock().await;
+    let runtime = profiles.lock().await;
+    ensure_memory_profile(&catalog, &runtime, &profile)?;
     let store = provider_settings.lock().await;
     MemorySettingsStore::new(store.memory_settings_path())
-        .load()
+        .load(&profile)
         .map(|settings| settings.response())
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 async fn save_memory_settings(
+    catalog: State<'_, Mutex<ProfileCatalog>>,
     provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
     profiles: State<'_, Mutex<AgentProfiles>>,
+    profile: String,
     settings: MemorySettings,
 ) -> Result<MemorySettingsResponse, String> {
+    let catalog = catalog.lock().await;
     let mut profiles = profiles.lock().await;
+    ensure_memory_profile(&catalog, &profiles, &profile)?;
     let store = provider_settings.lock().await;
     let settings = MemorySettingsStore::new(store.memory_settings_path())
-        .save(settings)
+        .save(&profile, settings)
         .map_err(|error| error.to_string())?;
     let memory = configured_memory(&settings).map_err(|error| error.to_string())?;
-    profiles.set_memory_provider(memory);
+    if profiles.contains(&profile) {
+        profiles
+            .set_memory_provider(&profile, memory)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(settings.response())
 }
 
@@ -943,13 +977,17 @@ pub fn run() {
     let mut configured = configured_profiles(credential_selection.clone(), &catalog)
         .unwrap_or_else(|error| panic!("failed to configure Rynna model provider: {error}"));
 
-    let memory_settings = MemorySettingsStore::new(provider_settings.memory_settings_path())
-        .load()
-        .unwrap_or_else(|error| panic!("failed to load Rynna memory settings: {error}"));
-    configured.set_memory_provider(
-        configured_memory(&memory_settings)
-            .unwrap_or_else(|error| panic!("failed to configure Rynna memory provider: {error}")),
-    );
+    let memory_store = MemorySettingsStore::new(provider_settings.memory_settings_path());
+    for profile in configured.profiles() {
+        let settings = memory_store
+            .load(&profile.name)
+            .unwrap_or_else(|error| panic!("failed to load Rynna memory settings: {error}"));
+        let memory = configured_memory(&settings)
+            .unwrap_or_else(|error| panic!("failed to configure Rynna memory provider: {error}"));
+        configured
+            .set_memory_provider(&profile.name, memory)
+            .expect("existing profile");
+    }
 
     tauri::Builder::default()
         .manage(Mutex::new(configured))

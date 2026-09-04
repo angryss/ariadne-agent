@@ -11,7 +11,13 @@ import { Input } from './ui/input';
 const CLOUD_URL = 'https://api.hindsight.vectorize.io';
 const SELF_HOSTED_URL = 'http://localhost:8888';
 
-export function MemorySettingsPanel({ client }: { client: AgentClient }) {
+export function MemorySettingsPanel({
+  client,
+  profile,
+}: {
+  client: AgentClient;
+  profile: string;
+}) {
   const [saved, setSaved] = useState<MemorySettings>({ kind: 'none' });
   const [kind, setKind] = useState<'none' | 'hindsight'>('none');
   const [deployment, setDeployment] = useState<HindsightDeployment>('cloud');
@@ -43,7 +49,7 @@ export function MemorySettingsPanel({ client }: { client: AgentClient }) {
     setLoading(true);
     setLoadFailed(false);
     setError(null);
-    void client.getMemorySettings!()
+    void client.getMemorySettings!(profile)
       .then((settings) => {
         if (active) {
           apply(settings);
@@ -64,7 +70,7 @@ export function MemorySettingsPanel({ client }: { client: AgentClient }) {
     return () => {
       active = false;
     };
-  }, [client, loadAttempt]);
+  }, [client, profile, loadAttempt]);
 
   const hasSavedKey =
     saved.kind === 'hindsight' &&
@@ -89,7 +95,7 @@ export function MemorySettingsPanel({ client }: { client: AgentClient }) {
             ...(clearKey ? { api_key: '' } : apiKey ? { api_key: apiKey } : {}),
           };
     try {
-      apply(await client.saveMemorySettings(settings));
+      apply(await client.saveMemorySettings(settings, profile));
       setStatus('Memory settings saved. Changes apply to your next request.');
     } catch (reason) {
       setError(
@@ -108,8 +114,8 @@ export function MemorySettingsPanel({ client }: { client: AgentClient }) {
         <div>
           <h2>Memory provider</h2>
           <p>
-            Remember useful context across conversations. Memory is off by
-            default.
+            Remember useful context across this profile’s conversations. Memory
+            is off by default.
           </p>
         </div>
       </div>
@@ -218,9 +224,10 @@ export function MemorySettingsPanel({ client }: { client: AgentClient }) {
                 </label>
               ) : null}
               <p>
-                All profiles use this bank. Rynna recalls relevant memories
-                before responding and sends each completed user message and
-                answer to Hindsight.
+                This profile uses this bank. Use a different bank ID for each
+                profile to keep memories separate. Rynna recalls relevant
+                memories before responding and sends each completed user message
+                and answer to Hindsight.
               </p>
             </>
           )}
