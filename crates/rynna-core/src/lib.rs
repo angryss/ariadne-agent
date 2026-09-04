@@ -432,7 +432,10 @@ pub struct CacheOptimization {
 
 impl CacheOptimization {
     pub fn server_cache_key(&self) -> String {
-        format!("{:x}", Sha256::digest(self.scope_key.as_bytes()))
+        Sha256::digest(self.scope_key.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 
@@ -474,7 +477,11 @@ impl CacheOptimizer for PrefixCacheOptimizer {
         digest.update(tools);
         CacheOptimization {
             use_server_cache: true,
-            scope_key: format!("{:x}", digest.finalize()),
+            scope_key: digest
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
         }
     }
 }

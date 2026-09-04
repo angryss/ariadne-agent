@@ -1,7 +1,34 @@
 use rynna_core::{
-    CacheOptimizer, CompletionRequest, Message, PrefixCacheOptimizer, ToolDefinition,
+    CacheOptimization, CacheOptimizer, CompletionRequest, Message, PrefixCacheOptimizer,
+    ToolDefinition,
 };
 use serde_json::json;
+
+#[test]
+fn server_cache_key_preserves_sha256_hex_encoding() {
+    let cache = CacheOptimization {
+        use_server_cache: true,
+        scope_key: "abc".to_owned(),
+    };
+
+    assert_eq!(
+        cache.server_cache_key(),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+#[test]
+fn prefix_cache_scope_preserves_sha256_hex_encoding() {
+    let cache = PrefixCacheOptimizer.optimize(&CompletionRequest {
+        messages: vec![],
+        tools: vec![],
+    });
+
+    assert_eq!(
+        cache.scope_key,
+        "771298dc0a13ef497ad01cde7f7bb54281f569f7af73824c222a709ced050544"
+    );
+}
 
 #[test]
 fn prefix_cache_optimizer_keeps_a_stable_scope_as_conversation_grows() {
