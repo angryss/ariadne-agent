@@ -1,7 +1,8 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
-import { isMemorySettings } from '@rynna/ui';
+import { isMcpSettings, isMemorySettings } from '@rynna/ui';
 import type {
   AgentClient,
+  McpSettings,
   MemorySettings,
   MemorySettingsInput,
   CompletionDelta,
@@ -32,6 +33,18 @@ export class TauriAgentClient implements AgentClient {
   ) {
     this.invoke = invoker;
     this.createChannel = createChannel;
+  }
+
+  async getMcpSettings(profile: string): Promise<McpSettings> {
+    const settings = await this.invoke('get_mcp_settings', { profile });
+    if (!isMcpSettings(settings)) throw new Error('Rynna desktop returned invalid MCP settings');
+    return settings;
+  }
+
+  async saveMcpSettings(settings: McpSettings, profile: string): Promise<McpSettings> {
+    const saved = await this.invoke('save_mcp_settings', { settings, profile });
+    if (!isMcpSettings(saved)) throw new Error('Rynna desktop returned invalid MCP settings');
+    return saved;
   }
 
   async getMemorySettings(profile: string): Promise<MemorySettings> {

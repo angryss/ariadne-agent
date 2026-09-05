@@ -351,6 +351,10 @@ async fn verify_codex_version(
 
 #[async_trait]
 impl ModelProvider for CodexAppServerProvider {
+    fn supports_external_tools(&self) -> bool {
+        false
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
         self.run(request, &mut |_| {}).await
     }

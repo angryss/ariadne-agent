@@ -141,6 +141,11 @@ model = "qwen3:14b"
             )
             .unwrap();
     }
+    let mcp_store = rynna_config::mcp::McpSettingsStore::new(provider_settings.mcp_settings_path());
+    for name in ["new", "work"] {
+        let settings = serde_json::from_value(serde_json::json!({"mcpServers":{"tools":{"transport":"stdio","command":format!("{name}-command"),"enabled":false}}})).unwrap();
+        mcp_store.save(name, settings).unwrap();
+    }
     let memory_store =
         rynna_config::memory::MemorySettingsStore::new(provider_settings.memory_settings_path());
     for name in ["new", "work"] {
@@ -196,6 +201,12 @@ model = "qwen3:14b"
     assert_eq!(runtime.default_profile(), "work");
     assert!(provider_settings.list("new").is_empty());
     assert_eq!(provider_settings.list("renamed").len(), 1);
+    assert!(mcp_store.load("new").unwrap().servers.is_empty());
+    assert!(
+        serde_json::to_string(&mcp_store.load("renamed").unwrap())
+            .unwrap()
+            .contains("new-command")
+    );
     assert!(matches!(
         memory_store.load("new").unwrap(),
         rynna_config::memory::MemorySettings::None
@@ -214,6 +225,8 @@ model = "qwen3:14b"
     assert_eq!(runtime.default_profile(), "alpha");
     assert!(runtime.clone_agent("work").is_none());
     assert!(provider_settings.list("work").is_empty());
+    assert!(mcp_store.load("work").unwrap().servers.is_empty());
+    assert_eq!(mcp_store.load("renamed").unwrap().servers.len(), 1);
     assert!(matches!(
         memory_store.load("work").unwrap(),
         rynna_config::memory::MemorySettings::None
@@ -776,4 +789,98 @@ max_output_bytes = 8192
             .iter()
             .any(|message| message.content.contains("desktop-command-result"))
     );
+}
+
+#[test]
+fn desktop_failed_mcp_rename_keeps_all_settings_and_allows_retry() {
+    use rynna_config::{
+        mcp::McpSettingsStore,
+        memory::{MemorySettings, MemorySettingsStore},
+    };
+    for failure in ["malformed", "directory", "destination"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "version = 1\ndefault_profile = 'work'\n[providers.ollama]\nkind = 'openai-compatible'\napi_base = 'http://127.0.0.1:11434/v1'\n[profiles.work]\nprovider = 'ollama'\nmodel = 'model'\n").unwrap();
+        let mut catalog = ProfileCatalog::load(&config_path).unwrap();
+        let mut runtime = AgentProfiles::new("work", [profile("work", "original reply")]).unwrap();
+        let mut providers = ProviderSettingsStore::load(dir.path().join("providers.toml")).unwrap();
+        providers
+            .add(
+                "work",
+                ConfiguredProvider::Ollama {
+                    api_base: "http://127.0.0.1:11434/v1".into(),
+                },
+            )
+            .unwrap();
+        MemorySettingsStore::new(providers.memory_settings_path())
+            .save("work", MemorySettings::None)
+            .unwrap();
+        let mcp_path = providers.mcp_settings_path();
+        let mcp = McpSettingsStore::new(&mcp_path);
+        mcp.save("work", serde_json::from_value(serde_json::json!({"mcpServers":{"tools":{"transport":"stdio","command":"original","enabled":false}}})).unwrap()).unwrap();
+        let original_mcp = std::fs::read(&mcp_path).unwrap();
+        match failure {
+            "malformed" => std::fs::write(&mcp_path, "malformed = [").unwrap(),
+            "directory" => {
+                std::fs::remove_file(&mcp_path).unwrap();
+                std::fs::create_dir(&mcp_path).unwrap();
+            }
+            "destination" => {
+                mcp.save("renamed", Default::default()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let paths = [
+            config_path.clone(),
+            providers.memory_settings_path(),
+            dir.path().join("providers.toml"),
+        ];
+        let before = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        let broken_mcp = std::fs::read(&mcp_path).ok();
+        let renamed = Profile {
+            name: "renamed".into(),
+            ..catalog.resolve("work").unwrap().profile
+        };
+        assert!(
+            update_saved_profile(
+                &mut catalog,
+                &mut runtime,
+                Some(&mut providers),
+                "work",
+                renamed.clone()
+            )
+            .is_err()
+        );
+        assert_eq!(catalog.default_profile(), "work");
+        assert!(catalog.resolve("work").is_ok());
+        assert!(catalog.resolve("renamed").is_err());
+        assert_eq!(runtime.default_profile(), "work");
+        assert!(runtime.clone_agent("work").is_some());
+        assert!(runtime.clone_agent("renamed").is_none());
+        assert_eq!(providers.list("work").len(), 1);
+        assert!(providers.list("renamed").is_empty());
+        for (path, bytes) in paths.iter().zip(&before) {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes, "{failure}");
+        }
+        assert_eq!(std::fs::read(&mcp_path).ok(), broken_mcp);
+        if failure == "directory" {
+            std::fs::remove_dir(&mcp_path).unwrap();
+        }
+        std::fs::write(&mcp_path, &original_mcp).unwrap();
+        update_saved_profile(
+            &mut catalog,
+            &mut runtime,
+            Some(&mut providers),
+            "work",
+            renamed,
+        )
+        .unwrap();
+        assert_eq!(catalog.default_profile(), "renamed");
+        assert_eq!(providers.list("renamed").len(), 1);
+        assert_eq!(mcp.load("renamed").unwrap().servers.len(), 1);
+        assert!(mcp.load("work").unwrap().servers.is_empty());
+    }
 }

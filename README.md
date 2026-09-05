@@ -2,7 +2,7 @@
 
 Rynna is an open-source AI software agent built with Rust, React, and Tauri. One shared application core powers an interactive CLI, deterministic one-shot jobs, a long-running HTTP service, a browser UI, and a native desktop app.
 
-> **Project status:** bootstrap foundation. The model-provider path, versioned profiles, native workspace filesystem and bounded command tools, and all product surfaces are working. Skill execution, MCP tool execution, approvals, and long-running autonomous loops remain future capabilities.
+> **Project status:** bootstrap foundation. The model-provider path, versioned profiles, native workspace filesystem and bounded command tools, profile-specific MCP tools, and all product surfaces are working. Skill execution, approvals, and long-running autonomous loops remain future capabilities.
 
 ## Why Rynna
 
@@ -24,6 +24,7 @@ apps/
 crates/
   rynna-config/      Versioned TOML profile catalog and validation
   rynna-core/        Domain types, model-provider port, and agent orchestration
+  rynna-mcp/         Profile-specific stdio and Streamable HTTP MCP tools
   rynna-provider-anthropic/ Anthropic Messages API and Claude subscription adapters
   rynna-provider-openai/  OpenAI-compatible HTTP adapter
   rynna-server/      Axum API and static SPA hosting
@@ -162,7 +163,7 @@ Command capabilities are absent by default and currently supported only on Unix 
 
 For example, a macOS profile can map `uname` to `/usr/bin/uname` and `sw_vers` to `/usr/bin/sw_vers`, allowing prompts such as “What operating system is installed on this computer?” without granting an implicit shell. Mapping a shell, interpreter, package manager, or similarly powerful executable intentionally grants the model the authority of that program and its arguments. An executable allowlist and process group are not an OS sandbox: mapped programs retain every permission of the Rynna process. Run Rynna as a dedicated restricted OS user or inside a container with narrow mounts and network policy for untrusted or multi-tenant workloads.
 
-Profile-scoped skill and MCP activation is represented and exposed consistently, but actual skill loading and MCP tool execution remain future capabilities and are not implied by listing an item as active.
+Skill activation and legacy catalog MCP names remain metadata. Executable MCP servers are configured independently for each profile in Settings → MCP servers (see below); listing a legacy activation name does not execute it.
 
 ## HTTP API
 
@@ -266,3 +267,75 @@ bank_id = "rynna"
 For Cloud, use `deployment = "cloud"`, `api_base = "https://api.hindsight.vectorize.io"`, and an `api_key`. Replace `local` with your profile name. To disable its memory, replace that profile’s table with `kind = "none"` or remove the table, leaving other profiles intact. The unreleased global format is rejected with migration instructions: add `version = 1` and place the previous settings under the intended `[profiles.<name>]` table.
 
 The HTTP settings contract is `GET` / `PUT /v1/profiles/{profile}/memory`; both methods use the existing loopback-only administration restriction. Desktop uses `get_memory_settings` / `save_memory_settings` IPC commands, both with a required `profile` argument. Unknown profiles are rejected. The provider-neutral `rynna_core::MemoryProvider` trait exposes `recall` and `retain`; implement this port and register a configuration variant and composition adapter to add another provider. Hindsight-specific HTTP behavior lives in `rynna-memory-hindsight`.
+
+## Profile-specific MCP servers
+
+Open **Settings → MCP servers**, choose a profile, and edit its JSON configuration.
+Local **stdio** and remote **Streamable HTTP** servers expose tools to that profile’s
+agent. Save validates the configuration without connecting or starting a command;
+the next request connects, discovers tools, and makes them available to the model.
+Each new profile starts empty. The same server name can have entirely different
+configuration in different profiles. Rename moves settings; deletion removes them.
+
+```json
+{
+  "mcpServers": {
+    "workspace": {
+      "transport": "stdio",
+      "enabled": true,
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"],
+      "env": {}
+    },
+    "remote": {
+      "transport": "streamable_http",
+      "enabled": true,
+      "url": "https://example.com/mcp",
+      "bearer_token_env": "MY_MCP_TOKEN"
+    }
+  }
+}
+```
+
+Set `enabled` to `false` to pause a server, delete an entry to remove it, or save
+`{"mcpServers": {}}` to disable all MCP tools for the selected profile. HTTP bearer
+authentication reads the named environment variable from the Rynna process.
+OAuth sign-in and legacy HTTP+SSE transport are not implemented.
+
+Settings are persisted atomically in owner-only `mcp.toml`, beside `providers.toml`:
+
+```toml
+version = 1
+[profiles.work.mcpServers.workspace]
+transport = "stdio"
+enabled = true
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
+```
+
+CLI reads this file at startup (`--provider-config` also selects the sibling MCP
+file). HTTP and desktop UI saves apply to subsequent requests without restarting;
+in-flight requests keep their original settings. New or renamed profiles still
+require restart to become runnable, as with other profile configuration.
+The old `config.toml` global `[mcp_servers]` declarations and activation names remain
+legacy metadata and are never executed or implicitly inherited. Copy the desired
+configuration into each profile’s MCP editor to enable it explicitly.
+
+The loopback-only HTTP administration endpoints are `GET` and `PUT`
+`/v1/profiles/{profile}/mcp`; desktop exposes `get_mcp_settings` and
+`save_mcp_settings` with a required `profile`. Commands and environment values are
+visible only through this settings editor/API, not the public profile list.
+
+Connections and tool discovery have a ten-second deadline per server. Tool calls
+have a sixty-second deadline and a 1 MiB result limit, in addition to the agent’s
+existing aggregate limits. Discovery failures identify the server and fail that
+request; fix or disable the server to continue. Sessions are scoped to one response
+and close on completion or cancellation. Server-returned content and `isError`
+remain tool output. Subscription-backed providers do not connect to MCP servers.
+
+Local MCP programs run on the Rynna host with its OS permissions, outside the native
+filesystem/command capability restrictions. Rynna passes a small environment for
+executable resolution plus explicitly configured `env` values; model-provider
+credentials are not automatically inherited. Only configure programs and remote
+servers you trust. `env` values are stored in the private file and are visible in
+the editor; do not put that file in version control or serve it as a web asset.

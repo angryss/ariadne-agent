@@ -3,6 +3,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { HttpAgentClient } from './httpAgentClient';
 
 describe('HttpAgentClient', () => {
+  it('loads and saves MCP settings through the HTTP settings endpoint', async () => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ mcpServers: {} })));
+    const client = new HttpAgentClient('/custom/v1/respond', fetcher);
+    expect(await client.getMcpSettings('work profile')).toEqual({ mcpServers: {} });
+    expect(fetcher).toHaveBeenLastCalledWith('/custom/v1/profiles/work%20profile/mcp', { method: 'GET', headers: { accept: 'application/json' } });
+    await client.saveMcpSettings({ mcpServers: {} }, 'work profile');
+    expect(fetcher).toHaveBeenLastCalledWith('/custom/v1/profiles/work%20profile/mcp', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{"mcpServers":{}}' });
+    fetcher.mockResolvedValueOnce(new Response('{"kind":"hindsight"}'));
+    await expect(client.getMcpSettings('work profile')).rejects.toThrow('invalid MCP settings');
+  });
+
   it('loads and saves memory settings through the HTTP settings endpoint', async () => {
     const fetcher = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ kind: 'none' })));
     const client = new HttpAgentClient('/custom/v1/respond', fetcher);

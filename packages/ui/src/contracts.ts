@@ -83,7 +83,28 @@ export function isMemorySettings(value: unknown): value is MemorySettings {
     'api_key_configured' in value && typeof value.api_key_configured === 'boolean';
 }
 
+export type McpServer = { enabled?: boolean } & (
+  | { transport: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
+  | { transport: 'streamable_http'; url: string; bearer_token_env?: string }
+);
+export interface McpSettings { mcpServers: Record<string, McpServer> }
+
+export function isMcpSettings(value: unknown): value is McpSettings {
+  const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+  if (!object(value) || Object.keys(value).some(k => k !== 'mcpServers') || !object(value.mcpServers)) return false;
+  return Object.values(value.mcpServers).every(server => {
+    if (!object(server) || (server.enabled !== undefined && typeof server.enabled !== 'boolean')) return false;
+    if (server.transport === 'stdio') return Object.keys(server).every(k => ['transport', 'enabled', 'command', 'args', 'env'].includes(k)) &&
+      typeof server.command === 'string' && (server.args === undefined || Array.isArray(server.args) && server.args.every(v => typeof v === 'string')) &&
+      (server.env === undefined || object(server.env) && Object.values(server.env).every(v => typeof v === 'string'));
+    return server.transport === 'streamable_http' && Object.keys(server).every(k => ['transport', 'enabled', 'url', 'bearer_token_env'].includes(k)) &&
+      typeof server.url === 'string' && (server.bearer_token_env === undefined || typeof server.bearer_token_env === 'string');
+  });
+}
+
 export interface AgentClient {
+  getMcpSettings?(profile: string): Promise<McpSettings>;
+  saveMcpSettings?(settings: McpSettings, profile: string): Promise<McpSettings>;
   getMemorySettings?(profile: string): Promise<MemorySettings>;
   saveMemorySettings?(settings: MemorySettingsInput, profile: string): Promise<MemorySettings>;
   respond(request: RespondRequest, onDelta?: CompletionDeltaHandler): Promise<RespondResponse>;

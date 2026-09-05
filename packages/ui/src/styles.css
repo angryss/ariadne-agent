@@ -248,3 +248,11 @@ select:disabled { opacity: .5; }
 .memory-settings-form p { margin: 0 0 .5rem; color: hsl(var(--muted-foreground)); line-height: 1.55; }
 .memory-settings-form button { justify-self: start; margin-top: .5rem; }
 .memory-clear-key { display: flex; align-items: center; gap: .5rem; }
+
+.mcp-settings-form { max-width: 48rem; }
+.mcp-settings-form fieldset { display: grid; gap: .85rem; border: 0; padding: 0; margin: 0; min-width: 0; }
+.mcp-settings-form label { font-size: .875rem; font-weight: 590; }
+.mcp-settings-form .mcp-json { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.6; tab-size: 2; }
+.mcp-settings-form p { line-height: 1.55; overflow-wrap: anywhere; }
+.mcp-settings-form summary { cursor: pointer; font-size: .875rem; }
+.mcp-settings-form button[type="submit"] { justify-self: start; }

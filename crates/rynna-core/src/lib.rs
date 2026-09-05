@@ -196,6 +196,11 @@ impl ToolError {
 }
 
 #[async_trait]
+pub trait ToolSource: Send + Sync {
+    async fn discover(&self) -> Result<Vec<Arc<dyn Tool>>, ToolError>;
+}
+
+#[async_trait]
 pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
     async fn execute(&self, arguments: serde_json::Value) -> Result<serde_json::Value, ToolError>;
@@ -523,6 +528,10 @@ impl ProviderError {
 
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
+    fn supports_external_tools(&self) -> bool {
+        true
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError>;
 
     fn server_compaction(&self) -> Option<ServerCompaction> {
@@ -579,6 +588,10 @@ impl FallbackProvider {
 
 #[async_trait]
 impl ModelProvider for FallbackProvider {
+    fn supports_external_tools(&self) -> bool {
+        self.providers.iter().all(|p| p.supports_external_tools())
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
         let mut last_error = None;
         for provider in &self.providers {
@@ -654,6 +667,8 @@ impl ModelProvider for FallbackProvider {
 pub enum AgentError {
     #[error("user input must not be blank")]
     BlankInput,
+    #[error(transparent)]
+    ToolDiscovery(#[from] ToolError),
     #[error("conversation history must contain only user and assistant messages")]
     InvalidHistory,
     #[error("model provider response must contain an assistant message")]
@@ -711,6 +726,7 @@ pub use memory::{MemoryError, MemoryProvider};
 
 #[derive(Clone)]
 pub struct Agent {
+    tool_source: Option<Arc<dyn ToolSource>>,
     memory: Option<Arc<dyn MemoryProvider>>,
     provider: Arc<dyn ModelProvider>,
     system_prompt: Arc<str>,
@@ -735,6 +751,7 @@ impl Agent {
             context_manager: Arc::new(ThresholdContextManager::default()),
             managed_contexts: Arc::new(Mutex::new(ManagedContextStore::default())),
             memory: None,
+            tool_source: None,
         }
     }
 
@@ -760,6 +777,7 @@ impl Agent {
             context_manager: Arc::new(ThresholdContextManager::default()),
             managed_contexts: Arc::new(Mutex::new(ManagedContextStore::default())),
             memory: None,
+            tool_source: None,
         })
     }
 
@@ -866,8 +884,25 @@ impl Agent {
         }
         messages.push(Message::user(input));
 
-        let tools = self
-            .tools
+        let mut available_tools = self.tools.as_ref().clone();
+        if self.provider.supports_external_tools()
+            && let Some(source) = &self.tool_source
+        {
+            let discovered =
+                tokio::time::timeout(std::time::Duration::from_secs(30), source.discover())
+                    .await
+                    .map_err(|_| ToolError::new("MCP discovery timed out"))??;
+            for tool in discovered {
+                let name = tool.definition().name;
+                if name.trim().is_empty() {
+                    return Err(AgentError::BlankToolName);
+                }
+                if available_tools.insert(name.clone(), tool).is_some() {
+                    return Err(AgentError::DuplicateTool(name));
+                }
+            }
+        }
+        let tools = available_tools
             .values()
             .map(|tool| tool.definition())
             .collect::<Vec<_>>();
@@ -990,7 +1025,7 @@ impl Agent {
             let tool_calls = completion.message.tool_calls.clone();
             messages.push(completion.message);
             for call in tool_calls {
-                let result = match self.tools.get(&call.name) {
+                let result = match available_tools.get(&call.name) {
                     Some(tool) => {
                         tokio::time::timeout_at(tool_deadline, tool.execute(call.arguments))
                             .await
@@ -1093,6 +1128,19 @@ impl AgentProfiles {
             default_profile: default_profile.into(),
             profiles: Arc::new(indexed),
         })
+    }
+
+    /// Applies to subsequent requests; in-flight agents retain their original tools.
+    pub fn set_tool_source(
+        &mut self,
+        profile: &str,
+        source: Option<Arc<dyn ToolSource>>,
+    ) -> Result<(), ProfileError> {
+        let (_, agent) = Arc::make_mut(&mut self.profiles)
+            .get_mut(profile)
+            .ok_or_else(|| ProfileError::UnknownProfile(profile.to_owned()))?;
+        agent.tool_source = source;
+        Ok(())
     }
 
     /// Applies to subsequent requests; in-flight agents retain their original provider.

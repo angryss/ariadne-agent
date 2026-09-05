@@ -1272,6 +1272,10 @@ async fn read_claude_message<R: AsyncBufRead + Unpin>(
 }
 #[async_trait]
 impl ModelProvider for ClaudeCodeProvider {
+    fn supports_external_tools(&self) -> bool {
+        false
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<Completion, ProviderError> {
         self.run(request, &mut |_| {}).await
     }
