@@ -2,7 +2,7 @@
 
 CLI chat, the desktop app, and the web UI can choose an enabled provider/model pair from the current profile and set its thinking level. Changes apply to subsequent messages in the current conversation. History, skills, tools, memory settings, and saved profile defaults are preserved.
 
-In desktop and web chat, use **Provider**, **Model**, and **Thinking level** above the message box. Select **Profile default** to restore the profile's normal default and fallback order. Choosing a model explicitly pins requests to that pair, so a provider error does not silently switch to a different model. Controls are disabled while a response is running. Changing provider or model resets thinking to Default; changing profile clears the selection.
+In desktop and web chat, click the model and thinking label at the bottom right of the message box. The picker opens above the composer with searchable models grouped by provider and **Thinking level** controls at the bottom. Select **Profile default** to restore the profile's normal default and fallback order. Choosing a model explicitly pins requests to that pair, so a provider error does not silently switch to a different model. Controls are disabled while a response is running. Changing provider or model resets thinking to Default; changing profile clears the selection.
 
 In both terminal and plain-text CLI chat:
 

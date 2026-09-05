@@ -1414,8 +1414,6 @@ export function App({ client }: AppProps) {
 
         {error ? <p className="request-error" role="alert">{error}</p> : null}
         <form className="composer" onSubmit={submit}>
-          {activeProfile ? <ModelSelector profile={activeProfile} selection={selection} disabled={pending}
-            onChange={value => setChatSelection({ profile: activeProfile.name, value })} /> : null}
           <label htmlFor="prompt">Message Rynna</label>
           <div className="composer-row">
             <Textarea
@@ -1439,6 +1437,10 @@ export function App({ client }: AppProps) {
               placeholder="Describe the task, constraints, and desired outcome…"
               rows={3}
             />
+          </div>
+          <div className="composer-actions">
+            {activeProfile ? <ModelSelector profile={activeProfile} selection={selection} disabled={pending}
+              onChange={value => setChatSelection({ profile: activeProfile.name, value })} /> : null}
             <Button disabled={pending || !input.trim()} type="submit">
               {pending ? 'Working…' : 'Send'}
             </Button>
