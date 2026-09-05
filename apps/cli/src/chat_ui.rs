@@ -54,6 +54,7 @@ enum CommandAction {
 enum InputAction {
     Prompt(String),
     Command(CommandAction),
+    Selection(String),
 }
 
 const SLASH_COMMANDS: &[SlashCommand] = &[
@@ -219,6 +220,12 @@ impl ChatUi {
         if key.code == KeyCode::Enter {
             if self.busy {
                 return None;
+            }
+            if super::model_selection::is_command(&self.input) {
+                let command = std::mem::take(&mut self.input);
+                self.cursor = 0;
+                self.selected_command = 0;
+                return Some(InputAction::Selection(command));
             }
             if !commands.is_empty() {
                 let selected = commands[self.selected_command.min(commands.len() - 1)];
@@ -494,6 +501,7 @@ fn apply_command(ui: &mut ChatUi, history: &mut Vec<Message>, command: CommandAc
                         .map(|alias| format!("{} — {}", alias.name, alias.description)),
                 );
             }
+            help.push("/model — Select a provider and model\n/provider <provider> — Change provider\n/thinking default|low|medium|high — Set effort".to_owned());
             let help = help.join("\n");
             ui.push_message(MessageKind::Assistant, help);
             false
@@ -634,7 +642,7 @@ fn render(frame: &mut Frame<'_>, ui: &ChatUi) {
 
     let state = if ui.busy { "Thinking…" } else { "Ready" };
     let controls = if commands.is_empty() {
-        "  Enter send · Alt-Enter newline · Ctrl-T thinking · PgUp/PgDn scroll · Ctrl-C exit"
+        "  Enter send · /model select · Alt-Enter newline · Ctrl-T thinking · PgUp/PgDn scroll · Ctrl-C exit"
     } else {
         "  ↑/↓ select · Tab complete · Enter run · Ctrl-C exit"
     };
@@ -711,6 +719,11 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
     let mut session = TerminalSession::enter()?;
     let mut ui = ChatUi::new(profile, model);
     let mut history = Vec::<Message>::new();
+    let mut selection = None;
+    ui.push_message(
+        MessageKind::Assistant,
+        "Use /model to select a provider and model; /thinking to set effort.",
+    );
     let mut memory_session = uuid::Uuid::new_v4();
     let mut events = EventStream::new();
     let (response_tx, mut response_rx) = mpsc::unbounded_channel::<ResponseEvent>();
@@ -748,6 +761,16 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
                             continue;
                         };
                         let prompt = match action {
+                            InputAction::Selection(command) => {
+                                match super::model_selection::apply(profiles, profile, &mut selection, &command) {
+                                    Ok(feedback) => {
+                                        ui.model = super::sanitize_terminal_text(&super::model_selection::summary(selection.as_ref()));
+                                        ui.push_message(MessageKind::Assistant, super::sanitize_terminal_text(&feedback));
+                                    }
+                                    Err(error) => ui.push_message(MessageKind::Error, super::sanitize_terminal_text(&error)),
+                                }
+                                continue;
+                            }
                             InputAction::Command(command) => {
                                 if matches!(command, CommandAction::Clear) {
                                     memory_session = uuid::Uuid::new_v4();
@@ -761,7 +784,8 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
                         };
 
                         ui.busy = true;
-                        let profiles = profiles.clone().with_memory_session(Some(memory_session));
+                        let profiles = profiles.clone().with_memory_session(Some(memory_session))
+                            .with_model_selection(Some(profile), selection.as_ref())?;
                         let profile = profile.to_owned();
                         let request_history = history.clone();
                         let sender = response_tx.clone();

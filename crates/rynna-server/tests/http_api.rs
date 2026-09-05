@@ -1278,3 +1278,53 @@ async fn non_streaming_response_releases_profiles_lock_while_provider_is_pending
         "profiles lock remained held across provider await"
     );
 }
+
+#[tokio::test]
+async fn selection_is_validated_before_starting_either_response_mode() {
+    for endpoint in ["/v1/respond", "/v1/respond/stream"] {
+        for selection in [
+            serde_json::json!({"provider":"missing","model":"missing"}),
+            serde_json::json!({"provider":"local-provider","model":"local-model","thinking":"invalid"}),
+        ] {
+            let response = profiles_app()
+                .oneshot(
+                    Request::post(endpoint)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"prompt":"hello","selection":selection}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+}
+
+#[tokio::test]
+async fn both_http_response_modes_route_to_the_selected_pair() {
+    let (mut metadata, agent) = profile("local", "default");
+    let option = ProfileProvider {
+        provider: "selected".into(),
+        model: "selected-model".into(),
+        enabled: true,
+        is_default: false,
+    };
+    metadata.providers.push(option.clone());
+    let agent =
+        agent.with_model_options(vec![(option, Arc::new(ReplyProvider("selected answer")))]);
+    let profiles = AgentProfiles::new("local", vec![(metadata, agent)]).unwrap();
+    for endpoint in ["/v1/respond", "/v1/respond/stream"] {
+        let response = router_with_profiles(profiles.clone()).oneshot(Request::post(endpoint)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"prompt":"hello","selection":{"provider":"selected","model":"selected-model"}}).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("selected answer"));
+    }
+    assert_eq!(
+        profiles.respond(None, &[], "hello").await.unwrap().content,
+        "default"
+    );
+}

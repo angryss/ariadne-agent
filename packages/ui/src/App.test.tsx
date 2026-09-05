@@ -1252,3 +1252,40 @@ describe('App', () => {
     expect(screen.getByLabelText('Skills')).toHaveValue('');
   });
 });
+
+it('selects chat provider, model and thinking without changing history or profile defaults', async () => {
+  const user = userEvent.setup();
+  const profile = testProfile('local', { providers: [
+    { provider: 'local', model: 'small', default: true },
+    { provider: 'cloud', model: 'fast' },
+    { provider: 'cloud', model: 'deep' },
+    { provider: 'cloud', model: 'disabled', enabled: false },
+  ] });
+  let finish: ((value: { message: { role: 'assistant'; content: string } }) => void) | undefined;
+  const respond = vi.fn().mockResolvedValueOnce({ message: { role: 'assistant', content: 'First answer' } })
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const updateProfile = vi.fn();
+  render(<App client={{ respond, updateProfile, listProfiles: async () => ({ default_profile: 'local', provider_ids: ['local', 'cloud'], profiles: [profile], configured_profiles: [profile] }) }} />);
+  const provider = await screen.findByRole('combobox', { name: 'Provider' });
+  await user.type(screen.getByLabelText('Message Rynna'), 'First');
+  await user.click(screen.getByRole('button', { name: 'Send' }));
+  await screen.findByText('First answer');
+  await user.selectOptions(provider, 'cloud');
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'deep');
+  expect(screen.queryByRole('option', { name: 'disabled' })).not.toBeInTheDocument();
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Thinking level' }), 'high');
+  await user.type(screen.getByLabelText('Message Rynna'), 'Continue');
+  await user.click(screen.getByRole('button', { name: 'Send' }));
+  expect(respond.mock.calls[1]![0]).toMatchObject({
+    profile: 'local', selection: { provider: 'cloud', model: 'deep', thinking: 'high' },
+    history: [{ role: 'user', content: 'First' }, { role: 'assistant', content: 'First answer' }],
+  });
+  expect(provider).toBeDisabled();
+  expect(screen.getByRole('combobox', { name: 'Thinking level' })).toBeDisabled();
+  await act(async () => finish?.({ message: { role: 'assistant', content: 'Second answer' } }));
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'fast');
+  expect(screen.getByRole('combobox', { name: 'Thinking level' })).toHaveValue('default');
+  await user.selectOptions(provider, '');
+  expect(screen.getByRole('combobox', { name: 'Model' })).toBeDisabled();
+  expect(updateProfile).not.toHaveBeenCalled();
+});

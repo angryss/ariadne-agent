@@ -427,6 +427,8 @@ pub(crate) fn secure_codex_home(home: PathBuf) -> Result<PathBuf, String> {
 #[derive(Deserialize)]
 pub struct RespondRequest {
     #[serde(default)]
+    pub selection: Option<rynna_core::ModelSelection>,
+    #[serde(default)]
     pub session_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub profile: Option<String>,
@@ -452,6 +454,9 @@ pub async fn respond_with_agent(
     agent: &Agent,
     request: RespondRequest,
 ) -> Result<RespondResponse, String> {
+    if request.selection.is_some() {
+        return Err("model selection requires a profile".to_owned());
+    }
     let message = agent
         .clone()
         .with_memory_session(request.session_id)
@@ -468,6 +473,8 @@ pub async fn respond_with_profiles(
     let message = profiles
         .clone()
         .with_memory_session(request.session_id)
+        .with_model_selection(request.profile.as_deref(), request.selection.as_ref())
+        .map_err(|error| error.to_string())?
         .respond(
             request.profile.as_deref(),
             &request.history,
@@ -495,6 +502,8 @@ pub async fn respond_stream_with_profiles(
     let message = profiles
         .clone()
         .with_memory_session(request.session_id)
+        .with_model_selection(request.profile.as_deref(), request.selection.as_ref())
+        .map_err(|error| error.to_string())?
         .respond_stream(
             request.profile.as_deref(),
             &request.history,
@@ -1228,13 +1237,24 @@ fn configured_agent(
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let model_options = profile
+        .providers
+        .iter()
+        .map(|p| rynna_core::ProfileProvider {
+            provider: p.name.clone(),
+            model: p.model.clone(),
+            enabled: true,
+            is_default: false,
+        })
+        .zip(providers.iter().cloned())
+        .collect();
     let provider: Arc<dyn ModelProvider> = if providers.len() == 1 {
         providers.remove(0)
     } else {
         Arc::new(FallbackProvider::new(providers).map_err(|error| error.to_string())?)
     };
 
-    compose_agent(profile, provider)
+    compose_agent(profile, provider).map(|agent| agent.with_model_options(model_options))
 }
 
 fn configured_model_provider(

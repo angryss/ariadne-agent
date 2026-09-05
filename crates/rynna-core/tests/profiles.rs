@@ -102,3 +102,101 @@ fn profile_catalog_exposes_sorted_metadata_and_the_default_profile() {
         vec!["local", "work"]
     );
 }
+
+#[tokio::test]
+async fn model_selection_routes_both_modes_without_mutating_defaults() {
+    let (mut metadata, default_agent) = profile("local", "default");
+    let second = ProfileProvider {
+        provider: "other".into(),
+        model: "second".into(),
+        enabled: true,
+        is_default: false,
+    };
+    metadata.providers.push(second.clone());
+    let agent =
+        default_agent.with_model_options(vec![(second, Arc::new(FixedProvider("selected")))]);
+    let profiles = AgentProfiles::new("local", vec![(metadata.clone(), agent)]).unwrap();
+    let selection = rynna_core::ModelSelection {
+        provider: "other".into(),
+        model: "second".into(),
+        thinking: rynna_core::ThinkingLevel::Default,
+    };
+    let selected = profiles
+        .clone()
+        .with_model_selection(None, Some(&selection))
+        .unwrap();
+    assert_eq!(
+        selected
+            .respond(
+                None,
+                &[Message::user("previous"), Message::assistant("answer")],
+                "continue"
+            )
+            .await
+            .unwrap()
+            .content,
+        "selected"
+    );
+    let mut deltas = Vec::new();
+    assert_eq!(
+        selected
+            .respond_stream(None, &[], "hello", &mut |d| deltas.push(d.clone()))
+            .await
+            .unwrap()
+            .content,
+        "selected"
+    );
+    assert!(!deltas.is_empty());
+    assert_eq!(
+        profiles.respond(None, &[], "hello").await.unwrap().content,
+        "default"
+    );
+    assert_eq!(profiles.profiles(), vec![metadata]);
+    let unknown = rynna_core::ModelSelection {
+        model: "unknown".into(),
+        ..selection.clone()
+    };
+    assert!(
+        profiles
+            .clone()
+            .with_model_selection(None, Some(&unknown))
+            .is_err()
+    );
+    let unsupported = rynna_core::ModelSelection {
+        thinking: rynna_core::ThinkingLevel::High,
+        ..selection
+    };
+    assert!(
+        profiles
+            .with_model_selection(None, Some(&unsupported))
+            .is_err()
+    );
+}
+
+#[test]
+fn disabled_models_and_unknown_thinking_are_rejected() {
+    let (mut metadata, agent) = profile("local", "default");
+    metadata.providers.push(ProfileProvider {
+        provider: "other".into(),
+        model: "disabled".into(),
+        enabled: false,
+        is_default: false,
+    });
+    let profiles = AgentProfiles::new("local", vec![(metadata, agent)]).unwrap();
+    let selection = rynna_core::ModelSelection {
+        provider: "other".into(),
+        model: "disabled".into(),
+        thinking: rynna_core::ThinkingLevel::Default,
+    };
+    assert!(
+        profiles
+            .with_model_selection(None, Some(&selection))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_value::<rynna_core::ModelSelection>(
+            serde_json::json!({"provider":"other","model":"disabled","thinking":"bogus"})
+        )
+        .is_err()
+    );
+}

@@ -846,3 +846,30 @@ async fn error_responses_cannot_echo_the_api_key() {
     assert!(!error.to_string().contains(secret));
     assert!(error.to_string().contains("[REDACTED]"));
 }
+
+#[tokio::test]
+async fn selected_thinking_enables_adaptive_thinking_and_effort() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/messages"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        AnthropicMessagesProvider::with_base_url(server.uri(), "claude-sonnet-4-6", "test")
+            .unwrap()
+            .with_thinking(rynna_core::ThinkingLevel::Medium)
+            .unwrap();
+    provider
+        .complete(CompletionRequest {
+            messages: vec![Message::user("hello")],
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+}

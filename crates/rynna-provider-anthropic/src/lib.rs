@@ -141,7 +141,9 @@ pub async fn terminate_child(child: &mut Child) {
     let _ = child.wait().await;
 }
 
+#[derive(Clone)]
 pub struct AnthropicMessagesProvider {
+    thinking: rynna_core::ThinkingLevel,
     client: Client,
     messages_url: Url,
     model: String,
@@ -199,6 +201,7 @@ impl AnthropicMessagesProvider {
             messages_url,
             model,
             api_key,
+            thinking: rynna_core::ThinkingLevel::Default,
             cache_optimizer: Arc::new(PrefixCacheOptimizer),
         })
     }
@@ -213,15 +216,22 @@ impl AnthropicMessagesProvider {
         request: CompletionRequest,
         stream: bool,
         compaction_threshold: Option<usize>,
-    ) -> Result<MessagesRequest, ProviderError> {
+    ) -> Result<serde_json::Value, ProviderError> {
         let cache = self.cache_optimizer.optimize(&request);
-        build_messages_request(
+        let payload = build_messages_request(
             &self.model,
             request,
             stream,
             cache.use_server_cache,
             compaction_threshold,
-        )
+        )?;
+        let mut payload =
+            serde_json::to_value(payload).map_err(|error| ProviderError::new(error.to_string()))?;
+        if self.thinking != rynna_core::ThinkingLevel::Default {
+            payload["thinking"] = serde_json::json!({"type": "adaptive"});
+            payload["output_config"] = serde_json::json!({"effort": self.thinking.as_str()});
+        }
+        Ok(payload)
     }
 }
 
@@ -482,6 +492,15 @@ fn anthropic_context(request: &CompletionRequest) -> Option<ProviderContext> {
 
 #[async_trait]
 impl ModelProvider for AnthropicMessagesProvider {
+    fn with_thinking(
+        &self,
+        level: rynna_core::ThinkingLevel,
+    ) -> Result<std::sync::Arc<dyn ModelProvider>, ProviderError> {
+        let mut provider = self.clone();
+        provider.thinking = level;
+        Ok(std::sync::Arc::new(provider))
+    }
+
     fn server_compaction(&self) -> Option<ServerCompaction> {
         supports_compaction_model(&self.model).then_some(ServerCompaction::Anthropic)
     }
@@ -895,7 +914,9 @@ async fn read_version_output<R: AsyncRead + Unpin>(reader: R) -> std::io::Result
     Ok(output)
 }
 
+#[derive(Clone)]
 pub struct ClaudeCodeProvider {
+    thinking: rynna_core::ThinkingLevel,
     program: PathBuf,
     model: String,
     timeout: Duration,
@@ -905,6 +926,7 @@ pub struct ClaudeCodeProvider {
 impl ClaudeCodeProvider {
     pub fn new(program: impl Into<PathBuf>, model: impl Into<String>) -> Self {
         Self {
+            thinking: rynna_core::ThinkingLevel::Default,
             program: program.into(),
             model: model.into(),
             timeout: CLAUDE_TIMEOUT,
@@ -1098,6 +1120,9 @@ impl ClaudeCodeProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        if self.thinking != rynna_core::ThinkingLevel::Default {
+            command.arg("--effort").arg(self.thinking.as_str());
+        }
         for (k, v) in &self.environment {
             command.env(k, v);
         }
@@ -1272,6 +1297,15 @@ async fn read_claude_message<R: AsyncBufRead + Unpin>(
 }
 #[async_trait]
 impl ModelProvider for ClaudeCodeProvider {
+    fn with_thinking(
+        &self,
+        level: rynna_core::ThinkingLevel,
+    ) -> Result<std::sync::Arc<dyn ModelProvider>, ProviderError> {
+        let mut provider = self.clone();
+        provider.thinking = level;
+        Ok(std::sync::Arc::new(provider))
+    }
+
     fn supports_external_tools(&self) -> bool {
         false
     }

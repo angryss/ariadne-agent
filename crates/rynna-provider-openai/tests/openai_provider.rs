@@ -927,3 +927,54 @@ async fn oversized_error_response_is_rejected() {
         "unexpected error: {error}"
     );
 }
+
+#[tokio::test]
+async fn selected_thinking_is_sent_in_chat_and_managed_responses() {
+    use rynna_core::ThinkingLevel;
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/chat/completions"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"model":"test-model","reasoning_effort":"high"}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"choices":[{"message":{"role":"assistant","content":"done"}}]}),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        OpenAiCompatibleProvider::new(format!("{}/v1", server.uri()), "test-model", None)
+            .unwrap()
+            .with_thinking(ThinkingLevel::High)
+            .unwrap();
+    provider
+        .complete(CompletionRequest {
+            messages: vec![Message::user("hello")],
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+    Mock::given(path("/v1/responses"))
+        .and(wiremock::matchers::body_partial_json(json!({"reasoning":{"effort":"low"}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]})))
+        .expect(1).mount(&server).await;
+    let provider =
+        OpenAiCompatibleProvider::new_openai(format!("{}/v1", server.uri()), "test-model", None)
+            .unwrap()
+            .with_thinking(ThinkingLevel::Low)
+            .unwrap();
+    provider
+        .complete_managed(ContextPlan {
+            request: CompletionRequest {
+                messages: vec![Message::user("hello")],
+                tools: vec![],
+            },
+            size: ContextSize::default(),
+            server_compaction_threshold: Some(1000),
+            compacted: false,
+        })
+        .await
+        .unwrap();
+}

@@ -5,7 +5,14 @@ export interface Message {
   content: string;
 }
 
+export interface ModelSelection {
+  provider: string;
+  model: string;
+  thinking: 'default' | 'low' | 'medium' | 'high';
+}
+
 export interface RespondRequest {
+  selection?: ModelSelection;
   session_id?: string;
   profile?: string;
   prompt: string;

@@ -17,7 +17,9 @@ const MAX_ERROR_BODY_CHARS: usize = 512;
 // Non-streaming chat completions should fit comfortably in 1 MiB while bounding memory use.
 const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 
+#[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
+    thinking: rynna_core::ThinkingLevel,
     client: Client,
     completion_url: Url,
     responses_url: Url,
@@ -108,6 +110,7 @@ impl OpenAiCompatibleProvider {
             model,
             api_key,
             cache_technology,
+            thinking: rynna_core::ThinkingLevel::Default,
             cache_optimizer: Arc::new(PrefixCacheOptimizer),
         })
     }
@@ -286,6 +289,15 @@ struct PendingToolCall {
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
+    fn with_thinking(
+        &self,
+        level: rynna_core::ThinkingLevel,
+    ) -> Result<std::sync::Arc<dyn ModelProvider>, ProviderError> {
+        let mut provider = self.clone();
+        provider.thinking = level;
+        Ok(std::sync::Arc::new(provider))
+    }
+
     fn server_compaction(&self) -> Option<ServerCompaction> {
         (self.cache_technology == CacheTechnology::OpenAi).then_some(ServerCompaction::OpenAi)
     }
@@ -297,8 +309,11 @@ impl ModelProvider for OpenAiCompatibleProvider {
         {
             return self.complete(plan.request).await;
         }
-        let payload =
+        let mut payload =
             responses_request(&self.model, plan.request, plan.server_compaction_threshold)?;
+        if self.thinking != rynna_core::ThinkingLevel::Default {
+            payload["reasoning"] = serde_json::json!({"effort": self.thinking.as_str()});
+        }
         let mut request_builder = self.client.post(self.responses_url.clone()).json(&payload);
         if let Some(api_key) = &self.api_key {
             request_builder = request_builder.bearer_auth(api_key);
@@ -341,7 +356,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let cache_key = (self.cache_technology == CacheTechnology::OpenAi
             && cache.use_server_cache)
             .then(|| cache.server_cache_key());
-        let payload = chat_completion_request(&self.model, request, false, cache_key);
+        let mut payload = serde_json::to_value(chat_completion_request(
+            &self.model,
+            request,
+            false,
+            cache_key,
+        ))
+        .map_err(|error| ProviderError::new(error.to_string()))?;
+        if self.thinking != rynna_core::ThinkingLevel::Default {
+            payload["reasoning_effort"] = serde_json::json!(self.thinking.as_str());
+        }
         let mut request_builder = self.client.post(self.completion_url.clone()).json(&payload);
         if let Some(api_key) = &self.api_key {
             request_builder = request_builder.bearer_auth(api_key);
@@ -390,7 +414,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let cache_key = (self.cache_technology == CacheTechnology::OpenAi
             && cache.use_server_cache)
             .then(|| cache.server_cache_key());
-        let payload = chat_completion_request(&self.model, request, true, cache_key);
+        let mut payload = serde_json::to_value(chat_completion_request(
+            &self.model,
+            request,
+            true,
+            cache_key,
+        ))
+        .map_err(|error| ProviderError::new(error.to_string()))?;
+        if self.thinking != rynna_core::ThinkingLevel::Default {
+            payload["reasoning_effort"] = serde_json::json!(self.thinking.as_str());
+        }
         let mut request_builder = self.client.post(self.completion_url.clone()).json(&payload);
         if let Some(api_key) = &self.api_key {
             request_builder = request_builder.bearer_auth(api_key);
@@ -886,6 +919,7 @@ mod tests {
             model: "test-model".to_owned(),
             api_key: None,
             cache_technology: super::CacheTechnology::Generic,
+            thinking: rynna_core::ThinkingLevel::Default,
             cache_optimizer: Arc::new(super::PrefixCacheOptimizer),
         };
         let mut deltas = Vec::new();

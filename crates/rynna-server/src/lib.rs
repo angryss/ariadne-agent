@@ -998,6 +998,8 @@ async fn api_method_not_allowed() -> ApiError {
 #[derive(Deserialize)]
 pub struct RespondRequest {
     #[serde(default)]
+    pub selection: Option<rynna_core::ModelSelection>,
+    #[serde(default)]
     pub session_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub profile: Option<String>,
@@ -1021,7 +1023,13 @@ async fn respond(
         .lock()
         .await
         .clone()
-        .with_memory_session(request.session_id);
+        .with_memory_session(request.session_id)
+        .with_model_selection(request.profile.as_deref(), request.selection.as_ref())
+        .map_err(|error| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_request",
+            message: error.to_string(),
+        })?;
     let message = profiles
         .respond(
             request.profile.as_deref(),
@@ -1065,7 +1073,13 @@ async fn respond_stream(
         .lock()
         .await
         .clone()
-        .with_memory_session(request.session_id);
+        .with_memory_session(request.session_id)
+        .with_model_selection(request.profile.as_deref(), request.selection.as_ref())
+        .map_err(|error| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_request",
+            message: error.to_string(),
+        })?;
     let (sender, receiver) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {

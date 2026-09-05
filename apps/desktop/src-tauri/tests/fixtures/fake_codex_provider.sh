@@ -14,6 +14,7 @@ case "$thread" in *'"environments":[]'*) ;; *) exit 8 ;; esac
 case "$thread" in *'"update_plan":{"enabled":false}'*) ;; *) exit 9 ;; esac
 printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1"}}}'
 IFS= read -r turn
+case "$turn" in *'"effort":"high"'*) ;; *) exit 10 ;; esac
 printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}}'
 printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"other-thread","turnId":"other-turn","itemId":"item-9","delta":"forged"}}'
 printf '%s\n' '{"method":"turn/completed","params":{"threadId":"other-thread","turn":{"id":"other-turn","status":"completed","items":[]}}}'
