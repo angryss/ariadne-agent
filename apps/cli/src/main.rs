@@ -360,6 +360,11 @@ fn configured_provider(
 
 fn configured_tools(profile: &ResolvedProfile) -> Result<Vec<Arc<dyn Tool>>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    if let Some(skills) =
+        rynna_skills::SkillsTool::load(&profile.profile.active_skills, &profile.skills_directory)?
+    {
+        tools.push(Arc::new(skills));
+    }
     for capability in &profile.capabilities {
         match capability {
             ResolvedCapability::Command(capability) => {

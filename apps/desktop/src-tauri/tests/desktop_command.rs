@@ -928,3 +928,61 @@ async fn desktop_response_modes_forward_memory_session_ids() {
     .unwrap();
     assert_eq!(*memory.0.lock().unwrap(), [session_id; 3]);
 }
+
+#[tokio::test]
+async fn desktop_composition_loads_only_the_selected_profiles_skills() {
+    let directory = tempfile::tempdir().unwrap();
+    let skill = directory.path().join("skills/review");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: review\ndescription: Review code\n---\nPrivate review instructions",
+    )
+    .unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        r#"
+version = 1
+default_profile = "work"
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.work]
+provider = "local"
+model = "test"
+active_skills = ["review"]
+[profiles.personal]
+provider = "local"
+model = "test"
+"#,
+    )
+    .unwrap();
+    let catalog = ProfileCatalog::load(config).unwrap();
+    for (name, count) in [("work", 1), ("personal", 0)] {
+        let provider = Arc::new(RecordingProvider::default());
+        let agent = compose_agent(&catalog.resolve(name).unwrap(), provider.clone()).unwrap();
+        respond_with_agent(
+            &agent,
+            RespondRequest {
+                session_id: None,
+                profile: None,
+                prompt: "Review".into(),
+                history: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests[0].tools.len(), count);
+        if count == 1 {
+            assert_eq!(requests[0].tools[0].name, "read_skill");
+            assert!(requests[0].tools[0].description.contains("Review code"));
+            assert!(
+                !requests[0].tools[0]
+                    .description
+                    .contains("Private review instructions")
+            );
+        }
+    }
+}

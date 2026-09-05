@@ -1222,24 +1222,26 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: 'Settings' }));
     await user.click(await screen.findByRole('button', { name: 'Add profile' }));
     await user.type(screen.getByLabelText('Name'), 'work');
+    await user.type(screen.getByLabelText('Skills'), 'code-review{Enter}./skills/rust');
     await user.click(screen.getByRole('button', { name: 'Save profile' }));
 
     expect(createProfile).toHaveBeenCalledWith({
       name: 'work',
       providers: [{ provider: 'ollama', model: 'qwen3:8b', enabled: true, default: true }],
-      active_skills: [],
+      active_skills: ['code-review', './skills/rust'],
       mcp_servers: [],
       capabilities: [],
     });
     expect(await screen.findByRole('combobox', { name: 'Profile' })).toHaveValue('work');
 
+    expect(screen.getByLabelText('Skills')).toHaveValue('code-review\n./skills/rust');
     await user.clear(screen.getByLabelText('Name'));
     await user.type(screen.getByLabelText('Name'), 'renamed-work');
     await user.click(screen.getByRole('button', { name: 'Save profile' }));
     expect(updateProfile).toHaveBeenCalledWith('work', {
       name: 'renamed-work',
       providers: [{ provider: 'ollama', model: 'qwen3:8b', enabled: true, default: true }],
-      active_skills: [],
+      active_skills: ['code-review', './skills/rust'],
       mcp_servers: [],
       capabilities: [],
     });
@@ -1247,5 +1249,6 @@ describe('App', () => {
     await user.click(screen.getByRole('button', { name: 'Delete profile' }));
     expect(deleteProfile).toHaveBeenCalledWith('renamed-work');
     expect(await screen.findByRole('combobox', { name: 'Profile' })).toHaveValue('alpha');
+    expect(screen.getByLabelText('Skills')).toHaveValue('');
   });
 });

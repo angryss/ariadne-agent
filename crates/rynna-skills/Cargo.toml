@@ -1,0 +1,23 @@
+[package]
+name = "rynna-skills"
+description = "Profile-scoped Agent Skills loading for Rynna"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
+dirs.workspace = true
+rynna-core = { path = "../rynna-core" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng = "0.10"
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
