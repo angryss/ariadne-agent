@@ -146,7 +146,9 @@ impl MemorySettingsStore {
         }
     }
 
-    fn read_profiles(&self) -> Result<BTreeMap<String, toml::Value>, MemorySettingsError> {
+    pub(super) fn read_profiles(
+        &self,
+    ) -> Result<BTreeMap<String, toml::Value>, MemorySettingsError> {
         let source = match std::fs::read_to_string(&self.path) {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -176,7 +178,7 @@ impl MemorySettingsStore {
         }
     }
 
-    fn lock(&self) -> Result<std::fs::File, MemorySettingsError> {
+    pub(super) fn lock(&self) -> Result<std::fs::File, MemorySettingsError> {
         super::ProviderSettingsStore {
             path: self.path.clone(),
             providers: Default::default(),

@@ -446,23 +446,20 @@ async fn update_saved_profile(
 ) -> Result<Json<Profile>, ApiError> {
     let Json(profile) = request.map_err(ApiError::from)?;
     let mut catalog = catalog_store(&state)?.lock().await;
-    let saved = catalog
-        .update_profile(&name, profile)
-        .map_err(catalog_error)?;
-    if saved.name != name
-        && let Some(provider_settings) = &state.provider_settings
-    {
+    let saved = if let Some(provider_settings) = &state.provider_settings {
         let mut provider_settings = provider_settings.lock().await;
-        McpSettingsStore::new(provider_settings.mcp_settings_path())
-            .rename_profile(&name, &saved.name)
-            .map_err(mcp_settings_error)?;
-        MemorySettingsStore::new(provider_settings.memory_settings_path())
-            .rename_profile(&name, &saved.name)
-            .map_err(memory_settings_error)?;
-        provider_settings
-            .rename_profile(&name, &saved.name)
-            .map_err(provider_store_error)?;
-    }
+        rynna_config::profile_update::update_profile_with_settings(
+            &mut catalog,
+            &mut provider_settings,
+            &name,
+            profile,
+        )
+        .map_err(profile_update_error)?
+    } else {
+        catalog
+            .update_profile(&name, profile)
+            .map_err(catalog_error)?
+    };
     Ok(Json(saved))
 }
 
@@ -563,6 +560,22 @@ fn provider_store(state: &AppState) -> Result<&Arc<Mutex<ProviderSettingsStore>>
         code: "provider_settings_unavailable",
         message: "provider settings are unavailable".to_owned(),
     })
+}
+
+fn profile_update_error(error: rynna_config::profile_update::ProfileUpdateError) -> ApiError {
+    use rynna_config::profile_update::ProfileUpdateError;
+    match error {
+        ProfileUpdateError::Catalog(error) => catalog_error(error),
+        ProfileUpdateError::Providers(error) => provider_store_error(error),
+        ProfileUpdateError::Mcp(error) => mcp_settings_error(error),
+        ProfileUpdateError::Memory(error) => memory_settings_error(error),
+        ProfileUpdateError::DestinationExists => provider_settings_error(error.to_string()),
+        ProfileUpdateError::Persistence | ProfileUpdateError::Rollback => ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "profile_update_error",
+            message: error.to_string(),
+        },
+    }
 }
 
 fn mcp_settings_error(error: McpSettingsError) -> ApiError {

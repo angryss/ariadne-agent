@@ -287,3 +287,75 @@ async fn stalled_initialization_has_a_deadline() {
     assert!(result.err().unwrap().to_string().contains("timed out"));
     server.abort();
 }
+
+#[tokio::test]
+async fn raw_environment_token_is_sent_as_a_bearer_header() {
+    const TOKEN_ENV: &str = "RYNNA_MCP_PROTOCOL_TEST_TOKEN";
+    // Set the environment on a subprocess, avoiding process-global mutation in parallel tests.
+    if std::env::var(TOKEN_ENV).as_deref() != Ok("raw-test-token") {
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "raw_environment_token_is_sent_as_a_bearer_header",
+                "--nocapture",
+            ])
+            .env(TOKEN_ENV, "raw-test-token")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    async fn authenticated_mcp(
+        state: State<Arc<Mutex<Vec<Value>>>>,
+        headers: axum::http::HeaderMap,
+        request: Json<Value>,
+    ) -> axum::response::Response {
+        if headers
+            .get("authorization")
+            .and_then(|header| header.to_str().ok())
+            != Some("Bearer raw-test-token")
+        {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        mcp(state, request).await
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/mcp", post(authenticated_mcp))
+        .with_state(calls.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let tools = McpToolSource(settings(McpTransport::StreamableHttp {
+        url,
+        bearer_token_env: Some(TOKEN_ENV.into()),
+    }))
+    .discover()
+    .await
+    .unwrap();
+    assert_eq!(tools.len(), 2);
+    tools[0].execute(json!({})).await.unwrap();
+    let methods = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|call| call["method"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    for method in [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/call",
+    ] {
+        assert!(
+            methods.iter().any(|actual| actual == method),
+            "missing authenticated {method}"
+        );
+    }
+    server.abort();
+}

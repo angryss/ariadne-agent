@@ -660,23 +660,18 @@ pub fn update_saved_profile(
     original_name: &str,
     profile: Profile,
 ) -> Result<Profile, String> {
-    let saved = catalog
-        .update_profile(original_name, profile)
-        .map_err(|error| error.to_string())?;
-    if saved.name != original_name
-        && let Some(provider_settings) = provider_settings
-    {
-        McpSettingsStore::new(provider_settings.mcp_settings_path())
-            .rename_profile(original_name, &saved.name)
-            .map_err(|error| error.to_string())?;
-        MemorySettingsStore::new(provider_settings.memory_settings_path())
-            .rename_profile(original_name, &saved.name)
-            .map_err(|error| error.to_string())?;
-        provider_settings
-            .rename_profile(original_name, &saved.name)
-            .map_err(|error| error.to_string())?;
+    match provider_settings {
+        Some(provider_settings) => rynna_config::profile_update::update_profile_with_settings(
+            catalog,
+            provider_settings,
+            original_name,
+            profile,
+        )
+        .map_err(|error| error.to_string()),
+        None => catalog
+            .update_profile(original_name, profile)
+            .map_err(|error| error.to_string()),
     }
-    Ok(saved)
 }
 
 #[doc(hidden)]

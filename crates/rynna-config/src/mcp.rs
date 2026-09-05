@@ -131,7 +131,7 @@ impl McpSettingsStore {
         }
     }
 
-    fn read_profiles(&self) -> Result<BTreeMap<String, toml::Value>, McpSettingsError> {
+    pub(super) fn read_profiles(&self) -> Result<BTreeMap<String, toml::Value>, McpSettingsError> {
         let source = match std::fs::read_to_string(&self.path) {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -161,7 +161,7 @@ impl McpSettingsStore {
         }
     }
 
-    fn lock(&self) -> Result<std::fs::File, McpSettingsError> {
+    pub(super) fn lock(&self) -> Result<std::fs::File, McpSettingsError> {
         super::ProviderSettingsStore {
             path: self.path.clone(),
             providers: Default::default(),

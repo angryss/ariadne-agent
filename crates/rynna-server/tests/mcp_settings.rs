@@ -286,3 +286,122 @@ async fn saved_changes_apply_to_the_selected_profiles_next_request() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn failed_mcp_rename_preserves_catalog_credentials_memory_and_runtime_and_can_retry() {
+    use rynna_config::{
+        ConfiguredProvider, ProfileCatalog,
+        mcp::McpSettingsStore,
+        memory::{MemorySettings, MemorySettingsStore},
+    };
+    for failure in ["malformed", "directory", "destination"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "version = 1\ndefault_profile = 'test'\n[providers.ollama]\nkind = 'openai-compatible'\napi_base = 'http://127.0.0.1:11434/v1'\n[profiles.test]\nprovider = 'ollama'\nmodel = 'model'\n").unwrap();
+        let catalog = ProfileCatalog::load(&config_path).unwrap();
+        let profile = catalog.resolve("test").unwrap().profile;
+        let runtime = AgentProfiles::new(
+            "test",
+            [(
+                profile.clone(),
+                Agent::new(Arc::new(Model::default()), "policy"),
+            )],
+        )
+        .unwrap();
+        let mut providers = ProviderSettingsStore::load(dir.path().join("providers.toml")).unwrap();
+        providers
+            .add(
+                "test",
+                ConfiguredProvider::Ollama {
+                    api_base: "http://127.0.0.1:11434/v1".into(),
+                },
+            )
+            .unwrap();
+        let memory = MemorySettingsStore::new(providers.memory_settings_path());
+        memory.save("test", MemorySettings::None).unwrap();
+        let mcp_path = providers.mcp_settings_path();
+        let mcp = McpSettingsStore::new(&mcp_path);
+        mcp.save("test", serde_json::from_value(json!({"mcpServers":{"tools":{"transport":"stdio","command":"original","enabled":false}}})).unwrap()).unwrap();
+        let original_mcp = std::fs::read(&mcp_path).unwrap();
+        let router = rynna_server::router_with_profiles_provider_settings_and_catalog(
+            runtime, providers, catalog,
+        );
+        match failure {
+            "malformed" => std::fs::write(&mcp_path, "malformed = [").unwrap(),
+            "directory" => {
+                std::fs::remove_file(&mcp_path).unwrap();
+                std::fs::create_dir(&mcp_path).unwrap();
+            }
+            "destination" => {
+                mcp.save("renamed", Default::default()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let paths = [
+            config_path.clone(),
+            dir.path().join("providers.toml"),
+            dir.path().join("memory.toml"),
+        ];
+        let before = paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        let broken_mcp = std::fs::read(&mcp_path).ok();
+        let renamed = serde_json::to_value(Profile {
+            name: "renamed".into(),
+            ..profile
+        })
+        .unwrap();
+        let response = request(&router, "PUT", "/v1/profiles/test", renamed.clone(), true).await;
+        assert!(!response.0.is_success(), "{failure}");
+        for (path, bytes) in paths.iter().zip(&before) {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes, "{failure}");
+        }
+        assert_eq!(std::fs::read(&mcp_path).ok(), broken_mcp);
+        let listing = request(&router, "GET", "/v1/profiles", Value::Null, true)
+            .await
+            .1;
+        assert_eq!(listing["default_profile"], "test");
+        assert_eq!(listing["configured_profiles"][0]["name"], "test");
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                "/v1/respond",
+                json!({"profile":"test","prompt":"hello","history":[]}),
+                true
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        if failure == "directory" {
+            std::fs::remove_dir(&mcp_path).unwrap();
+        }
+        std::fs::write(&mcp_path, &original_mcp).unwrap();
+        assert_eq!(
+            request(&router, "PUT", "/v1/profiles/test", renamed, true)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            ProfileCatalog::load(&config_path)
+                .unwrap()
+                .default_profile(),
+            "renamed"
+        );
+        assert_eq!(mcp.load("renamed").unwrap().servers.len(), 1);
+        assert!(mcp.load("test").unwrap().servers.is_empty());
+        assert_eq!(
+            ProviderSettingsStore::load(dir.path().join("providers.toml"))
+                .unwrap()
+                .list("renamed")
+                .len(),
+            1
+        );
+        let memory_file = std::fs::read_to_string(dir.path().join("memory.toml")).unwrap();
+        assert!(memory_file.contains("profiles.renamed"));
+        assert!(!memory_file.contains("profiles.test"));
+    }
+}

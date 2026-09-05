@@ -108,6 +108,7 @@ async fn connect(name: &str, transport: &McpTransport) -> Result<Vec<Arc<dyn Too
         } => {
             let mut config = StreamableHttpClientTransportConfig::with_uri(url.clone());
             if let Some(key) = bearer_token_env {
+                // rmcp’s reqwest transport calls bearer_auth(), which adds the scheme.
                 config.auth_header = Some(std::env::var(key).map_err(|_| {
                     ToolError::new(format!(
                         "MCP server `{name}` bearer token environment variable is unavailable"

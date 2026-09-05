@@ -11,6 +11,7 @@ use url::Url;
 
 pub mod mcp;
 pub mod memory;
+pub mod profile_update;
 
 const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 300;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
