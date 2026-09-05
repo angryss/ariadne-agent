@@ -1,3 +1,4 @@
+import { McpSettingsPanel } from './components/mcp-settings';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
 import { MemorySettingsPanel } from './components/memory-settings';
@@ -120,10 +121,10 @@ export function App({ client }: AppProps) {
   const [reuseExistingChatgpt, setReuseExistingChatgpt] = useState<boolean | null>(null);
   const [providerApiKey, setProviderApiKey] = useState('');
   const [savingProvider, setSavingProvider] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<'profiles' | 'provider-credentials' | 'models' | 'memory'>(
+  const [settingsSection, setSettingsSection] = useState<'profiles' | 'provider-credentials' | 'models' | 'memory' | 'mcp'>(
     client.createProfile || client.updateProfile || client.deleteProfile
       ? 'profiles'
-      : client.listProviders ? 'provider-credentials' : 'memory',
+      : client.listProviders ? 'provider-credentials' : client.getMemorySettings ? 'memory' : 'mcp',
   );
   const [addingProfile, setAddingProfile] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
@@ -245,7 +246,7 @@ export function App({ client }: AppProps) {
     (profile) => profile.name === selectedSettingsProfile,
   );
   const canEditProfiles = Boolean(client.createProfile || client.updateProfile || client.deleteProfile);
-  const canOpenSettings = Boolean(client.listProviders || canEditProfiles || client.getMemorySettings);
+  const canOpenSettings = Boolean(client.listProviders || canEditProfiles || client.getMemorySettings || client.getMcpSettings);
   const selectedModelKeys = new Set(
     selectedModels.map((model) => `${modelProvider}\u0000${model}`),
   );
@@ -763,6 +764,12 @@ export function App({ client }: AppProps) {
                   Models
                 </Button>
               ) : null}
+              {client.getMcpSettings ? (
+                <Button aria-current={settingsSection === 'mcp' ? 'page' : undefined}
+                  onClick={() => setSettingsSection('mcp')} type="button" variant="ghost">
+                  MCP servers
+                </Button>
+              ) : null}
               {client.getMemorySettings ? (
                 <Button aria-current={settingsSection === 'memory' ? 'page' : undefined}
                   onClick={() => setSettingsSection('memory')} type="button" variant="ghost">
@@ -772,6 +779,32 @@ export function App({ client }: AppProps) {
             </nav>
           </aside>
           <div className="settings-content">
+            {settingsSection === 'mcp' ? (
+              <>
+                <label className="profile-picker" htmlFor="mcp-profile">
+                  <span>Profile</span>
+                  <select
+                    id="mcp-profile"
+                    value={selectedSettingsProfile ?? ''}
+                    onChange={(event) => selectSettingsProfile(event.target.value)}
+                  >
+                    {!selectedSettingsProfile ? <option value="" disabled>Select a profile</option> : null}
+                    {sortedProfiles([
+                      ...configuredProfiles,
+                      ...profiles.filter(
+                        (profile) => profile.name === 'openai-account' &&
+                          !configuredProfiles.some((saved) => saved.name === profile.name),
+                      ),
+                    ]).map((profile) => (
+                      <option key={profile.name} value={profile.name}>{profile.name}</option>
+                    ))}
+                  </select>
+                </label>
+                {selectedSettingsProfile ? (
+                  <McpSettingsPanel key={selectedSettingsProfile} client={client} profile={selectedSettingsProfile} />
+                ) : <p>Select a profile to configure its MCP servers.</p>}
+              </>
+            ) : null}
             {settingsSection === 'memory' ? (
               <>
                 <label className="profile-picker" htmlFor="memory-profile">

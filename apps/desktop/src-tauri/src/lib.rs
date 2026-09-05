@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rynna_config::mcp::{McpSettings, McpSettingsStore};
 use rynna_config::memory::{MemorySettings, MemorySettingsResponse, MemorySettingsStore};
 use rynna_config::{
     AnthropicAuthentication, ConfiguredProvider, OPENAI_ACCOUNT_PROFILE, OpenAiAuthentication,
@@ -15,6 +16,7 @@ use rynna_core::{
     Agent, AgentProfiles, CompletionDelta, FallbackProvider, Message, ModelProvider, Profile,
     ProfileProvider, Tool,
 };
+use rynna_mcp::McpToolSource;
 use rynna_memory_hindsight::configured_memory;
 use rynna_provider_anthropic::{
     AnthropicMessagesProvider, CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, ClaudeCodeProvider,
@@ -664,6 +666,9 @@ pub fn update_saved_profile(
     if saved.name != original_name
         && let Some(provider_settings) = provider_settings
     {
+        McpSettingsStore::new(provider_settings.mcp_settings_path())
+            .rename_profile(original_name, &saved.name)
+            .map_err(|error| error.to_string())?;
         MemorySettingsStore::new(provider_settings.memory_settings_path())
             .rename_profile(original_name, &saved.name)
             .map_err(|error| error.to_string())?;
@@ -688,6 +693,9 @@ pub fn delete_saved_profile(
         .delete_profile(name)
         .map_err(|error| error.to_string())?;
     if let Some(provider_settings) = provider_settings {
+        McpSettingsStore::new(provider_settings.mcp_settings_path())
+            .delete_profile(name)
+            .map_err(|error| error.to_string())?;
         MemorySettingsStore::new(provider_settings.memory_settings_path())
             .delete_profile(name)
             .map_err(|error| error.to_string())?;
@@ -923,6 +931,46 @@ fn ensure_memory_profile(
 }
 
 #[tauri::command]
+async fn get_mcp_settings(
+    catalog: State<'_, Mutex<ProfileCatalog>>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    profile: String,
+) -> Result<McpSettings, String> {
+    let catalog = catalog.lock().await;
+    let runtime = profiles.lock().await;
+    ensure_memory_profile(&catalog, &runtime, &profile)?;
+    let store = provider_settings.lock().await;
+    McpSettingsStore::new(store.mcp_settings_path())
+        .load(&profile)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn save_mcp_settings(
+    catalog: State<'_, Mutex<ProfileCatalog>>,
+    provider_settings: State<'_, Mutex<ProviderSettingsStore>>,
+    profiles: State<'_, Mutex<AgentProfiles>>,
+    profile: String,
+    settings: McpSettings,
+) -> Result<McpSettings, String> {
+    let catalog = catalog.lock().await;
+    let mut profiles = profiles.lock().await;
+    ensure_memory_profile(&catalog, &profiles, &profile)?;
+    let store = provider_settings.lock().await;
+    let settings = McpSettingsStore::new(store.mcp_settings_path())
+        .save(&profile, settings)
+        .map_err(|error| error.to_string())?;
+    let source = Some(Arc::new(McpToolSource(settings.clone())) as Arc<dyn rynna_core::ToolSource>);
+    if profiles.contains(&profile) {
+        profiles
+            .set_tool_source(&profile, source)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(settings)
+}
+
+#[tauri::command]
 async fn get_memory_settings(
     catalog: State<'_, Mutex<ProfileCatalog>>,
     profiles: State<'_, Mutex<AgentProfiles>>,
@@ -977,6 +1025,15 @@ pub fn run() {
     let mut configured = configured_profiles(credential_selection.clone(), &catalog)
         .unwrap_or_else(|error| panic!("failed to configure Rynna model provider: {error}"));
 
+    let mcp_store = McpSettingsStore::new(provider_settings.mcp_settings_path());
+    for profile in configured.profiles() {
+        let settings = mcp_store
+            .load(&profile.name)
+            .unwrap_or_else(|error| panic!("failed to load Rynna MCP settings: {error}"));
+        configured
+            .set_tool_source(&profile.name, Some(Arc::new(McpToolSource(settings))))
+            .expect("existing profile");
+    }
     let memory_store = MemorySettingsStore::new(provider_settings.memory_settings_path());
     for profile in configured.profiles() {
         let settings = memory_store
@@ -1005,6 +1062,8 @@ pub fn run() {
             openai_account,
             existing_openai_account,
             connect_openai,
+            get_mcp_settings,
+            save_mcp_settings,
             get_memory_settings,
             save_memory_settings,
             list_providers,

@@ -136,6 +136,15 @@ async fn main() -> Result<()> {
         include_all_profiles,
     )?;
 
+    let mcp_store =
+        rynna_config::mcp::McpSettingsStore::new(provider_config.with_file_name("mcp.toml"));
+    for profile in profiles.profiles() {
+        let settings = mcp_store.load(&profile.name)?;
+        profiles.set_tool_source(
+            &profile.name,
+            Some(Arc::new(rynna_mcp::McpToolSource(settings))),
+        )?;
+    }
     let memory_store = rynna_config::memory::MemorySettingsStore::new(
         provider_config.with_file_name("memory.toml"),
     );

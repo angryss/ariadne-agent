@@ -141,6 +141,11 @@ model = "qwen3:14b"
             )
             .unwrap();
     }
+    let mcp_store = rynna_config::mcp::McpSettingsStore::new(provider_settings.mcp_settings_path());
+    for name in ["new", "work"] {
+        let settings = serde_json::from_value(serde_json::json!({"mcpServers":{"tools":{"transport":"stdio","command":format!("{name}-command"),"enabled":false}}})).unwrap();
+        mcp_store.save(name, settings).unwrap();
+    }
     let memory_store =
         rynna_config::memory::MemorySettingsStore::new(provider_settings.memory_settings_path());
     for name in ["new", "work"] {
@@ -196,6 +201,12 @@ model = "qwen3:14b"
     assert_eq!(runtime.default_profile(), "work");
     assert!(provider_settings.list("new").is_empty());
     assert_eq!(provider_settings.list("renamed").len(), 1);
+    assert!(mcp_store.load("new").unwrap().servers.is_empty());
+    assert!(
+        serde_json::to_string(&mcp_store.load("renamed").unwrap())
+            .unwrap()
+            .contains("new-command")
+    );
     assert!(matches!(
         memory_store.load("new").unwrap(),
         rynna_config::memory::MemorySettings::None
@@ -214,6 +225,8 @@ model = "qwen3:14b"
     assert_eq!(runtime.default_profile(), "alpha");
     assert!(runtime.clone_agent("work").is_none());
     assert!(provider_settings.list("work").is_empty());
+    assert!(mcp_store.load("work").unwrap().servers.is_empty());
+    assert_eq!(mcp_store.load("renamed").unwrap().servers.len(), 1);
     assert!(matches!(
         memory_store.load("work").unwrap(),
         rynna_config::memory::MemorySettings::None

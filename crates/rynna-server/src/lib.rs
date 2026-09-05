@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
+use rynna_config::mcp::{McpSettings, McpSettingsError, McpSettingsStore};
 use rynna_config::memory::{
     MemorySettings, MemorySettingsError, MemorySettingsResponse, MemorySettingsStore,
 };
@@ -25,6 +26,7 @@ use rynna_core::{
     Agent, AgentError, AgentProfiles, CompletionDelta, Message, Profile, ProfileAgentError,
     ProfileError, ProfileProvider,
 };
+use rynna_mcp::McpToolSource;
 use rynna_memory_hindsight::configured_memory;
 use rynna_provider_anthropic::{
     CLAUDE_SUBSCRIPTION_CONFLICTING_ENV_VARS, isolate_claude_subscription_environment,
@@ -153,7 +155,26 @@ fn router_with_runtime(
             }
         }
     }
+    if let Some(store) = &provider_settings {
+        let store = McpSettingsStore::new(store.mcp_settings_path());
+        for profile in profiles.profiles() {
+            match store.load(&profile.name) {
+                Ok(settings) => {
+                    profiles
+                        .set_tool_source(&profile.name, Some(Arc::new(McpToolSource(settings))))
+                        .expect("existing profile");
+                }
+                Err(_) => tracing::warn!("could not load MCP settings"),
+            }
+        }
+    }
     let provider_routes = Router::new()
+        .route(
+            "/v1/profiles/{profile}/mcp",
+            get(get_mcp_settings)
+                .put(save_mcp_settings)
+                .fallback(api_method_not_allowed),
+        )
         .route(
             "/v1/profiles/{profile}/memory",
             get(get_memory_settings)
@@ -432,6 +453,9 @@ async fn update_saved_profile(
         && let Some(provider_settings) = &state.provider_settings
     {
         let mut provider_settings = provider_settings.lock().await;
+        McpSettingsStore::new(provider_settings.mcp_settings_path())
+            .rename_profile(&name, &saved.name)
+            .map_err(mcp_settings_error)?;
         MemorySettingsStore::new(provider_settings.memory_settings_path())
             .rename_profile(&name, &saved.name)
             .map_err(memory_settings_error)?;
@@ -460,6 +484,9 @@ async fn delete_saved_profile(
     catalog.delete_profile(&name).map_err(catalog_error)?;
     if let Some(provider_settings) = &state.provider_settings {
         let mut provider_settings = provider_settings.lock().await;
+        McpSettingsStore::new(provider_settings.mcp_settings_path())
+            .delete_profile(&name)
+            .map_err(mcp_settings_error)?;
         MemorySettingsStore::new(provider_settings.memory_settings_path())
             .delete_profile(&name)
             .map_err(memory_settings_error)?;
@@ -536,6 +563,65 @@ fn provider_store(state: &AppState) -> Result<&Arc<Mutex<ProviderSettingsStore>>
         code: "provider_settings_unavailable",
         message: "provider settings are unavailable".to_owned(),
     })
+}
+
+fn mcp_settings_error(error: McpSettingsError) -> ApiError {
+    ApiError {
+        status: if matches!(error, McpSettingsError::Invalid(_)) {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+        code: "mcp_settings_error",
+        message: error.to_string(),
+    }
+}
+
+async fn get_mcp_settings(
+    State(state): State<AppState>,
+    AxumPath(profile): AxumPath<String>,
+) -> Result<Json<McpSettings>, ApiError> {
+    ensure_known_profile(&state, &profile).await?;
+    let store = provider_store(&state)?.lock().await;
+    let settings = McpSettingsStore::new(store.mcp_settings_path())
+        .load(&profile)
+        .map_err(mcp_settings_error)?;
+    Ok(Json(settings))
+}
+
+async fn save_mcp_settings(
+    State(state): State<AppState>,
+    AxumPath(profile): AxumPath<String>,
+    request: Result<Json<McpSettings>, JsonRejection>,
+) -> Result<Json<McpSettings>, ApiError> {
+    let Json(input) = request.map_err(|_| {
+        mcp_settings_error(McpSettingsError::Invalid("invalid mcp settings request"))
+    })?;
+    // Serialize against catalog rename/delete, then lock runtime and credentials in that order.
+    let catalog = match &state.catalog {
+        Some(catalog) => Some(catalog.lock().await),
+        None => None,
+    };
+    let mut profiles = state.profiles.lock().await;
+    let exists = catalog.as_ref().map_or_else(
+        || profiles.contains(&profile),
+        |catalog| catalog.resolve(&profile).is_ok(),
+    );
+    if !exists {
+        return Err(provider_settings_error("mcp profile is not defined"));
+    }
+    let store = provider_store(&state)?.lock().await;
+    let settings = McpSettingsStore::new(store.mcp_settings_path())
+        .save(&profile, input)
+        .map_err(mcp_settings_error)?;
+    let source = Some(Arc::new(McpToolSource(settings.clone())) as Arc<dyn rynna_core::ToolSource>);
+    // Newly created or renamed catalog profiles become runnable on restart.
+    if profiles.contains(&profile) {
+        profiles
+            .set_tool_source(&profile, source)
+            .map_err(runtime_profile_error)?;
+    }
+    Ok(Json(settings))
 }
 
 fn memory_settings_error(error: MemorySettingsError) -> ApiError {
@@ -1012,7 +1098,8 @@ impl From<AgentError> for ApiError {
                 code: "provider_error",
                 message: "model provider request failed".to_owned(),
             },
-            AgentError::ToolLoopLimit(_)
+            AgentError::ToolDiscovery(_)
+            | AgentError::ToolLoopLimit(_)
             | AgentError::ToolCallLimit(_)
             | AgentError::ToolResultByteLimit(_)
             | AgentError::ToolExecutionDeadline(_)

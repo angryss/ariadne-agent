@@ -3,6 +3,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { TauriAgentClient } from './tauriAgentClient';
 
 describe('TauriAgentClient', () => {
+  it('loads and saves MCP settings through narrow desktop commands', async () => {
+    const invoke = vi.fn().mockResolvedValue({ mcpServers: {} });
+    const client = new TauriAgentClient(invoke);
+    expect(await client.getMcpSettings('work profile')).toEqual({ mcpServers: {} });
+    expect(invoke).toHaveBeenLastCalledWith('get_mcp_settings', { profile: 'work profile' });
+    await client.saveMcpSettings({ mcpServers: {} }, 'work profile');
+    expect(invoke).toHaveBeenLastCalledWith('save_mcp_settings', { settings: { mcpServers: {} }, profile: 'work profile' });
+    invoke.mockResolvedValueOnce({ kind: 'hindsight' });
+    await expect(client.getMcpSettings('work profile')).rejects.toThrow('invalid MCP settings');
+  });
+
   it('loads and saves memory settings through narrow desktop commands', async () => {
     const invoke = vi.fn().mockResolvedValue({ kind: 'none' });
     const client = new TauriAgentClient(invoke);

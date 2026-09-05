@@ -1,6 +1,7 @@
-import { isMemorySettings } from '@rynna/ui';
+import { isMcpSettings, isMemorySettings } from '@rynna/ui';
 import type {
   AgentClient,
+  McpSettings,
   MemorySettings,
   MemorySettingsInput,
   CompletionDelta,
@@ -31,6 +32,18 @@ export class HttpAgentClient implements AgentClient {
     this.profilesEndpoint = profilesEndpoint;
     this.providersEndpoint = endpoint.replace(/\/respond$/, '/providers');
     this.fetcher = fetcher;
+  }
+
+  async getMcpSettings(profile: string): Promise<McpSettings> {
+    const body = await this.providerRequest(`${this.profilesEndpoint}/${encodeURIComponent(profile)}/mcp`, 'GET');
+    if (!isMcpSettings(body)) throw new Error('Rynna API returned invalid MCP settings');
+    return body;
+  }
+
+  async saveMcpSettings(settings: McpSettings, profile: string): Promise<McpSettings> {
+    const body = await this.providerRequest(`${this.profilesEndpoint}/${encodeURIComponent(profile)}/mcp`, 'PUT', settings);
+    if (!isMcpSettings(body)) throw new Error('Rynna API returned invalid MCP settings');
+    return body;
   }
 
   async getMemorySettings(profile: string): Promise<MemorySettings> {
@@ -99,7 +112,7 @@ export class HttpAgentClient implements AgentClient {
     return body;
   }
 
-  private async providerRequest(endpoint: string, method: string, body?: ProviderInput | MemorySettingsInput): Promise<unknown> {
+  private async providerRequest(endpoint: string, method: string, body?: ProviderInput | MemorySettingsInput | McpSettings): Promise<unknown> {
     const response = await this.fetcher(endpoint, {
       method,
       ...(body

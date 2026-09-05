@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+pub mod mcp;
 pub mod memory;
 
 const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 300;
@@ -116,6 +117,10 @@ impl ProviderSettingsStore {
         let _lock = self.lock_exclusive()?;
         self.providers = read_provider_settings(&self.path)?;
         Ok(())
+    }
+
+    pub fn mcp_settings_path(&self) -> PathBuf {
+        self.path.with_file_name("mcp.toml")
     }
 
     pub fn memory_settings_path(&self) -> PathBuf {
