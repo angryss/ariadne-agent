@@ -4025,6 +4025,7 @@ dependencies = [
  "rynna-provider-anthropic",
  "rynna-provider-openai",
  "rynna-server",
+ "rynna-skills",
  "rynna-tools-command",
  "rynna-tools-filesystem",
  "serde_json",
@@ -4079,6 +4080,7 @@ dependencies = [
  "rynna-memory-hindsight",
  "rynna-provider-anthropic",
  "rynna-provider-openai",
+ "rynna-skills",
  "rynna-tools-command",
  "rynna-tools-filesystem",
  "serde",
@@ -4175,6 +4177,23 @@ dependencies = [
  "tower-http 0.7.0",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "rynna-skills"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cap-fs-ext",
+ "cap-std",
+ "dirs",
+ "rynna-core",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -4490,6 +4509,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "serde_yaml_ng"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
+dependencies = [
+ "indexmap 2.14.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -5765,6 +5797,12 @@ name = "unicode-width"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fc81956842c57dac11422a97c3b8195a1ff727f06e85c84ed2e8aa277c9a0fd"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

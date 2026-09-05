@@ -644,6 +644,8 @@ pub enum ProviderKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedProfile {
+    /// Base for profile skill paths; relative to the catalog, never the UI client.
+    pub skills_directory: PathBuf,
     pub profile: Profile,
     pub providers: Vec<ResolvedProvider>,
     pub system_prompt: String,
@@ -1014,6 +1016,13 @@ impl ProfileCatalog {
             .collect::<Result<Vec<_>, ConfigError>>()?;
 
         Ok(ResolvedProfile {
+            skills_directory: self
+                .path
+                .as_deref()
+                .and_then(Path::parent)
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .to_owned(),
             profile: Profile {
                 name: name.to_owned(),
                 providers: profile.providers.clone(),

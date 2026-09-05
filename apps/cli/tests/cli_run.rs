@@ -240,7 +240,7 @@ enabled = true
 default = true
 [profiles.work]
 system_prompt = "Work profile policy"
-active_skills = ["rust"]
+active_skills = []
 mcp_servers = ["filesystem"]
 
 [mcp_servers.filesystem]
@@ -574,4 +574,77 @@ async fn one_shot_run_drains_queued_memory_before_exiting() {
         serde_json::from_str(body["items"][0]["content"].as_str().unwrap()).unwrap();
     assert_eq!(content[0]["content"], "Remember this");
     assert_eq!(content[1]["content"], "Saved answer");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_loads_selected_skill_through_the_real_provider_tool_loop() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("\"name\":\"read_skill\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "skill-1", "type": "function",
+                "function": {"name": "read_skill", "arguments": "{\"name\":\"review\"}"}
+            }]}}]
+        })))
+        .with_priority(10)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("Private review instructions"))
+        .and(body_string_contains("\"role\":\"tool\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "Skill loaded."}}]
+        })))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let skill = directory.path().join("skills/review");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: review\ndescription: Review code\n---\nPrivate review instructions",
+    )
+    .unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+version = 1
+default_profile = "work"
+[providers.local]
+kind = "openai-compatible"
+api_base = "{}/v1"
+[profiles.work]
+provider = "local"
+model = "test"
+active_skills = ["review"]
+"#,
+            server.uri()
+        ),
+    )
+    .unwrap();
+    Command::cargo_bin("rynna")
+        .unwrap()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--provider-config",
+            directory.path().join("providers.toml").to_str().unwrap(),
+            "run",
+            "--prompt",
+            "Use $review",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("Skill loaded.\n"));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!String::from_utf8_lossy(&requests[0].body).contains("Private review instructions"));
 }

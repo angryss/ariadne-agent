@@ -33,14 +33,15 @@ claude_program = "claude"
 provider = "ollama"
 model = "qwen3:8b"
 system_prompt = "You are Rynna, a careful and capable local AI software agent."
-active_skills = ["rust", "repository-inspection"]
+# Enable installed Agent Skills by name or directory (see docs/skills.md).
+active_skills = [] # e.g. ["code-review", "./skills/rust"]
 capabilities = ["workspace"]
 
 [profiles.work]
 provider = "work-openai"
 model = "gpt-5"
 system_prompt = "You are Rynna, a careful AI software agent working in a professional environment."
-active_skills = ["github", "code-review"]
+active_skills = [] # Independent from local; install packages before enabling them.
 mcp_servers = ["github"]
 capabilities = ["workspace"]
 

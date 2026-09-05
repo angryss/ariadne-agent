@@ -139,6 +139,7 @@ export function App({ client }: AppProps) {
   const [addingProfile, setAddingProfile] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileName, setProfileName] = useState('');
+  const [profileSkills, setProfileSkills] = useState('');
   const [profileProviders, setProfileProviders] = useState<ProfileProvider[]>([]);
   const [catalogProviderIds, setCatalogProviderIds] = useState<string[]>([]);
   const [modelProvider, setModelProvider] = useState('');
@@ -275,10 +276,12 @@ export function App({ client }: AppProps) {
     }
     if (!activeConfiguredProfile) {
       setProfileName('');
+      setProfileSkills('');
       setProfileProviders([]);
       return;
     }
     setProfileName(activeConfiguredProfile.name);
+    setProfileSkills(activeConfiguredProfile.active_skills.join('\n'));
     setProfileProviders(activeConfiguredProfile.providers.map((provider) => ({ ...provider })));
   }, [activeConfiguredProfile, addingProfile]);
 
@@ -311,6 +314,7 @@ export function App({ client }: AppProps) {
   function beginAddProfile() {
     setAddingProfile(true);
     setProfileName('');
+    setProfileSkills('');
     setProfileProviders(
       activeConfiguredProfile?.providers.map((provider) => ({ ...provider })) ?? [
         { provider: 'ollama', model: 'qwen3:8b', enabled: true, default: true },
@@ -334,7 +338,7 @@ export function App({ client }: AppProps) {
           provider.enabled !== false &&
           (provider.default === true || (!hasExplicitDefault && index === firstEnabledIndex)),
       })),
-      active_skills: addingProfile ? [] : (activeConfiguredProfile?.active_skills ?? []),
+      active_skills: profileSkills.split('\n').map((skill) => skill.trim()).filter(Boolean),
       mcp_servers: addingProfile ? [] : (activeConfiguredProfile?.mcp_servers ?? []),
       capabilities: addingProfile ? [] : (activeConfiguredProfile?.capabilities ?? []),
     };
@@ -891,6 +895,19 @@ export function App({ client }: AppProps) {
                         required
                         value={profileName}
                       />
+                      <label htmlFor="profile-skills">Skills</label>
+                      <Textarea
+                        aria-describedby="profile-skills-help"
+                        disabled={savingProfile}
+                        id="profile-skills"
+                        onChange={(event) => setProfileSkills(event.target.value)}
+                        rows={4}
+                        value={profileSkills}
+                      />
+                      <p id="profile-skills-help">
+                        One skill name or directory per line. Each directory must contain SKILL.md
+                        on the machine running Rynna. Leave empty for no skills. Restart Rynna after saving.
+                      </p>
                       <div className="provider-actions">
                         <Button
                           disabled={

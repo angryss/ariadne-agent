@@ -1377,3 +1377,63 @@ default = true
     let error = catalog.delete_profile("alpha").unwrap_err();
     assert!(error.to_string().contains("last profile"));
 }
+
+#[test]
+fn profile_skills_persist_independently_through_rename_and_delete() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "personal"
+[providers.ollama]
+kind = "openai-compatible"
+api_base = "http://127.0.0.1:11434/v1"
+[profiles.personal]
+provider = "ollama"
+model = "test"
+active_skills = ["personal-skill"]
+"#,
+    )
+    .unwrap();
+    let mut catalog = ProfileCatalog::load(&path).unwrap();
+    let mut work = editable_profile("work", "test");
+    work.active_skills = vec!["code-review".into(), "./skills/rust".into()];
+    catalog.add_profile(work.clone()).unwrap();
+    work.name = "renamed-work".into();
+    catalog.update_profile("work", work).unwrap();
+    let reloaded = ProfileCatalog::load(&path).unwrap();
+    assert_eq!(
+        reloaded
+            .resolve("renamed-work")
+            .unwrap()
+            .profile
+            .active_skills,
+        ["code-review", "./skills/rust"]
+    );
+    assert_eq!(
+        reloaded.resolve("personal").unwrap().profile.active_skills,
+        ["personal-skill"]
+    );
+    assert_eq!(
+        reloaded.resolve("personal").unwrap().skills_directory,
+        directory.path()
+    );
+    catalog.delete_profile("renamed-work").unwrap();
+    catalog
+        .add_profile(editable_profile("renamed-work", "test"))
+        .unwrap();
+    assert!(
+        catalog
+            .resolve("renamed-work")
+            .unwrap()
+            .profile
+            .active_skills
+            .is_empty()
+    );
+    assert_eq!(
+        catalog.resolve("personal").unwrap().profile.active_skills,
+        ["personal-skill"]
+    );
+}

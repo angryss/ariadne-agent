@@ -5,6 +5,7 @@ members = [
   "crates/rynna-config",
   "crates/rynna-core",
   "crates/rynna-mcp",
+  "crates/rynna-skills",
   "crates/rynna-memory-hindsight",
   "crates/rynna-provider-anthropic",
   "crates/rynna-provider-openai",
