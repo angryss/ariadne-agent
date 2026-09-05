@@ -998,6 +998,8 @@ async fn api_method_not_allowed() -> ApiError {
 #[derive(Deserialize)]
 pub struct RespondRequest {
     #[serde(default)]
+    pub session_id: Option<uuid::Uuid>,
+    #[serde(default)]
     pub profile: Option<String>,
     pub prompt: String,
     #[serde(default)]
@@ -1014,7 +1016,12 @@ async fn respond(
     request: Result<Json<RespondRequest>, JsonRejection>,
 ) -> Result<Json<RespondResponse>, ApiError> {
     let Json(request) = request.map_err(ApiError::from)?;
-    let profiles = state.profiles.lock().await.clone();
+    let profiles = state
+        .profiles
+        .lock()
+        .await
+        .clone()
+        .with_memory_session(request.session_id);
     let message = profiles
         .respond(
             request.profile.as_deref(),
@@ -1053,7 +1060,12 @@ async fn respond_stream(
     request: Result<Json<RespondRequest>, JsonRejection>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let Json(request) = request.map_err(ApiError::from)?;
-    let profiles = state.profiles.lock().await.clone();
+    let profiles = state
+        .profiles
+        .lock()
+        .await
+        .clone()
+        .with_memory_session(request.session_id);
     let (sender, receiver) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {

@@ -711,6 +711,7 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
     let mut session = TerminalSession::enter()?;
     let mut ui = ChatUi::new(profile, model);
     let mut history = Vec::<Message>::new();
+    let mut memory_session = uuid::Uuid::new_v4();
     let mut events = EventStream::new();
     let (response_tx, mut response_rx) = mpsc::unbounded_channel::<ResponseEvent>();
 
@@ -748,6 +749,9 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
                         };
                         let prompt = match action {
                             InputAction::Command(command) => {
+                                if matches!(command, CommandAction::Clear) {
+                                    memory_session = uuid::Uuid::new_v4();
+                                }
                                 if apply_command(&mut ui, &mut history, command) {
                                     break;
                                 }
@@ -757,7 +761,7 @@ pub async fn run(profiles: &AgentProfiles, profile: &str, model: &str) -> Result
                         };
 
                         ui.busy = true;
-                        let profiles = profiles.clone();
+                        let profiles = profiles.clone().with_memory_session(Some(memory_session));
                         let profile = profile.to_owned();
                         let request_history = history.clone();
                         let sender = response_tx.clone();

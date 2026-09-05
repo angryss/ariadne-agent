@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use reqwest::{Client, Url};
 use rynna_config::memory::MemorySettings;
-use rynna_core::{MemoryError, MemoryProvider};
+use rynna_core::{MemoryConversation, MemoryError, MemoryProvider, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -10,6 +10,9 @@ pub struct HindsightMemoryProvider {
     client: Client,
     memories_url: Url,
     api_key: Option<String>,
+    version_url: Url,
+    append_supported: tokio::sync::OnceCell<bool>,
+    legacy_document_prefix: uuid::Uuid,
 }
 
 /// Composition helper; the core depends only on MemoryProvider.
@@ -40,6 +43,12 @@ impl HindsightMemoryProvider {
         };
         let mut memories_url =
             Url::parse(api_base).map_err(|_| MemoryError("invalid Hindsight URL".into()))?;
+        let mut version_url = memories_url.clone();
+        version_url
+            .path_segments_mut()
+            .expect("validated URL")
+            .pop_if_empty()
+            .push("version");
         memories_url
             .path_segments_mut()
             .map_err(|_| MemoryError("invalid Hindsight URL".into()))?
@@ -54,7 +63,44 @@ impl HindsightMemoryProvider {
             client,
             memories_url,
             api_key: api_key.clone(),
+            version_url,
+            append_supported: tokio::sync::OnceCell::new(),
+            legacy_document_prefix: uuid::Uuid::new_v4(),
         })
+    }
+
+    async fn supports_append(&self) -> bool {
+        *self
+            .append_supported
+            .get_or_init(|| async {
+                let mut request = self.client.get(self.version_url.clone());
+                if let Some(key) = &self.api_key {
+                    request = request.bearer_auth(key);
+                }
+                let Ok(mut response) = request.send().await else {
+                    return false;
+                };
+                if !response.status().is_success() {
+                    return false;
+                }
+                let mut bytes = Vec::new();
+                while let Ok(Some(chunk)) = response.chunk().await {
+                    if bytes.len() + chunk.len() > 4096 {
+                        return false;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                    return false;
+                };
+                value
+                    .get("version")
+                    .or_else(|| value.get("api_version"))
+                    .and_then(Value::as_str)
+                    .and_then(|version| semver::Version::parse(version).ok())
+                    .is_some_and(|version| version >= semver::Version::new(0, 5, 0))
+            })
+            .await
     }
 
     async fn post(&self, url: Url, body: Value) -> Result<reqwest::Response, MemoryError> {
@@ -120,12 +166,47 @@ impl MemoryProvider for HindsightMemoryProvider {
             .collect())
     }
 
-    async fn retain(&self, input: &str, answer: &str) -> Result<(), MemoryError> {
-        let content = format!("User: {input}\nAssistant: {answer}");
+    async fn retain(&self, conversation: &MemoryConversation) -> Result<(), MemoryError> {
+        if conversation.messages.len() < 2 {
+            return Err(MemoryError(
+                "a completed memory exchange is required".into(),
+            ));
+        }
+        // Hermes uses session-scoped append on Hindsight >= 0.5.0. Legacy APIs
+        // replace a full transcript in a process-scoped document to avoid
+        // overwriting a previous process's document on resume.
+        let append = self.supports_append().await;
+        let messages = if append {
+            &conversation.messages[conversation.messages.len() - 2..]
+        } else {
+            &conversation.messages[..]
+        };
+        let session_id = conversation.session_id.to_string();
+        let document_id = if append {
+            format!("rynna-{session_id}")
+        } else {
+            format!("rynna-{session_id}-{}", self.legacy_document_prefix)
+        };
+        let mut item = json!({
+            "content": serde_json::to_string(messages).expect("memory messages serialize"),
+            "context": "conversation between Rynna and the User",
+            "document_id": document_id,
+            "timestamp": conversation.timestamp,
+            "metadata": {
+                "source": "rynna", "session_id": session_id,
+                "retained_at": conversation.timestamp,
+                "message_count": messages.len().to_string(),
+                "turn_index": conversation.messages.iter().filter(|m| m.role == Role::Assistant).count().to_string()
+            },
+            "tags": [format!("session:{session_id}")]
+        });
+        if append {
+            item["update_mode"] = json!("append");
+        }
         self.post(
             self.memories_url.clone(),
             json!({
-                "items": [{"content": content, "context": "Rynna conversation"}], "async": true
+                "items": [item], "async": true
             }),
         )
         .await?;

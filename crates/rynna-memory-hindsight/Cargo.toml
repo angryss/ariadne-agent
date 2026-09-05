@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+tokio.workspace = true
+uuid.workspace = true
+semver = "1"
 rynna-core = { path = "../rynna-core" }
 rynna-config = { path = "../rynna-config" }
 async-trait.workspace = true

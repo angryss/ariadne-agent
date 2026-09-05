@@ -12,6 +12,7 @@ name = "rynna"
 path = "src/main.rs"
 
 [dependencies]
+uuid.workspace = true
 rynna-mcp = { path = "../../crates/rynna-mcp" }
 rynna-memory-hindsight = { path = "../../crates/rynna-memory-hindsight" }
 anyhow.workspace = true

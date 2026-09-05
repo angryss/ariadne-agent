@@ -23,6 +23,7 @@ repository = "https://github.com/angryss/rynna-agent"
 
 [workspace.dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 async-trait = "0.1"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"

@@ -53,6 +53,7 @@ describe('App', () => {
 
     expect(client.respond).toHaveBeenCalledWith(
       {
+        session_id: expect.any(String),
         prompt: 'Help me plan this',
         history: [],
       },
@@ -60,6 +61,12 @@ describe('App', () => {
     );
     expect(await screen.findByText('Follow the thread.')).toBeInTheDocument();
     expect(screen.getByText('Help me plan this')).toBeInTheDocument();
+    const firstRequest = vi.mocked(client.respond).mock.calls[0]![0];
+    expect(firstRequest.session_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    await user.type(screen.getByLabelText('Message Rynna'), 'Continue');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    expect(vi.mocked(client.respond).mock.calls[1]![0].session_id).toBe(firstRequest.session_id);
+
   });
 
   it('submits the prompt when Enter is pressed in the composer', async () => {
@@ -73,6 +80,7 @@ describe('App', () => {
 
     expect(respond).toHaveBeenCalledWith(
       {
+        session_id: expect.any(String),
         prompt: 'Send with Enter',
         history: [],
       },
@@ -182,6 +190,7 @@ describe('App', () => {
     expect(respond).toHaveBeenNthCalledWith(
       2,
       {
+        session_id: expect.any(String),
         prompt: 'Retry this',
         history: [],
       },
@@ -251,12 +260,14 @@ describe('App', () => {
     expect(respond).toHaveBeenNthCalledWith(
       2,
       {
+        session_id: expect.any(String),
         profile: 'work',
         prompt: 'Use work',
         history: [],
       },
       expect.any(Function),
     );
+    expect(respond.mock.calls[1]![0].session_id).not.toBe(respond.mock.calls[0]![0].session_id);
     expect(screen.getByText('gpt-5')).toBeInTheDocument();
     expect(screen.getByText('github skill')).toBeInTheDocument();
     expect(screen.getByText('github MCP')).toBeInTheDocument();

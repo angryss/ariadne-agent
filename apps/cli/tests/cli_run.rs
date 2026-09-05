@@ -514,3 +514,64 @@ max_output_bytes = 8192
         .success()
         .stdout(predicate::eq("TestOS 26.6 is installed.\n"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_shot_run_drains_queued_memory_before_exiting() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"choices":[{"message":{"role":"assistant","content":"Saved answer"}}]}),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"version":"0.5.0"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/default/banks/test/memories/recall"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results":[]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/default/banks/test/memories"))
+        .and(body_partial_json(json!({"async":true})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(100))
+                .set_body_json(json!({"success":true})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("memory.toml"), format!("version = 1\n[profiles.default]\nkind = 'hindsight'\ndeployment = 'self_hosted'\napi_base = '{}'\nbank_id = 'test'\n", server.uri())).unwrap();
+    Command::cargo_bin("rynna")
+        .unwrap()
+        .args(["run", "--prompt", "Remember this"])
+        .env("RYNNA_PROVIDER_CONFIG", dir.path().join("providers.toml"))
+        .env("RYNNA_API_BASE", format!("{}/v1", server.uri()))
+        .env("RYNNA_MODEL", "test-model")
+        .assert()
+        .success()
+        .stdout(predicate::eq("Saved answer\n"));
+    let writes = server.received_requests().await.unwrap();
+    let body: serde_json::Value = writes
+        .iter()
+        .find(|r| r.url.path().ends_with("/memories"))
+        .unwrap()
+        .body_json()
+        .unwrap();
+    assert!(
+        body["items"][0]["document_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("rynna-")
+    );
+    let content: serde_json::Value =
+        serde_json::from_str(body["items"][0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(content[0]["content"], "Remember this");
+    assert_eq!(content[1]["content"], "Saved answer");
+}

@@ -39,6 +39,7 @@ async fn desktop_command_delegates_to_the_shared_agent_core() {
     let response = respond_with_agent(
         &agent,
         RespondRequest {
+            session_id: None,
             profile: None,
             prompt: "Continue".to_owned(),
             history: vec![Message::user("Start")],
@@ -93,6 +94,7 @@ async fn desktop_profile_commands_list_and_dispatch_profiles() {
     let response = respond_with_profiles(
         &profiles,
         RespondRequest {
+            session_id: None,
             profile: Some("work".to_owned()),
             prompt: "Continue".to_owned(),
             history: Vec::new(),
@@ -337,6 +339,7 @@ async fn desktop_non_streaming_response_releases_profiles_lock_while_provider_is
         respond_with_locked_profiles(
             &request_profiles,
             RespondRequest {
+                session_id: None,
                 profile: None,
                 prompt: "wait".to_owned(),
                 history: Vec::new(),
@@ -399,6 +402,7 @@ async fn desktop_stream_command_forwards_typed_deltas() {
     let response = respond_stream_with_profiles(
         &profiles,
         RespondRequest {
+            session_id: None,
             profile: None,
             prompt: "Continue".to_owned(),
             history: Vec::new(),
@@ -763,6 +767,7 @@ max_output_bytes = 8192
     let response = respond_with_agent(
         &agent,
         RespondRequest {
+            session_id: None,
             profile: None,
             prompt: "Inspect the host".to_owned(),
             history: Vec::new(),
@@ -879,4 +884,47 @@ fn desktop_failed_mcp_rename_keeps_all_settings_and_allows_retry() {
         assert_eq!(mcp.load("renamed").unwrap().servers.len(), 1);
         assert!(mcp.load("work").unwrap().servers.is_empty());
     }
+}
+
+#[tokio::test]
+async fn desktop_response_modes_forward_memory_session_ids() {
+    #[derive(Default)]
+    struct Memory(Mutex<Vec<uuid::Uuid>>);
+    #[async_trait]
+    impl rynna_core::MemoryProvider for Memory {
+        async fn recall(&self, _: &str) -> Result<Vec<String>, rynna_core::MemoryError> {
+            Ok(vec![])
+        }
+        async fn retain(
+            &self,
+            conversation: &rynna_core::MemoryConversation,
+        ) -> Result<(), rynna_core::MemoryError> {
+            self.0.lock().unwrap().push(conversation.session_id);
+            Ok(())
+        }
+    }
+    let memory = Arc::new(Memory::default());
+    let (metadata, agent) = profile("test", "answer");
+    let agent = agent.with_memory_provider(Some(memory.clone()));
+    let profiles = AgentProfiles::new("test", [(metadata, agent.clone())]).unwrap();
+    let session_id = uuid::Uuid::new_v4();
+    let request = || RespondRequest {
+        session_id: Some(session_id),
+        profile: None,
+        prompt: "hello".into(),
+        history: vec![],
+    };
+    respond_with_agent(&agent, request()).await.unwrap();
+    respond_with_profiles(&profiles, request()).await.unwrap();
+    respond_stream_with_profiles(&profiles, request(), &mut |_| {})
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while memory.0.lock().unwrap().len() < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*memory.0.lock().unwrap(), [session_id; 3]);
 }

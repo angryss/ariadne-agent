@@ -6,6 +6,7 @@ export interface Message {
 }
 
 export interface RespondRequest {
+  session_id?: string;
   profile?: string;
   prompt: string;
   history: Message[];

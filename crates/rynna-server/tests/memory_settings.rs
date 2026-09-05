@@ -150,6 +150,15 @@ async fn memory(State(calls): State<Calls>, uri: Uri, Json(_): Json<Value>) -> J
     calls.lock().unwrap().push(uri.path().into());
     Json(json!({"results":[{"text":"Remembered fact"}],"success":true}))
 }
+async fn wait_calls(calls: &Calls, count: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while calls.lock().unwrap().len() < count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued writes should finish");
+}
 #[tokio::test]
 async fn saving_and_disabling_change_live_sync_and_stream_requests_and_survive_restart() {
     let calls = Calls::default();
@@ -184,6 +193,7 @@ async fn saving_and_disabling_change_live_sync_and_stream_requests_and_survive_r
         assert_eq!(requests[0].messages[1].role, rynna_core::Role::User);
         assert!(requests[0].messages[1].content.contains("Remembered fact"));
     }
+    wait_calls(&calls, 2).await;
     assert_eq!(calls.lock().unwrap().len(), 2);
     let restarted = app(&path, model.clone());
     let stream = Request::post("/v1/respond/stream")
@@ -193,6 +203,7 @@ async fn saving_and_disabling_change_live_sync_and_stream_requests_and_survive_r
     let response = restarted.oneshot(stream).await.unwrap();
     let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
     assert!(String::from_utf8_lossy(&body).contains("answer"));
+    wait_calls(&calls, 4).await;
     assert_eq!(calls.lock().unwrap().len(), 4);
     assert_eq!(
         request(
@@ -207,6 +218,7 @@ async fn saving_and_disabling_change_live_sync_and_stream_requests_and_survive_r
         StatusCode::OK
     );
     request(&router, "POST", "/v1/respond", prompt, true).await;
+    wait_calls(&calls, 4).await;
     assert_eq!(calls.lock().unwrap().len(), 4);
     assert_eq!(
         model.0.lock().unwrap().last().unwrap().messages[0].content,
@@ -305,15 +317,17 @@ async fn two_profiles_route_to_their_own_banks_and_disabling_one_keeps_the_other
             StatusCode::OK
         );
     }
-    assert_eq!(
-        *calls.lock().unwrap(),
-        [
-            "/v1/default/banks/test/memories/recall",
-            "/v1/default/banks/test/memories",
-            "/v1/default/banks/other/memories/recall",
-            "/v1/default/banks/other/memories"
-        ]
-    );
+    wait_calls(&calls, 4).await;
+    let mut actual = calls.lock().unwrap().clone();
+    actual.sort();
+    let mut expected = vec![
+        "/v1/default/banks/test/memories/recall",
+        "/v1/default/banks/test/memories",
+        "/v1/default/banks/other/memories/recall",
+        "/v1/default/banks/other/memories",
+    ];
+    expected.sort();
+    assert_eq!(actual, expected);
     assert_eq!(
         request(
             &restarted,
@@ -336,6 +350,7 @@ async fn two_profiles_route_to_their_own_banks_and_disabling_one_keeps_the_other
         )
         .await;
     }
+    wait_calls(&calls, 6).await;
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 6);
     assert!(calls[4..].iter().all(|path| path.contains("/banks/other/")));
@@ -426,4 +441,93 @@ model = "model"
         MemorySettings::None
     ));
     assert!(matches!(store.load("test").unwrap(), MemorySettings::None));
+}
+
+#[tokio::test]
+async fn sync_and_sse_forward_session_ids_to_hindsight_documents() {
+    let writes = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = writes.clone();
+    let memory_app = Router::new()
+        .route(
+            "/version",
+            axum::routing::get(|| async { Json(json!({"version":"0.5.0"})) }),
+        )
+        .route(
+            "/v1/default/banks/test/memories/recall",
+            post(|| async { Json(json!({"results":[]})) }),
+        )
+        .route(
+            "/v1/default/banks/test/memories",
+            post(move |Json(body): Json<Value>| {
+                let captured = captured.clone();
+                async move {
+                    captured.lock().unwrap().push(body);
+                    Json(json!({"success":true}))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, memory_app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let router = app(
+        &dir.path().join("providers.toml"),
+        Arc::new(Model::default()),
+    );
+    request(
+        &router,
+        "PUT",
+        "/v1/profiles/test/memory",
+        json!({"kind":"hindsight","deployment":"self_hosted","api_base":base,"bank_id":"test"}),
+        true,
+    )
+    .await;
+    let session = uuid::Uuid::new_v4();
+    let (_, first) = request(
+        &router,
+        "POST",
+        "/v1/respond",
+        json!({"session_id":session,"prompt":"first"}),
+        true,
+    )
+    .await;
+    let stream = Request::post("/v1/respond/stream").header("content-type", "application/json")
+        .body(Body::from(json!({"session_id":session,"prompt":"second","history":[{"role":"user","content":"first"},first["message"]]}).to_string())).unwrap();
+    let response = router.clone().oneshot(stream).await.unwrap();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("done"));
+    let other = uuid::Uuid::new_v4();
+    request(
+        &router,
+        "POST",
+        "/v1/respond",
+        json!({"session_id":other,"prompt":"other chat"}),
+        true,
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while writes.lock().unwrap().len() < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let writes = writes.lock().unwrap();
+    assert_eq!(
+        writes[0]["items"][0]["document_id"],
+        format!("rynna-{session}")
+    );
+    assert_eq!(
+        writes[1]["items"][0]["document_id"],
+        writes[0]["items"][0]["document_id"]
+    );
+    assert_eq!(
+        writes[2]["items"][0]["document_id"],
+        format!("rynna-{other}")
+    );
+    assert_eq!(writes[1]["items"][0]["metadata"]["turn_index"], "2");
+    let messages: Value =
+        serde_json::from_str(writes[1]["items"][0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(messages[0]["content"], "second");
+    server.abort();
 }
