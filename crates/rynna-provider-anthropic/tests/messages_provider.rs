@@ -846,3 +846,175 @@ async fn error_responses_cannot_echo_the_api_key() {
     assert!(!error.to_string().contains(secret));
     assert!(error.to_string().contains("[REDACTED]"));
 }
+
+#[tokio::test]
+async fn selected_thinking_enables_adaptive_thinking_and_effort() {
+    let server = MockServer::start().await;
+    Mock::given(path("/v1/messages"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"thinking":{"type":"adaptive"},"output_config":{"effort":"medium"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        AnthropicMessagesProvider::with_base_url(server.uri(), "claude-sonnet-4-6", "test")
+            .unwrap()
+            .with_thinking(rynna_core::ThinkingLevel::Medium)
+            .unwrap();
+    provider
+        .complete(CompletionRequest {
+            messages: vec![Message::user("hello")],
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+}
+
+async fn thinking_tool_round_trip(stream: bool) {
+    let server = MockServer::start().await;
+    let blocks = json!([
+        {"type":"thinking","thinking":"Inspect","signature":"signed-proof"},
+        {"type":"redacted_thinking","data":"opaque"},
+        {"type":"text","text":"Checking"},
+        {"type":"tool_use","id":"call-1","name":"read","input":{"path":"src"}}
+    ]);
+    let body = if stream {
+        let events = [
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Inspect"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed-"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"proof"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"opaque"}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Checking"}}),
+            json!({"type":"content_block_stop","index":2}),
+            json!({"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"call-1","name":"read","input":{}}}),
+            json!({"type":"content_block_delta","index":3,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"src\"}"}}),
+            json!({"type":"content_block_stop","index":3}),
+            json!({"type":"message_stop"}),
+        ];
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(
+                events
+                    .iter()
+                    .map(|event| format!("data: {event}\n\n"))
+                    .collect::<String>(),
+            )
+    } else {
+        ResponseTemplate::new(200).set_body_json(json!({"content":blocks}))
+    };
+    Mock::given(path("/v1/messages"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}),
+        ))
+        .respond_with(body)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider =
+        AnthropicMessagesProvider::with_base_url(server.uri(), "claude-sonnet-4-6", "test")
+            .unwrap()
+            .with_thinking(rynna_core::ThinkingLevel::High)
+            .unwrap();
+    let request = CompletionRequest {
+        messages: vec![Message::user("hello")],
+        tools: vec![],
+    };
+    let completion = if stream {
+        let mut deltas = Vec::new();
+        let result = provider
+            .complete_stream(request, &mut |delta| deltas.push(delta.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            deltas,
+            vec![
+                CompletionDelta::Thinking("Inspect".into()),
+                CompletionDelta::Content("Checking".into())
+            ]
+        );
+        result
+    } else {
+        provider.complete(request).await.unwrap()
+    };
+    assert_eq!(completion.message.content, "Checking");
+    assert_eq!(
+        completion.message.tool_calls,
+        vec![ToolCall::new("call-1", "read", json!({"path":"src"}))]
+    );
+    assert_eq!(
+        completion.message.provider_context,
+        Some(ProviderContext::Anthropic(
+            blocks.as_array().unwrap().clone()
+        ))
+    );
+    Mock::given(path("/v1/messages"))
+        .and(wiremock::matchers::body_partial_json(json!({"messages":[
+            {"role":"user","content":[{"type":"text","text":"hello"}]},
+            {"role":"assistant","content":blocks},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"source"}]}
+        ]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"content":[{"type":"text","text":"done"}]})))
+        .expect(1).mount(&server).await;
+    let final_answer = provider
+        .complete(CompletionRequest {
+            messages: vec![
+                Message::user("hello"),
+                completion.message,
+                Message::tool("call-1", "source"),
+            ],
+            tools: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(final_answer.message.content, "done");
+    let requests = server.received_requests().await.unwrap();
+    let replay: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(replay["messages"][1]["content"], blocks);
+}
+
+#[tokio::test]
+async fn nonstreaming_thinking_and_signatures_survive_tool_replay() {
+    thinking_tool_round_trip(false).await;
+}
+
+#[tokio::test]
+async fn streaming_thinking_and_signatures_survive_tool_replay() {
+    thinking_tool_round_trip(true).await;
+}
+
+#[tokio::test]
+async fn thinking_delta_requires_an_active_thinking_block() {
+    for events in [
+        vec![
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"bad"}}),
+        ],
+        vec![
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"bad"}}),
+        ],
+        vec![
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"bad"}}),
+        ],
+    ] {
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        assert!(
+            malformed_stream_error(&body)
+                .await
+                .contains("Anthropic thinking")
+        );
+    }
+}

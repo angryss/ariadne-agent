@@ -27,7 +27,7 @@ async fn chat_removes_terminal_control_characters() {
         .env("RYNNA_MODEL", "test-model");
 
     command.assert().success().stdout(predicate::eq(
-        "Rynna interactive mode. Type /quit to exit.\nyou> rynna> safe[2J]0;owned31m\nyou> ",
+        "Rynna interactive mode. /model selects a model; /thinking sets effort; /quit exits.\nyou> rynna> safe[2J]0;owned31m\nyou> ",
     ));
 }
 
@@ -98,6 +98,45 @@ async fn exit_alias_quits_without_contacting_the_provider() {
         .env("RYNNA_MODEL", "test-model");
 
     command.assert().success().stdout(predicate::eq(
-        "Rynna interactive mode. Type /quit to exit.\nyou> ",
+        "Rynna interactive mode. /model selects a model; /thinking sets effort; /quit exits.\nyou> ",
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_switches_provider_model_and_effort_while_preserving_history() {
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(&config, format!(r#"
+version = 1
+default_profile = "local"
+[providers.first]
+kind = "openai-compatible"
+api_base = "{}/v1"
+[providers.second]
+kind = "openai-compatible"
+api_base = "{}/v1"
+[profiles.local]
+providers = [{{provider = "second", model = "second-model"}}, {{provider = "first", model = "first-model", default = true}}]
+"#, server.uri(), server.uri())).unwrap();
+    Mock::given(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"model":"overridden-model"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"choices":[{"message":{"role":"assistant","content":"first answer"}}]}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"model":"second-model","reasoning_effort":"high","messages":[{"role":"system","content":"You are Rynna, a careful and capable AI software agent."},{"role":"user","content":"Hello"},{"role":"assistant","content":"first answer"},{"role":"user","content":"Continue"}]})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices":[{"message":{"role":"assistant","content":"second answer"}}]})))
+        .expect(1).mount(&server).await;
+    Command::cargo_bin("rynna")
+        .unwrap()
+        .args(["--config", config.to_str().unwrap(), "chat"])
+        .env("RYNNA_MODEL", "overridden-model")
+        .write_stdin("Hello\n/model 1\n/thinking high\n/model missing unavailable\n/thinking invalid\nContinue\n/quit\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("second answer"));
 }

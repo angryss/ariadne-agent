@@ -18,6 +18,7 @@ use rynna_tools_filesystem::{FileSystemConfig, FileSystemToolset};
 use tracing_subscriber::EnvFilter;
 
 mod chat_ui;
+mod model_selection;
 mod provider_ui;
 
 #[derive(Parser)]
@@ -186,7 +187,10 @@ fn list_profiles(
             let mut profile = profile.profile;
             if profile.name == default_profile
                 && let Some(model) = model_override
-                && let Some(provider) = profile.providers.first_mut()
+                && let Some(provider) = profile
+                    .providers
+                    .iter_mut()
+                    .find(|p| p.enabled && p.is_default)
             {
                 provider.model = model.to_owned();
             }
@@ -252,12 +256,7 @@ fn configured_profiles(
                 provider.api_base.clone_from(api_base);
             }
             if let Some(model) = &overrides.model {
-                if let Some(provider) = profile.providers.first_mut() {
-                    provider.model.clone_from(model);
-                }
-                if let Some(provider) = profile.profile.providers.first_mut() {
-                    provider.model.clone_from(model);
-                }
+                profile.override_default_model(model);
             }
             if let Some(system_prompt) = &overrides.system_prompt {
                 profile.system_prompt.clone_from(system_prompt);
@@ -290,6 +289,17 @@ fn configured_agent(profile: &ResolvedProfile, api_key_override: Option<String>)
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    let model_options = profile
+        .providers
+        .iter()
+        .map(|p| rynna_core::ProfileProvider {
+            provider: p.name.clone(),
+            model: p.model.clone(),
+            enabled: true,
+            is_default: false,
+        })
+        .zip(providers.iter().cloned())
+        .collect();
     let provider: Arc<dyn ModelProvider> = if providers.len() == 1 {
         providers.remove(0)
     } else {
@@ -298,9 +308,10 @@ fn configured_agent(profile: &ResolvedProfile, api_key_override: Option<String>)
 
     let tools = configured_tools(profile)?;
     if tools.is_empty() {
-        Ok(Agent::new(provider, profile.system_prompt.clone()))
+        Ok(Agent::new(provider, profile.system_prompt.clone()).with_model_options(model_options))
     } else {
         Agent::with_tools(provider, profile.system_prompt.clone(), tools)
+            .map(|agent| agent.with_model_options(model_options))
             .context("invalid profile tool configuration")
     }
 }
@@ -438,7 +449,8 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
     let mut history = Vec::new();
     let mut line = String::new();
 
-    println!("Rynna interactive mode. Type /quit to exit.");
+    let mut selection = None;
+    println!("Rynna interactive mode. /model selects a model; /thinking sets effort; /quit exits.");
     loop {
         print!("you> ");
         io::stdout().flush().context("failed to flush stdout")?;
@@ -455,7 +467,17 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
             continue;
         }
 
+        if model_selection::is_command(prompt) {
+            let result = model_selection::apply(&profiles, profile, &mut selection, prompt);
+            println!(
+                "{}",
+                sanitize_terminal_text(&result.unwrap_or_else(|error| error))
+            );
+            continue;
+        }
         let message = profiles
+            .clone()
+            .with_model_selection(Some(profile), selection.as_ref())?
             .respond(Some(profile), &history, prompt)
             .await
             .map_err(sanitize_agent_error)?;

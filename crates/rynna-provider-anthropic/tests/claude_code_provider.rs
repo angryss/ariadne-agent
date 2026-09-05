@@ -84,7 +84,9 @@ mod unix {
         let provider = ClaudeCodeProvider::new(&program, "sonnet")
             .with_test_environment("RYNNA_TEST_ARGS", &args)
             .with_test_environment("RYNNA_TEST_STDIN", &stdin)
-            .with_test_environment("RYNNA_TEST_SCENARIO", "headless");
+            .with_test_environment("RYNNA_TEST_SCENARIO", "headless")
+            .with_thinking(rynna_core::ThinkingLevel::High)
+            .unwrap();
         let mut deltas = vec![];
         let result = provider
             .complete_stream(
@@ -97,6 +99,7 @@ mod unix {
             .await
             .unwrap();
         let args = fs::read_to_string(args).unwrap();
+        assert!(args.contains("--effort\nhigh"));
         assert!(args.contains("--print"));
         assert!(args.contains("--output-format\nstream-json"));
         assert!(

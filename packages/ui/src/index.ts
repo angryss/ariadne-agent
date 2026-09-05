@@ -14,6 +14,7 @@ export type {
   ConfiguredProvider,
   Message,
   MessageRole,
+  ModelSelection,
   OpenAiAccount,
   Profile,
   ProfileCatalog,

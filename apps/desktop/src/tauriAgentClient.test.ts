@@ -30,7 +30,7 @@ describe('TauriAgentClient', () => {
       message: { role: 'assistant', content: 'From Tauri.' },
     });
     const client = new TauriAgentClient(invoke);
-    const request = { prompt: 'Hello', history: [] };
+    const request = { prompt: 'Hello', history: [], selection: { provider: 'openai', model: 'enabled-model', thinking: 'high' as const } };
 
     const response = await client.respond(request);
 
@@ -50,7 +50,7 @@ describe('TauriAgentClient', () => {
     });
     const client = new TauriAgentClient(invoke, () => channel);
     const deltas: unknown[] = [];
-    const request = { prompt: 'Hello', history: [] };
+    const request = { prompt: 'Hello', history: [], selection: { provider: 'openai', model: 'enabled-model', thinking: 'high' as const } };
 
     const response = await client.respond(request, (delta) => deltas.push(delta));
 

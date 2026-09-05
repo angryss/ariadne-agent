@@ -1,3 +1,4 @@
+import { ModelSelector } from './components/model-selector';
 import { McpSettingsPanel } from './components/mcp-settings';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
@@ -13,6 +14,7 @@ import type {
   CompletionDelta,
   ConfiguredProvider,
   Message,
+  ModelSelection,
   OpenAiAccount,
   Profile,
   ProfileProvider,
@@ -107,6 +109,7 @@ export function App({ client }: AppProps) {
   const [error, setError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [configuredProfiles, setConfiguredProfiles] = useState<Profile[]>([]);
+  const [chatSelection, setChatSelection] = useState<{ profile: string; value?: ModelSelection }>();
   const [selectedProfile, setSelectedProfile] = useState<string | null>(null);
   const [selectedSettingsProfile, setSelectedSettingsProfile] = useState<string | null>(null);
   const [openAiAccount, setOpenAiAccount] = useState<OpenAiAccount | null>(null);
@@ -253,6 +256,9 @@ export function App({ client }: AppProps) {
   }, [client, selectedSettingsProfile]);
 
   const activeProfile = profiles.find((profile) => profile.name === selectedProfile);
+  const selection = chatSelection?.profile === selectedProfile && activeProfile?.providers.some(pair =>
+    pair.enabled !== false && pair.provider === chatSelection.value?.provider && pair.model === chatSelection.value?.model)
+    ? chatSelection.value : undefined;
   const activeConfiguredProfile = configuredProfiles.find(
     (profile) => profile.name === selectedSettingsProfile,
   );
@@ -298,6 +304,7 @@ export function App({ client }: AppProps) {
   }, [activeConfiguredProfile, catalogProviderIds, modelProvider]);
 
   function selectProfile(name: string) {
+    setChatSelection(undefined);
     setSelectedProfile(name);
     setAddingProfile(false);
     setMessages([]);
@@ -626,6 +633,7 @@ export function App({ client }: AppProps) {
       sessionId.current ??= newSessionId();
       const response = await client.respond({
         session_id: sessionId.current,
+        ...(selection ? { selection } : {}),
         ...(selectedProfile ? { profile: selectedProfile } : {}),
         prompt,
         history,
@@ -1238,6 +1246,7 @@ export function App({ client }: AppProps) {
               <div className="settings-heading">
                 <div>
                   <h2>Models</h2>
+                  <p>Saved model changes take effect after restart. Chat uses the currently running models until then.</p>
                   <p>Choose which supported models are available in chat for each profile.</p>
                 </div>
               </div>
@@ -1339,7 +1348,7 @@ export function App({ client }: AppProps) {
                           />
                           <span>
                             <strong>{provider.model}</strong>
-                            <small>{enabled ? 'Enabled in chat' : 'Disabled'}</small>
+                            <small>{enabled ? 'Enabled in saved profile' : 'Disabled'}</small>
                           </span>
                         </label>
                         <label className="default-model-control">
@@ -1405,6 +1414,8 @@ export function App({ client }: AppProps) {
 
         {error ? <p className="request-error" role="alert">{error}</p> : null}
         <form className="composer" onSubmit={submit}>
+          {activeProfile ? <ModelSelector profile={activeProfile} selection={selection} disabled={pending}
+            onChange={value => setChatSelection({ profile: activeProfile.name, value })} /> : null}
           <label htmlFor="prompt">Message Rynna</label>
           <div className="composer-row">
             <Textarea

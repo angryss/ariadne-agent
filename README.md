@@ -64,6 +64,8 @@ cargo run -p rynna-cli -- chat
 
 In the interactive terminal, type `/` to open command typeahead. Use the arrow keys to select a command, Tab to complete it, and Enter to run it. Available commands are `/clear`, `/help`, and `/quit`; `/exit` is an alias for `/quit`. Thinking-model reasoning streams into a dim section while it is active, collapses when the user-facing answer begins, and can be expanded or collapsed with Ctrl-T.
 
+Choose an enabled provider and model during chat with `/model`; set effort with `/thinking default|low|medium|high`. Desktop and web chat provide the same choices above the composer. See [in-chat model selection](docs/model-selection.md) for commands, provider support, and request fields.
+
 Run one unattended request:
 
 ```bash

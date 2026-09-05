@@ -63,7 +63,7 @@ describe('HttpAgentClient', () => {
     );
     const client = new HttpAgentClient('/v1/respond', fetcher);
     const deltas: unknown[] = [];
-    const request = { prompt: 'Hello', history: [] };
+    const request = { prompt: 'Hello', history: [], selection: { provider: 'openai', model: 'enabled-model', thinking: 'high' as const } };
 
     const response = await client.respond(request, (delta) => deltas.push(delta));
 

@@ -39,6 +39,7 @@ async fn desktop_command_delegates_to_the_shared_agent_core() {
     let response = respond_with_agent(
         &agent,
         RespondRequest {
+            selection: None,
             session_id: None,
             profile: None,
             prompt: "Continue".to_owned(),
@@ -94,6 +95,7 @@ async fn desktop_profile_commands_list_and_dispatch_profiles() {
     let response = respond_with_profiles(
         &profiles,
         RespondRequest {
+            selection: None,
             session_id: None,
             profile: Some("work".to_owned()),
             prompt: "Continue".to_owned(),
@@ -339,6 +341,7 @@ async fn desktop_non_streaming_response_releases_profiles_lock_while_provider_is
         respond_with_locked_profiles(
             &request_profiles,
             RespondRequest {
+                selection: None,
                 session_id: None,
                 profile: None,
                 prompt: "wait".to_owned(),
@@ -402,6 +405,7 @@ async fn desktop_stream_command_forwards_typed_deltas() {
     let response = respond_stream_with_profiles(
         &profiles,
         RespondRequest {
+            selection: None,
             session_id: None,
             profile: None,
             prompt: "Continue".to_owned(),
@@ -450,11 +454,13 @@ async fn codex_app_server_provider_returns_the_subscription_answer() {
     // A checked-in executable avoids write/exec races in parallel Linux tests.
     let program =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_codex_provider.sh");
-    let provider = Arc::new(CodexAppServerProvider::with_home(
+    let provider = CodexAppServerProvider::with_home(
         &program,
         directory.path().canonicalize().unwrap().join("rynna-codex"),
         None,
-    ));
+    )
+    .with_thinking(rynna_core::ThinkingLevel::High)
+    .unwrap();
     let agent = Agent::new(provider, "Desktop policy");
 
     let response = agent.respond(&[], "Use my subscription").await.unwrap();
@@ -514,29 +520,11 @@ async fn codex_app_server_provider_rejects_a_symlink_home_before_launch() {
 #[cfg(unix)]
 #[tokio::test]
 async fn desktop_openai_account_uses_an_isolated_codex_home() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
-    let program = directory.path().join("fake-codex-home");
+    let program =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_codex_home.sh");
     let marker = directory.path().join("codex-home");
     let home = directory.path().join("rynna-codex");
-    std::fs::write(
-        &program,
-        format!(
-            r#"#!/bin/sh
-printf '%s' "$CODEX_HOME" > '{}'
-[ "$1" = "app-server" ] || exit 2
-IFS= read -r initialize
-printf '%s\n' '{{"id":1,"result":{{"userAgent":"fake"}}}}'
-IFS= read -r initialized
-IFS= read -r account
-printf '%s\n' '{{"id":2,"result":{{"account":{{"type":"apiKey"}},"requiresOpenaiAuth":true}}}}'
-"#,
-            marker.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
 
     let account = openai_account_with_program_and_home(&program, &home)
         .await
@@ -767,6 +755,7 @@ max_output_bytes = 8192
     let response = respond_with_agent(
         &agent,
         RespondRequest {
+            selection: None,
             session_id: None,
             profile: None,
             prompt: "Inspect the host".to_owned(),
@@ -909,6 +898,7 @@ async fn desktop_response_modes_forward_memory_session_ids() {
     let profiles = AgentProfiles::new("test", [(metadata, agent.clone())]).unwrap();
     let session_id = uuid::Uuid::new_v4();
     let request = || RespondRequest {
+        selection: None,
         session_id: Some(session_id),
         profile: None,
         prompt: "hello".into(),
@@ -965,6 +955,7 @@ model = "test"
         respond_with_agent(
             &agent,
             RespondRequest {
+                selection: None,
                 session_id: None,
                 profile: None,
                 prompt: "Review".into(),
@@ -985,4 +976,47 @@ model = "test"
             );
         }
     }
+}
+
+#[tokio::test]
+async fn desktop_response_modes_apply_and_validate_model_selection() {
+    let (mut metadata, agent) = profile("local", "default");
+    let option = ProfileProvider {
+        provider: "selected".into(),
+        model: "selected-model".into(),
+        enabled: true,
+        is_default: false,
+    };
+    metadata.providers.push(option.clone());
+    let agent = agent.with_model_options(vec![(option, Arc::new(RecordingProvider::default()))]);
+    let profiles = AgentProfiles::new("local", vec![(metadata, agent)]).unwrap();
+    let request = || {
+        serde_json::from_value::<RespondRequest>(serde_json::json!({
+            "prompt":"hello", "selection":{"provider":"selected","model":"selected-model"}
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        respond_with_profiles(&profiles, request())
+            .await
+            .unwrap()
+            .message
+            .content,
+        "Desktop reply"
+    );
+    assert_eq!(
+        respond_stream_with_profiles(&profiles, request(), &mut |_| {})
+            .await
+            .unwrap()
+            .message
+            .content,
+        "Desktop reply"
+    );
+    let mut invalid = request();
+    invalid.selection.as_mut().unwrap().model = "missing".into();
+    assert!(respond_with_profiles(&profiles, invalid).await.is_err());
+    assert_eq!(
+        profiles.respond(None, &[], "hello").await.unwrap().content,
+        "default"
+    );
 }

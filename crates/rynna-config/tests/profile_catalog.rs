@@ -1437,3 +1437,29 @@ active_skills = ["personal-skill"]
         ["personal-skill"]
     );
 }
+
+#[test]
+fn model_override_updates_the_resolved_default_and_matching_metadata() {
+    let catalog = ProfileCatalog::from_toml(
+        r#"
+version = 1
+default_profile = "local"
+[providers.local]
+kind = "openai-compatible"
+api_base = "http://localhost:11434/v1"
+[profiles.local]
+providers = [
+  { provider = "local", model = "first" },
+  { provider = "local", model = "default-model", default = true }
+]
+"#,
+    )
+    .unwrap();
+    let mut resolved = catalog.resolve("local").unwrap();
+    resolved.override_default_model("override");
+    assert_eq!(resolved.providers[0].model, "override");
+    assert_eq!(resolved.providers[1].model, "first");
+    assert_eq!(resolved.profile.providers[0].model, "first");
+    assert_eq!(resolved.profile.providers[1].model, "override");
+    assert!(resolved.profile.providers[1].is_default);
+}

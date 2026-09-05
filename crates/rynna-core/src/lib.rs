@@ -34,6 +34,7 @@ pub enum ProviderContext {
     OpenAi(Vec<serde_json::Value>),
     OpenAiChatReasoningDetails(Vec<serde_json::Value>),
     AnthropicCompaction(Option<String>),
+    Anthropic(Vec<serde_json::Value>),
     ManagedToken(String),
 }
 
@@ -43,6 +44,9 @@ fn has_direct_compaction(message: &Message) -> bool {
             .iter()
             .any(|item| item["type"].as_str() == Some("compaction")),
         Some(ProviderContext::AnthropicCompaction(Some(_))) => true,
+        Some(ProviderContext::Anthropic(blocks)) => blocks
+            .iter()
+            .any(|block| block["type"] == "compaction" && block["content"].is_string()),
         _ => false,
     }
 }
@@ -54,6 +58,7 @@ fn has_direct_provider_context(message: &Message) -> bool {
             ProviderContext::OpenAi(_)
                 | ProviderContext::OpenAiChatReasoningDetails(_)
                 | ProviderContext::AnthropicCompaction(_)
+                | ProviderContext::Anthropic(_)
         )
     )
 }
@@ -289,6 +294,11 @@ impl ThresholdContextManager {
                             if server_compaction == ServerCompaction::Anthropic =>
                         {
                             true
+                        }
+                        Some(ProviderContext::Anthropic(_))
+                            if server_compaction == ServerCompaction::Anthropic =>
+                        {
+                            has_direct_compaction(message)
                         }
                         _ => false,
                     })
@@ -526,8 +536,49 @@ impl ProviderError {
     }
 }
 
+/// Provider defaults are preserved unless the caller explicitly chooses an effort.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingLevel {
+    #[default]
+    Default,
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkingLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSelection {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub thinking: ThinkingLevel,
+}
+
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
+    /// Clone this adapter with a conversation-local thinking preference.
+    fn with_thinking(
+        &self,
+        _level: ThinkingLevel,
+    ) -> Result<Arc<dyn ModelProvider>, ProviderError> {
+        Err(ProviderError::new(
+            "this provider does not support thinking-level selection",
+        ))
+    }
+
     fn supports_external_tools(&self) -> bool {
         true
     }
@@ -733,6 +784,7 @@ pub struct Agent {
     memory_session: Option<uuid::Uuid>,
     retention_queue: memory::RetentionQueue,
     provider: Arc<dyn ModelProvider>,
+    model_options: Arc<BTreeMap<(String, String), Arc<dyn ModelProvider>>>,
     system_prompt: Arc<str>,
     tools: Arc<BTreeMap<String, Arc<dyn Tool>>>,
     context_manager: Arc<dyn ContextManagement>,
@@ -750,6 +802,7 @@ impl Agent {
     pub fn new(provider: Arc<dyn ModelProvider>, system_prompt: impl Into<Arc<str>>) -> Self {
         Self {
             provider,
+            model_options: Arc::new(BTreeMap::new()),
             system_prompt: system_prompt.into(),
             tools: Arc::new(BTreeMap::new()),
             context_manager: Arc::new(ThresholdContextManager::default()),
@@ -778,6 +831,7 @@ impl Agent {
         }
         Ok(Self {
             provider,
+            model_options: Arc::new(BTreeMap::new()),
             system_prompt: system_prompt.into(),
             tools: Arc::new(indexed),
             context_manager: Arc::new(ThresholdContextManager::default()),
@@ -787,6 +841,19 @@ impl Agent {
             retention_queue: memory::RetentionQueue::default(),
             tool_source: None,
         })
+    }
+
+    pub fn with_model_options(
+        mut self,
+        options: Vec<(ProfileProvider, Arc<dyn ModelProvider>)>,
+    ) -> Self {
+        self.model_options = Arc::new(
+            options
+                .into_iter()
+                .map(|(p, adapter)| ((p.provider, p.model), adapter))
+                .collect(),
+        );
+        self
     }
 
     pub fn with_memory_provider(mut self, memory: Option<Arc<dyn MemoryProvider>>) -> Self {
@@ -1176,6 +1243,46 @@ impl AgentProfiles {
             agent.memory_session = session_id;
         }
         self
+    }
+
+    /// Select only an enabled pair in this profile, on a request-local snapshot.
+    pub fn with_model_selection(
+        mut self,
+        profile: Option<&str>,
+        selection: Option<&ModelSelection>,
+    ) -> Result<Self, ProviderError> {
+        let Some(selection) = selection else {
+            return Ok(self);
+        };
+        let name = profile.unwrap_or(&self.default_profile);
+        let (metadata, agent) = Arc::make_mut(&mut self.profiles)
+            .get_mut(name)
+            .ok_or_else(|| ProviderError::new("unknown profile"))?;
+        if !metadata
+            .providers
+            .iter()
+            .any(|p| p.enabled && p.provider == selection.provider && p.model == selection.model)
+        {
+            return Err(ProviderError::new(
+                "select an enabled provider and model from this profile",
+            ));
+        }
+        let provider = agent
+            .model_options
+            .get(&(selection.provider.clone(), selection.model.clone()))
+            .cloned()
+            .or_else(|| {
+                (metadata.providers.iter().filter(|p| p.enabled).count() == 1)
+                    .then(|| agent.provider.clone())
+            })
+            .ok_or_else(|| ProviderError::new("model selection is unavailable for this profile"))?;
+        agent.provider = match selection.thinking {
+            ThinkingLevel::Default => provider,
+            level => provider.with_thinking(level)?,
+        };
+        // Never reuse opaque provider continuations across model/effort selections.
+        agent.managed_contexts = Arc::new(Mutex::new(ManagedContextStore::default()));
+        Ok(self)
     }
 
     pub fn default_profile(&self) -> &str {

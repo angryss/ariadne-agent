@@ -20,7 +20,9 @@ const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.149.1";
 const MAX_CODEX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_CODEX_TURN_MESSAGES: usize = 4096;
 
+#[derive(Clone)]
 pub struct CodexAppServerProvider {
+    thinking: rynna_core::ThinkingLevel,
     program: PathBuf,
     codex_home: Option<PathBuf>,
     credential_selection: Option<OpenAiCredentialSelection>,
@@ -30,6 +32,7 @@ pub struct CodexAppServerProvider {
 impl CodexAppServerProvider {
     pub fn new(program: impl Into<PathBuf>, model: Option<String>) -> Self {
         Self {
+            thinking: rynna_core::ThinkingLevel::Default,
             program: program.into(),
             codex_home: None,
             credential_selection: None,
@@ -43,6 +46,7 @@ impl CodexAppServerProvider {
         model: Option<String>,
     ) -> Self {
         Self {
+            thinking: rynna_core::ThinkingLevel::Default,
             program: program.into(),
             codex_home: Some(codex_home.into()),
             credential_selection: None,
@@ -57,6 +61,7 @@ impl CodexAppServerProvider {
         model: Option<String>,
     ) -> Self {
         Self {
+            thinking: rynna_core::ThinkingLevel::Default,
             program: program.into(),
             codex_home: Some(codex_home.into()),
             credential_selection: Some(credential_selection),
@@ -214,12 +219,17 @@ impl CodexAppServerProvider {
                 .map_err(ProviderError::new)?;
             next_id += 1;
         }
+        let mut turn_params =
+            serde_json::json!({"threadId": thread_id, "input": [{"type": "text", "text": prompt}]});
+        if self.thinking != rynna_core::ThinkingLevel::Default {
+            turn_params["effort"] = serde_json::json!(self.thinking.as_str());
+        }
         write_codex_message(
             &mut stdin,
             &serde_json::json!({
                 "method": "turn/start",
                 "id": next_id,
-                "params": {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]}
+                "params": turn_params
             }),
             deadline,
         )
@@ -243,14 +253,12 @@ impl CodexAppServerProvider {
                 .map_err(ProviderError::new)?;
             count_turn_message(&mut message_count)?;
             match message.get("method").and_then(serde_json::Value::as_str) {
-                Some("item/started") => {
-                    if message_matches_turn(&message, thread_id, turn_id) {
-                        let item = message
-                            .pointer("/params/item")
-                            .ok_or_else(|| ProviderError::new("Codex omitted a started item"))?;
-                        if let Some(item_id) = started_agent_item_id(item)? {
-                            agent_item_ids.insert(item_id.to_owned());
-                        }
+                Some("item/started") if message_matches_turn(&message, thread_id, turn_id) => {
+                    let item = message
+                        .pointer("/params/item")
+                        .ok_or_else(|| ProviderError::new("Codex omitted a started item"))?;
+                    if let Some(item_id) = started_agent_item_id(item)? {
+                        agent_item_ids.insert(item_id.to_owned());
                     }
                 }
                 Some("item/agentMessage/delta") => {
@@ -351,6 +359,15 @@ async fn verify_codex_version(
 
 #[async_trait]
 impl ModelProvider for CodexAppServerProvider {
+    fn with_thinking(
+        &self,
+        level: rynna_core::ThinkingLevel,
+    ) -> Result<std::sync::Arc<dyn ModelProvider>, ProviderError> {
+        let mut provider = self.clone();
+        provider.thinking = level;
+        Ok(std::sync::Arc::new(provider))
+    }
+
     fn supports_external_tools(&self) -> bool {
         false
     }

@@ -652,6 +652,19 @@ pub struct ResolvedProfile {
     pub capabilities: Vec<ResolvedCapability>,
 }
 
+impl ResolvedProfile {
+    pub fn override_default_model(&mut self, model: &str) {
+        if let Some(provider) = self.providers.first_mut() {
+            if let Some(metadata) = self.profile.providers.iter_mut().find(|entry| {
+                entry.enabled && entry.provider == provider.name && entry.model == provider.model
+            }) {
+                metadata.model = model.to_owned();
+            }
+            provider.model = model.to_owned();
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedProvider {
     pub name: String,
