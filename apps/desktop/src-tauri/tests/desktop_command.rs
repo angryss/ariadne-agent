@@ -485,29 +485,25 @@ async fn codex_app_server_provider_rejects_unreviewed_codex_versions() {
 #[cfg(unix)]
 #[tokio::test]
 async fn codex_app_server_provider_rejects_a_symlink_home_before_launch() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::symlink;
 
     let directory = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let home = directory.path().join("codex-home");
-    let marker = directory.path().join("launched");
+    let home = directory.path().canonicalize().unwrap().join("codex-home");
+    let marker = outside.path().join("launched");
     symlink(outside.path(), &home).unwrap();
-    let program = directory.path().join("fake-codex");
-    std::fs::write(
-        &program,
-        format!(
-            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && {{ printf '%s\\n' 'codex-cli 0.149.1'; exit 0; }}\nprintf launched > '{}'\nexit 9\n",
-            marker.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A checked-in executable avoids write/exec races in parallel Linux tests.
+    let program = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake_codex_launch_marker.sh");
     let provider = Arc::new(CodexAppServerProvider::with_home(&program, home, None));
     let agent = Agent::new(provider, "Desktop policy");
 
     let error = agent.respond(&[], "Do not run tools").await.unwrap_err();
 
-    assert!(error.to_string().contains("must not be a symbolic link"));
+    assert!(
+        error.to_string().contains("must not be a symbolic link"),
+        "unexpected provider error: {error}"
+    );
     assert!(!marker.exists());
 }
 
