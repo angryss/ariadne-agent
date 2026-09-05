@@ -268,7 +268,7 @@ describe('App', () => {
       expect.any(Function),
     );
     expect(respond.mock.calls[1]![0].session_id).not.toBe(respond.mock.calls[0]![0].session_id);
-    expect(screen.getByText('gpt-5')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Choose model: gpt-5 · Default' })).toBeInTheDocument();
     expect(screen.getByText('github skill')).toBeInTheDocument();
     expect(screen.getByText('github MCP')).toBeInTheDocument();
   });
@@ -1042,10 +1042,11 @@ describe('App', () => {
     }));
 
     await user.click(screen.getByRole('button', { name: 'Back to chat' }));
-    await user.selectOptions(screen.getByRole('combobox', { name: 'Provider' }), 'ollama');
-    const chatModels = screen.getByRole('combobox', { name: 'Model' });
-    expect(within(chatModels).getByRole('option', { name: 'qwen3:8b' })).toBeInTheDocument();
-    expect(within(chatModels).queryByRole('option', { name: 'qwen3:14b' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Choose model:/ }));
+    const chatModels = screen.getByRole('dialog', { name: 'Choose provider and model' });
+    expect(within(chatModels).getByRole('button', { name: 'qwen3:8b' })).toBeInTheDocument();
+    expect(within(chatModels).queryByRole('button', { name: 'qwen3:14b' })).not.toBeInTheDocument();
+    await user.keyboard('{Escape}');
     const runtimeSummary = screen.getByRole('complementary', { name: 'Active profile' });
     expect(within(runtimeSummary).getByText('qwen3:8b')).toBeInTheDocument();
     expect(within(runtimeSummary).queryByText('qwen3:14b')).not.toBeInTheDocument();
@@ -1082,7 +1083,7 @@ describe('App', () => {
       />,
     );
 
-    expect(await screen.findByText('qwen3:8b')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Choose model: qwen3:8b · Default' })).toBeInTheDocument();
     expect(screen.queryByText('qwen3:14b')).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
@@ -1271,26 +1272,29 @@ it('selects chat provider, model and thinking without changing history or profil
     .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
   const updateProfile = vi.fn();
   render(<App client={{ respond, updateProfile, listProfiles: async () => ({ default_profile: 'local', provider_ids: ['local', 'cloud'], profiles: [profile], configured_profiles: [profile] }) }} />);
-  const provider = await screen.findByRole('combobox', { name: 'Provider' });
+  const picker = await screen.findByRole('button', { name: /^Choose model:/ });
   await user.type(screen.getByLabelText('Message Rynna'), 'First');
   await user.click(screen.getByRole('button', { name: 'Send' }));
   await screen.findByText('First answer');
-  await user.selectOptions(provider, 'cloud');
-  await user.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'deep');
-  expect(screen.queryByRole('option', { name: 'disabled' })).not.toBeInTheDocument();
-  await user.selectOptions(screen.getByRole('combobox', { name: 'Thinking level' }), 'high');
+  await user.click(picker);
+  expect(screen.queryByRole('button', { name: 'disabled' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'deep' }));
+  await user.click(picker);
+  await user.click(screen.getByRole('radio', { name: 'High' }));
+  await user.keyboard('{Escape}');
   await user.type(screen.getByLabelText('Message Rynna'), 'Continue');
   await user.click(screen.getByRole('button', { name: 'Send' }));
   expect(respond.mock.calls[1]![0]).toMatchObject({
     profile: 'local', selection: { provider: 'cloud', model: 'deep', thinking: 'high' },
     history: [{ role: 'user', content: 'First' }, { role: 'assistant', content: 'First answer' }],
   });
-  expect(provider).toBeDisabled();
-  expect(screen.getByRole('combobox', { name: 'Thinking level' })).toBeDisabled();
+  expect(picker).toBeDisabled();
   await act(async () => finish?.({ message: { role: 'assistant', content: 'Second answer' } }));
-  await user.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'fast');
-  expect(screen.getByRole('combobox', { name: 'Thinking level' })).toHaveValue('default');
-  await user.selectOptions(provider, '');
-  expect(screen.getByRole('combobox', { name: 'Model' })).toBeDisabled();
+  await user.click(picker);
+  await user.click(screen.getByRole('button', { name: 'fast' }));
+  expect(picker).toHaveTextContent('fast· Default');
+  await user.click(picker);
+  await user.click(screen.getByRole('button', { name: /Profile default/ }));
+  expect(picker).toHaveTextContent('small· Default');
   expect(updateProfile).not.toHaveBeenCalled();
 });
