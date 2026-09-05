@@ -1246,6 +1246,7 @@ export function App({ client }: AppProps) {
               <div className="settings-heading">
                 <div>
                   <h2>Models</h2>
+                  <p>Saved model changes take effect after restart. Chat uses the currently running models until then.</p>
                   <p>Choose which supported models are available in chat for each profile.</p>
                 </div>
               </div>
@@ -1347,7 +1348,7 @@ export function App({ client }: AppProps) {
                           />
                           <span>
                             <strong>{provider.model}</strong>
-                            <small>{enabled ? 'Enabled in chat' : 'Disabled'}</small>
+                            <small>{enabled ? 'Enabled in saved profile' : 'Disabled'}</small>
                           </span>
                         </label>
                         <label className="default-model-control">

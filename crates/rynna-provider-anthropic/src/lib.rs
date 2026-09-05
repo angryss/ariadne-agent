@@ -297,9 +297,16 @@ struct ApiMessage {
     role: &'static str,
     content: Vec<ContentBlock>,
 }
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentBlock {
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
     Text {
         text: String,
     },
@@ -332,12 +339,17 @@ fn build_messages_request(
 ) -> Result<MessagesRequest, ProviderError> {
     let mut system = Vec::new();
     let mut messages = Vec::new();
-    let latest_compaction = request.messages.iter().rposition(|message| {
-        matches!(
-            message.provider_context,
-            Some(ProviderContext::AnthropicCompaction(Some(_)))
-        )
-    });
+    let latest_compaction =
+        request
+            .messages
+            .iter()
+            .rposition(|message| match &message.provider_context {
+                Some(ProviderContext::AnthropicCompaction(Some(_))) => true,
+                Some(ProviderContext::Anthropic(blocks)) => blocks
+                    .iter()
+                    .any(|block| block["type"] == "compaction" && block["content"].is_string()),
+                _ => false,
+            });
     for (index, message) in request.messages.into_iter().enumerate() {
         if message.role == Role::System {
             system.push(message.content);
@@ -355,6 +367,21 @@ fn build_messages_request(
                 }],
             }),
             Role::Assistant => {
+                if let Some(ProviderContext::Anthropic(blocks)) = &message.provider_context {
+                    let content = blocks
+                        .iter()
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .collect::<Result<Vec<ContentBlock>, _>>()
+                        .map_err(|error| {
+                            ProviderError::new(format!("invalid Anthropic continuation: {error}"))
+                        })?;
+                    messages.push(ApiMessage {
+                        role: "assistant",
+                        content,
+                    });
+                    continue;
+                }
                 if message.content.is_empty()
                     && message.tool_calls.is_empty()
                     && message.provider_context.is_none()
@@ -432,9 +459,16 @@ struct MessagesResponse {
     #[serde(default)]
     content: Vec<ResponseBlock>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ResponseBlock {
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
     Text {
         text: String,
     },
@@ -452,9 +486,26 @@ enum ResponseBlock {
 fn completion_from_blocks(blocks: Vec<ResponseBlock>) -> Result<Completion, ProviderError> {
     let mut content = String::new();
     let mut tool_calls = Vec::new();
+    let replay = if blocks.iter().any(|block| {
+        matches!(
+            block,
+            ResponseBlock::Thinking { .. } | ResponseBlock::RedactedThinking { .. }
+        )
+    }) {
+        Some(ProviderContext::Anthropic(
+            blocks
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| ProviderError::new(error.to_string()))?,
+        ))
+    } else {
+        None
+    };
     let mut provider_context = None;
     for block in blocks {
         match block {
+            ResponseBlock::Thinking { .. } | ResponseBlock::RedactedThinking { .. } => {}
             ResponseBlock::Text { text } => content.push_str(&text),
             ResponseBlock::ToolUse { id, name, input } => {
                 tool_calls.push(ToolCall::new(id, name, input))
@@ -476,7 +527,7 @@ fn completion_from_blocks(blocks: Vec<ResponseBlock>) -> Result<Completion, Prov
         content,
         tool_calls,
         tool_call_id: None,
-        provider_context,
+        provider_context: replay.or(provider_context),
     }))
 }
 
@@ -484,6 +535,15 @@ fn anthropic_context(request: &CompletionRequest) -> Option<ProviderContext> {
     request.messages.iter().find_map(|message| {
         if let Some(ProviderContext::AnthropicCompaction(summary)) = &message.provider_context {
             Some(ProviderContext::AnthropicCompaction(summary.clone()))
+        } else if let Some(ProviderContext::Anthropic(blocks)) = &message.provider_context {
+            blocks
+                .iter()
+                .find(|block| block["type"] == "compaction")
+                .map(|block| {
+                    ProviderContext::AnthropicCompaction(
+                        block["content"].as_str().map(str::to_owned),
+                    )
+                })
         } else {
             None
         }
@@ -569,7 +629,6 @@ impl ModelProvider for AnthropicMessagesProvider {
         let mut pending = Vec::new();
         let mut total = 0;
         let mut stopped = false;
-        let mut content = String::new();
         let mut tools: BTreeMap<usize, PendingTool> = BTreeMap::new();
         let mut blocks: BTreeMap<usize, BlockState> = BTreeMap::new();
         while let Some(chunk) = response
@@ -589,14 +648,7 @@ impl ModelProvider for AnthropicMessagesProvider {
                     line.pop();
                 }
                 if let Some(data) = line.strip_prefix(b"data: ")
-                    && process_event(
-                        data,
-                        &self.api_key,
-                        &mut content,
-                        &mut tools,
-                        &mut blocks,
-                        on_delta,
-                    )?
+                    && process_event(data, &self.api_key, &mut tools, &mut blocks, on_delta)?
                 {
                     stopped = true;
                     break;
@@ -611,43 +663,43 @@ impl ModelProvider for AnthropicMessagesProvider {
                 "Anthropic stream ended before message_stop",
             ));
         }
-        let tool_calls = tools
-            .into_values()
-            .map(|t| {
-                let input = if t.json.is_empty() {
-                    t.input
-                } else {
-                    serde_json::from_str(&t.json).map_err(|e| {
-                        ProviderError::new(format!("invalid streamed Anthropic tool input: {e}"))
-                    })?
-                };
-                Ok(ToolCall::new(t.id, t.name, input))
-            })
-            .collect::<Result<Vec<_>, ProviderError>>()?;
-        Ok(Completion::new(Message {
-            role: Role::Assistant,
-            content,
-            tool_calls,
-            tool_call_id: None,
-            provider_context: None,
-        }))
+        let mut replay = Vec::new();
+        for (index, block) in blocks {
+            if let Some(mut response) = block.response {
+                if let ResponseBlock::ToolUse { input, .. } = &mut response
+                    && let Some(tool) = tools.remove(&index)
+                {
+                    *input = if tool.json.is_empty() {
+                        tool.input
+                    } else {
+                        serde_json::from_str(&tool.json).map_err(|error| {
+                            ProviderError::new(format!(
+                                "invalid streamed Anthropic tool input: {error}"
+                            ))
+                        })?
+                    };
+                }
+                replay.push(response);
+            }
+        }
+        completion_from_blocks(replay)
     }
 }
 
 #[derive(Default)]
 struct PendingTool {
-    id: String,
-    name: String,
     input: Value,
     json: String,
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum BlockKind {
+    Thinking,
     Text,
     Tool,
     Unknown,
 }
 struct BlockState {
+    response: Option<ResponseBlock>,
     kind: BlockKind,
     stopped: bool,
 }
@@ -663,6 +715,13 @@ struct StreamEvent {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StreamBlock {
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
     Text {
         #[allow(dead_code)]
         text: String,
@@ -678,6 +737,12 @@ enum StreamBlock {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StreamDelta {
+    ThinkingDelta {
+        thinking: String,
+    },
+    SignatureDelta {
+        signature: String,
+    },
     TextDelta {
         text: String,
     },
@@ -690,7 +755,6 @@ enum StreamDelta {
 fn process_event(
     data: &[u8],
     api_key: &str,
-    content: &mut String,
     tools: &mut BTreeMap<usize, PendingTool>,
     blocks: &mut BTreeMap<usize, BlockState>,
     on_delta: &mut (dyn for<'a> FnMut(&'a CompletionDelta) + Send),
@@ -734,6 +798,8 @@ fn process_event(
     }
     if let Some(content_block) = event.content_block {
         let block_kind = match &content_block {
+            StreamBlock::Thinking { .. } => BlockKind::Thinking,
+            StreamBlock::RedactedThinking { .. } => BlockKind::Unknown,
             StreamBlock::Text { .. } => BlockKind::Text,
             StreamBlock::ToolUse { .. } => BlockKind::Tool,
             StreamBlock::Unknown => BlockKind::Unknown,
@@ -759,25 +825,49 @@ fn process_event(
                     "Anthropic stream repeated a block start"
                 }));
             }
-            if let StreamBlock::ToolUse { id, name, input } = content_block {
-                if id.trim().is_empty() || name.trim().is_empty() {
-                    return Err(ProviderError::new(
-                        "Anthropic tool block is missing its id or name",
-                    ));
+            let response = match content_block {
+                StreamBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    if !thinking.is_empty() {
+                        on_delta(&CompletionDelta::Thinking(thinking.clone()));
+                    }
+                    Some(ResponseBlock::Thinking {
+                        thinking,
+                        signature,
+                    })
                 }
-                tools.insert(
-                    index,
-                    PendingTool {
-                        id,
-                        name,
-                        input,
-                        json: String::new(),
-                    },
-                );
-            }
+                StreamBlock::RedactedThinking { data } => {
+                    Some(ResponseBlock::RedactedThinking { data })
+                }
+                StreamBlock::Text { text } => {
+                    if !text.is_empty() {
+                        on_delta(&CompletionDelta::Content(text.clone()));
+                    }
+                    Some(ResponseBlock::Text { text })
+                }
+                StreamBlock::ToolUse { id, name, input } => {
+                    if id.trim().is_empty() || name.trim().is_empty() {
+                        return Err(ProviderError::new(
+                            "Anthropic tool block is missing its id or name",
+                        ));
+                    }
+                    tools.insert(
+                        index,
+                        PendingTool {
+                            input: input.clone(),
+                            json: String::new(),
+                        },
+                    );
+                    Some(ResponseBlock::ToolUse { id, name, input })
+                }
+                StreamBlock::Unknown => None,
+            };
             blocks.insert(
                 index,
                 BlockState {
+                    response,
                     kind: block_kind,
                     stopped: false,
                 },
@@ -805,7 +895,34 @@ fn process_event(
         block.stopped = true;
     }
     if let Some(delta) = event.delta {
+        let signature_delta = matches!(delta, StreamDelta::SignatureDelta { .. });
         match delta {
+            StreamDelta::ThinkingDelta { thinking }
+            | StreamDelta::SignatureDelta {
+                signature: thinking,
+            } => {
+                if event.kind != "content_block_delta" {
+                    return Err(ProviderError::new(
+                        "Anthropic thinking delta used the wrong event kind",
+                    ));
+                }
+                let index = event.index.ok_or_else(|| {
+                    ProviderError::new("Anthropic thinking delta is missing its index")
+                })?;
+                require_active_block(blocks, index, BlockKind::Thinking, "thinking")?;
+                if let Some(ResponseBlock::Thinking {
+                    thinking: text,
+                    signature,
+                }) = &mut blocks.get_mut(&index).expect("validated block").response
+                {
+                    if signature_delta {
+                        signature.push_str(&thinking);
+                    } else {
+                        text.push_str(&thinking);
+                        on_delta(&CompletionDelta::Thinking(thinking));
+                    }
+                }
+            }
             StreamDelta::TextDelta { text } => {
                 if event.kind != "content_block_delta" {
                     return Err(ProviderError::new(
@@ -816,7 +933,11 @@ fn process_event(
                     ProviderError::new("Anthropic text delta is missing its index")
                 })?;
                 require_active_block(blocks, index, BlockKind::Text, "text")?;
-                content.push_str(&text);
+                if let Some(ResponseBlock::Text { text: content }) =
+                    &mut blocks.get_mut(&index).expect("validated block").response
+                {
+                    content.push_str(&text);
+                }
                 on_delta(&CompletionDelta::Content(text));
             }
             StreamDelta::InputJsonDelta { partial_json } => {

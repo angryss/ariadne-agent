@@ -253,14 +253,12 @@ impl CodexAppServerProvider {
                 .map_err(ProviderError::new)?;
             count_turn_message(&mut message_count)?;
             match message.get("method").and_then(serde_json::Value::as_str) {
-                Some("item/started") => {
-                    if message_matches_turn(&message, thread_id, turn_id) {
-                        let item = message
-                            .pointer("/params/item")
-                            .ok_or_else(|| ProviderError::new("Codex omitted a started item"))?;
-                        if let Some(item_id) = started_agent_item_id(item)? {
-                            agent_item_ids.insert(item_id.to_owned());
-                        }
+                Some("item/started") if message_matches_turn(&message, thread_id, turn_id) => {
+                    let item = message
+                        .pointer("/params/item")
+                        .ok_or_else(|| ProviderError::new("Codex omitted a started item"))?;
+                    if let Some(item_id) = started_agent_item_id(item)? {
+                        agent_item_ids.insert(item_id.to_owned());
                     }
                 }
                 Some("item/agentMessage/delta") => {

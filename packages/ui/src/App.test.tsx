@@ -1019,6 +1019,7 @@ describe('App', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Settings' }));
     await user.click(screen.getByRole('button', { name: 'Models' }));
+    expect(screen.getByText('Saved model changes take effect after restart. Chat uses the currently running models until then.')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Select all' }));
     expect(screen.getByRole('button', { name: 'Disable selected' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Deselect all' }));
@@ -1041,6 +1042,10 @@ describe('App', () => {
     }));
 
     await user.click(screen.getByRole('button', { name: 'Back to chat' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Provider' }), 'ollama');
+    const chatModels = screen.getByRole('combobox', { name: 'Model' });
+    expect(within(chatModels).getByRole('option', { name: 'qwen3:8b' })).toBeInTheDocument();
+    expect(within(chatModels).queryByRole('option', { name: 'qwen3:14b' })).not.toBeInTheDocument();
     const runtimeSummary = screen.getByRole('complementary', { name: 'Active profile' });
     expect(within(runtimeSummary).getByText('qwen3:8b')).toBeInTheDocument();
     expect(within(runtimeSummary).queryByText('qwen3:14b')).not.toBeInTheDocument();

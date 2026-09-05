@@ -120,7 +120,7 @@ api_base = "{}/v1"
 providers = [{{provider = "second", model = "second-model"}}, {{provider = "first", model = "first-model", default = true}}]
 "#, server.uri(), server.uri())).unwrap();
     Mock::given(path("/v1/chat/completions"))
-        .and(body_partial_json(json!({"model":"first-model"})))
+        .and(body_partial_json(json!({"model":"overridden-model"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(
             json!({"choices":[{"message":{"role":"assistant","content":"first answer"}}]}),
         ))
@@ -134,6 +134,7 @@ providers = [{{provider = "second", model = "second-model"}}, {{provider = "firs
     Command::cargo_bin("rynna")
         .unwrap()
         .args(["--config", config.to_str().unwrap(), "chat"])
+        .env("RYNNA_MODEL", "overridden-model")
         .write_stdin("Hello\n/model 1\n/thinking high\n/model missing unavailable\n/thinking invalid\nContinue\n/quit\n")
         .assert()
         .success()

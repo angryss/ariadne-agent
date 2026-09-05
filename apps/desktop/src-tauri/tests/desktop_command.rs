@@ -520,29 +520,11 @@ async fn codex_app_server_provider_rejects_a_symlink_home_before_launch() {
 #[cfg(unix)]
 #[tokio::test]
 async fn desktop_openai_account_uses_an_isolated_codex_home() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
-    let program = directory.path().join("fake-codex-home");
+    let program =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_codex_home.sh");
     let marker = directory.path().join("codex-home");
     let home = directory.path().join("rynna-codex");
-    std::fs::write(
-        &program,
-        format!(
-            r#"#!/bin/sh
-printf '%s' "$CODEX_HOME" > '{}'
-[ "$1" = "app-server" ] || exit 2
-IFS= read -r initialize
-printf '%s\n' '{{"id":1,"result":{{"userAgent":"fake"}}}}'
-IFS= read -r initialized
-IFS= read -r account
-printf '%s\n' '{{"id":2,"result":{{"account":{{"type":"apiKey"}},"requiresOpenaiAuth":true}}}}'
-"#,
-            marker.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
 
     let account = openai_account_with_program_and_home(&program, &home)
         .await

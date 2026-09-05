@@ -610,27 +610,17 @@ async fn provider_settings_report_persistence_failures_as_server_errors() {
 #[cfg(unix)]
 #[tokio::test]
 async fn concurrent_openai_creates_authenticate_only_once() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = tempfile::tempdir().unwrap();
     let settings = ProviderSettingsStore::load(directory.path().join("providers.toml")).unwrap();
     let login_log = directory.path().join("login.log");
-    let codex = directory.path().join("codex");
-    std::fs::write(
-        &codex,
-        format!(
-            "#!/bin/sh\nread key\nprintf '%s\\n' \"$key\" >> '{}'\nsleep 0.2\n",
-            login_log.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let codex = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake_codex_concurrent_login.sh");
     let profiles = AgentProfiles::new("local", vec![profile("local", "Local.")]).unwrap();
     let app = router_with_profiles_and_provider_runtime(
         profiles,
         settings,
         codex,
-        directory.path().join("codex-home"),
+        directory.path().canonicalize().unwrap().join("codex-home"),
     );
     let request = |key: &'static str| {
         local_provider_request(

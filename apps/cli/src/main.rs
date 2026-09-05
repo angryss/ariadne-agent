@@ -187,7 +187,10 @@ fn list_profiles(
             let mut profile = profile.profile;
             if profile.name == default_profile
                 && let Some(model) = model_override
-                && let Some(provider) = profile.providers.first_mut()
+                && let Some(provider) = profile
+                    .providers
+                    .iter_mut()
+                    .find(|p| p.enabled && p.is_default)
             {
                 provider.model = model.to_owned();
             }
@@ -253,12 +256,7 @@ fn configured_profiles(
                 provider.api_base.clone_from(api_base);
             }
             if let Some(model) = &overrides.model {
-                if let Some(provider) = profile.providers.first_mut() {
-                    provider.model.clone_from(model);
-                }
-                if let Some(provider) = profile.profile.providers.first_mut() {
-                    provider.model.clone_from(model);
-                }
+                profile.override_default_model(model);
             }
             if let Some(system_prompt) = &overrides.system_prompt {
                 profile.system_prompt.clone_from(system_prompt);

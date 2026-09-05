@@ -34,6 +34,7 @@ pub enum ProviderContext {
     OpenAi(Vec<serde_json::Value>),
     OpenAiChatReasoningDetails(Vec<serde_json::Value>),
     AnthropicCompaction(Option<String>),
+    Anthropic(Vec<serde_json::Value>),
     ManagedToken(String),
 }
 
@@ -43,6 +44,9 @@ fn has_direct_compaction(message: &Message) -> bool {
             .iter()
             .any(|item| item["type"].as_str() == Some("compaction")),
         Some(ProviderContext::AnthropicCompaction(Some(_))) => true,
+        Some(ProviderContext::Anthropic(blocks)) => blocks
+            .iter()
+            .any(|block| block["type"] == "compaction" && block["content"].is_string()),
         _ => false,
     }
 }
@@ -54,6 +58,7 @@ fn has_direct_provider_context(message: &Message) -> bool {
             ProviderContext::OpenAi(_)
                 | ProviderContext::OpenAiChatReasoningDetails(_)
                 | ProviderContext::AnthropicCompaction(_)
+                | ProviderContext::Anthropic(_)
         )
     )
 }
@@ -289,6 +294,11 @@ impl ThresholdContextManager {
                             if server_compaction == ServerCompaction::Anthropic =>
                         {
                             true
+                        }
+                        Some(ProviderContext::Anthropic(_))
+                            if server_compaction == ServerCompaction::Anthropic =>
+                        {
+                            has_direct_compaction(message)
                         }
                         _ => false,
                     })

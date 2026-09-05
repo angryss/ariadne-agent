@@ -1127,12 +1127,7 @@ fn configured_profiles(
                 provider.api_base = api_base;
             }
             if let Some(model) = optional_env("RYNNA_MODEL")? {
-                if let Some(provider) = profile.providers.first_mut() {
-                    provider.model.clone_from(&model);
-                }
-                if let Some(provider) = profile.profile.providers.first_mut() {
-                    provider.model = model;
-                }
+                profile.override_default_model(&model);
             }
             if let Some(system_prompt) = optional_env("RYNNA_SYSTEM_PROMPT")? {
                 profile.system_prompt = system_prompt;
