@@ -427,6 +427,8 @@ pub(crate) fn secure_codex_home(home: PathBuf) -> Result<PathBuf, String> {
 #[derive(Deserialize)]
 pub struct RespondRequest {
     #[serde(default)]
+    pub session_id: Option<uuid::Uuid>,
+    #[serde(default)]
     pub profile: Option<String>,
     pub prompt: String,
     #[serde(default)]
@@ -451,6 +453,8 @@ pub async fn respond_with_agent(
     request: RespondRequest,
 ) -> Result<RespondResponse, String> {
     let message = agent
+        .clone()
+        .with_memory_session(request.session_id)
         .respond(&request.history, &request.prompt)
         .await
         .map_err(|error| error.to_string())?;
@@ -462,6 +466,8 @@ pub async fn respond_with_profiles(
     request: RespondRequest,
 ) -> Result<RespondResponse, String> {
     let message = profiles
+        .clone()
+        .with_memory_session(request.session_id)
         .respond(
             request.profile.as_deref(),
             &request.history,
@@ -487,6 +493,8 @@ pub async fn respond_stream_with_profiles(
     on_delta: &mut (dyn for<'delta> FnMut(&'delta CompletionDelta) + Send),
 ) -> Result<RespondResponse, String> {
     let message = profiles
+        .clone()
+        .with_memory_session(request.session_id)
         .respond_stream(
             request.profile.as_deref(),
             &request.history,
@@ -1066,8 +1074,13 @@ pub fn run() {
             update_provider,
             delete_provider
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Rynna desktop application");
+        .build(tauri::generate_context!())
+        .expect("failed to build Rynna desktop application")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                tauri::async_runtime::block_on(rynna_core::flush_memory_writes());
+            }
+        });
 }
 
 fn configured_provider_settings() -> Result<ProviderSettingsStore, String> {

@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+uuid.workspace = true
 rynna-mcp = { path = "../rynna-mcp" }
 rynna-memory-hindsight = { path = "../rynna-memory-hindsight" }
 rynna-config = { path = "../rynna-config" }

@@ -90,7 +90,17 @@ function finalizeResponse(messages: DisplayMessage[], message: Message): Display
   return [...collapsed, message];
 }
 
+// getRandomValues also works on self-hosted HTTP pages where randomUUID is unavailable.
+function newSessionId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export function App({ client }: AppProps) {
+  const sessionId = useRef<string | null>(null);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
@@ -288,6 +298,7 @@ export function App({ client }: AppProps) {
     setSelectedProfile(name);
     setAddingProfile(false);
     setMessages([]);
+    sessionId.current = null;
     setError(null);
   }
 
@@ -432,6 +443,7 @@ export function App({ client }: AppProps) {
       if (selectedProfile === selectedSettingsProfile) {
         setSelectedProfile(profiles.find((profile) => profile.name !== selectedSettingsProfile)?.name ?? null);
         setMessages([]);
+        sessionId.current = null;
       }
     } catch (profileError) {
       setError(
@@ -607,7 +619,9 @@ export function App({ client }: AppProps) {
     setMessages([...displayHistory, { role: 'user', content: prompt }]);
 
     try {
+      sessionId.current ??= newSessionId();
       const response = await client.respond({
+        session_id: sessionId.current,
         ...(selectedProfile ? { profile: selectedProfile } : {}),
         prompt,
         history,

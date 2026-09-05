@@ -722,12 +722,16 @@ impl ManagedContextStore {
 }
 
 pub mod memory;
-pub use memory::{MemoryError, MemoryProvider};
+pub use memory::{
+    MemoryConversation, MemoryError, MemoryMessage, MemoryProvider, flush_memory_writes,
+};
 
 #[derive(Clone)]
 pub struct Agent {
     tool_source: Option<Arc<dyn ToolSource>>,
     memory: Option<Arc<dyn MemoryProvider>>,
+    memory_session: Option<uuid::Uuid>,
+    retention_queue: memory::RetentionQueue,
     provider: Arc<dyn ModelProvider>,
     system_prompt: Arc<str>,
     tools: Arc<BTreeMap<String, Arc<dyn Tool>>>,
@@ -751,6 +755,8 @@ impl Agent {
             context_manager: Arc::new(ThresholdContextManager::default()),
             managed_contexts: Arc::new(Mutex::new(ManagedContextStore::default())),
             memory: None,
+            memory_session: None,
+            retention_queue: memory::RetentionQueue::default(),
             tool_source: None,
         }
     }
@@ -777,12 +783,22 @@ impl Agent {
             context_manager: Arc::new(ThresholdContextManager::default()),
             managed_contexts: Arc::new(Mutex::new(ManagedContextStore::default())),
             memory: None,
+            memory_session: None,
+            retention_queue: memory::RetentionQueue::default(),
             tool_source: None,
         })
     }
 
     pub fn with_memory_provider(mut self, memory: Option<Arc<dyn MemoryProvider>>) -> Self {
         self.memory = memory;
+        self.retention_queue = memory::RetentionQueue::default();
+        self
+    }
+
+    /// Use a caller-owned session ID to group memory across stateless requests.
+    /// Omission gives each response a fresh document.
+    pub fn with_memory_session(mut self, session_id: Option<uuid::Uuid>) -> Self {
+        self.memory_session = session_id;
         self
     }
 
@@ -986,18 +1002,15 @@ impl Agent {
                             .insert(messages[start..].to_vec());
                         final_message.provider_context = Some(ProviderContext::ManagedToken(token));
                     }
-                    if let Some(memory) = &self.memory
-                        && !matches!(
-                            tokio::time::timeout(
-                                std::time::Duration::from_secs(10),
-                                memory.retain(input, &final_message.content)
-                            )
-                            .await,
-                            Ok(Ok(()))
-                        )
-                    {
-                        tracing::warn!(
-                            "memory retention unavailable; response was not saved to memory"
+                    if let Some(memory) = &self.memory {
+                        self.retention_queue.enqueue(
+                            memory.clone(),
+                            MemoryConversation::completed(
+                                self.memory_session.unwrap_or_else(uuid::Uuid::new_v4),
+                                history,
+                                input,
+                                &final_message.content,
+                            ),
                         );
                     }
                     return Ok(final_message);
@@ -1153,7 +1166,16 @@ impl AgentProfiles {
             .get_mut(profile)
             .ok_or_else(|| ProfileError::UnknownProfile(profile.to_owned()))?;
         agent.memory = memory;
+        agent.retention_queue = memory::RetentionQueue::default();
         Ok(())
+    }
+
+    /// Assign a session to this request's snapshot without changing runtime profiles.
+    pub fn with_memory_session(mut self, session_id: Option<uuid::Uuid>) -> Self {
+        for (_, agent) in Arc::make_mut(&mut self.profiles).values_mut() {
+            agent.memory_session = session_id;
+        }
+        self
     }
 
     pub fn default_profile(&self) -> &str {

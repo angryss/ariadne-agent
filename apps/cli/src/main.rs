@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
         profiles.set_memory_provider(&profile.name, memory)?;
     }
 
-    match command {
+    let result = match command {
         Command::Run { prompt, output } => {
             run_once(&profiles, &default_profile, prompt, output).await
         }
@@ -162,7 +162,9 @@ async fn main() -> Result<()> {
             serve(profiles, bind, web_dir, provider_config, catalog).await
         }
         Command::Profiles { .. } => unreachable!("profiles returned before provider configuration"),
-    }
+    };
+    rynna_core::flush_memory_writes().await;
+    result
 }
 
 fn list_profiles(
@@ -423,6 +425,9 @@ async fn chat(profiles: &AgentProfiles, profile: &str) -> Result<()> {
         return chat_ui::run(profiles, profile, &model).await;
     }
 
+    let profiles = profiles
+        .clone()
+        .with_memory_session(Some(uuid::Uuid::new_v4()));
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let mut history = Vec::new();
